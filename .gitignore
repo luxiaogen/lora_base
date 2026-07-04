@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Training logs
+logs/
+*.log
+
+# Model weights
+*.pth
+*.pt
+*.ckpt
+*.bin
+
+# Datasets (too large for GitHub)
+*.npz
+*.tar
+*.zip
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Misc
+*.out
+*.err
+run.sh.bak
