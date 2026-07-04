@@ -19,6 +19,12 @@ echo "========================================="
 python main.py --config exps/dlora/imgr20.json 2>&1 | tee logs/shell_logs/imgr10_${TIMESTAMP}.log
 
 echo "========================================="
+echo "  Starting ImageNet-R T20 Experiment"
+echo "  Log: logs/shell_logs/imgr20_${TIMESTAMP}.log"
+echo "========================================="
+python main.py --config exps/dlora/imgr20.json 2>&1 | tee logs/shell_logs/imgr20_${TIMESTAMP}.log
+
+echo "========================================="
 echo "  Starting Cub T10 Experiment"
 echo "  Log: logs/shell_logs/cub10_${TIMESTAMP}.log"
 echo "========================================="
