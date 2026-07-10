@@ -78,7 +78,9 @@ class BaseLearner(object):
 
     def eval_task(self):
         y_pred, y_pred_with_task, y_true, y_pred_task, y_true_task = self._eval_cnn(self.test_loader)
+        # {'grouped': {'00-19': 93.93, '20-39': 97.1, '40-59': 95.41, 'new': 95.41, 'old': 95.37, 'total': 95.39}, 'top1': 95.39}
         cnn_accy = self._evaluate(y_pred, y_true, accuracy_matrix = True)
+        # {'grouped': {'00-19': 98.38, '20-39': 98.55, '40-59': 97.71, 'new': 97.71, 'old': 98.46, 'total': 98.21}, 'top1': 98.21}
         cnn_accy_with_task = self._evaluate(y_pred_with_task, y_true)
         cnn_accy_task = (y_pred_task == y_true_task).sum().item()/len(y_pred_task)
 

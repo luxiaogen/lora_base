@@ -29,7 +29,7 @@
     "scale": 20.0,
     "margin": 0.1,
     "num_workers": 8,
-    "ca": false,
+    "ca": true,
     "ca_lrate": 0.01,
     "logit_norm": 0.2,
     "use_slora": false,

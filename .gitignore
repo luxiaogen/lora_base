@@ -39,3 +39,7 @@ Thumbs.db
 *.out
 *.err
 run.sh.bak
+
+
+# vis
+visualizations/

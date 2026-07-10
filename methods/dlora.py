@@ -23,14 +23,25 @@ from models.losses import AngularPenaltySMLoss
 import re
 
 class Learner(BaseLearner):
+    # 让 methods/dlora.py 变成一个“可被子类替换组件”的基类
+    # 只替换网络和 attention,这就是最小改动、即插即用的“接口”
+    network_cls = MANet
+    attention_cls = Attention_LoRA
 
     def __init__(self, args):
         super().__init__(args)
-        self._network = MANet(args)
+
+
+        # self._network = MANet(args)
+        self._network = self.network_cls(args) # 调用具体的MANet
         for module in self._network.modules():
-            if isinstance(module, Attention_LoRA):
+            if isinstance(module, self.attention_cls):
                 module._init_params(args)
-            
+
+        # for module in self._network.modules():
+        #     if isinstance(module, Attention_LoRA):
+        #         module._init_params(args)
+
         self.args = args
         self.optim = args["optim"] # sgd
         self.EPSILON = args["EPSILON"] # 1e-8
@@ -63,6 +74,17 @@ class Learner(BaseLearner):
         self._old_class_covs = None
         self.acc_matrix = np.zeros((self.total_sessions, self.total_sessions))
 
+    def _iter_lora_modules(self):
+        for module in self._network.modules():
+            if isinstance(module, self.attention_cls):
+                yield module
+
+    def _before_lora_weight_init(self, train_loader):
+        return
+
+    def _extra_training_loss(self):
+        return None
+
     def after_task(self):
         self._old_network = self._network.copy().freeze()
         self._known_classes = self._total_classes
@@ -81,11 +103,12 @@ class Learner(BaseLearner):
         train_dataset = data_manager.get_dataset(np.arange(self._known_classes, self._total_classes), source='train', mode='train')
         self.train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True,
                                        num_workers=self.num_workers, pin_memory=True)
+        # 拿到所有已见类的 test set
         test_dataset = data_manager.get_dataset(np.arange(0, self._total_classes), source='test', mode='test')
-        self.test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False,
+        self.test_loader = DataLoader(test_dataset, batch_size=self.batch_size, shuffle=False,
                                       num_workers=self.num_workers, pin_memory=True)
-        
-        # Semantic Shift old embedding 
+
+        # Semantic Shift old embedding
         # if self._cur_task > 0 and self._old_network is not None:
         #     self._old_network.to(self._device)
 
@@ -95,7 +118,11 @@ class Learner(BaseLearner):
         self._compute_class_mean(data_manager, check_diff=False, oracle=False)
         if self._cur_task > 0 and self.args['ca'] is True:
             # CA
-            self._stage2_compact_classifier(self.task_sizes[-1])
+            # self._stage2_compact_classifier(self.task_sizes[-1])
+            self._stage2_compact_classifier(
+                self.task_sizes[-1],
+                ca_epochs=int(self.args.get("ca_epochs", 5)),
+            )
 
         # if self.args["use_RP"]:
         #     print("DLORA with random projection and analytic classifier")
@@ -103,28 +130,36 @@ class Learner(BaseLearner):
         #         p.requires_grad = False
         #     if self._cur_task == 0:
         #         self.setup_RP()
-            
+
         #     train_dataset_for_CPs = data_manager.get_dataset(np.arange(self._known_classes, self._total_classes),source="train", mode="test", )
-        #     self.train_loader_for_CPs = DataLoader(train_dataset_for_CPs, batch_size=self.batch_size, 
+        #     self.train_loader_for_CPs = DataLoader(train_dataset_for_CPs, batch_size=self.batch_size,
         #                                            shuffle=True, num_workers=self.num_workers)
         #     self.replace_fc(self.train_loader_for_CPs)
 
     def _train(self, train_loader, test_loader):
+        try:
+            current_task = self._network.module.numtask - 1 # 多卡
+        except AttributeError:
+            current_task = self._network.numtask - 1
+        current_classifier = "classifier_pool" + "." + str(current_task) + "."
+
         self._network.to(self._device)
         for name, param in self._network.named_parameters():
             param.requires_grad_(False) # 1. 先把主干 (ViT Backbone) 所有参数全部冻结
-            try: # 多 GPU 并行训练
-                if "classifier_pool" + "." + str(self._network.module.numtask - 1) in name:
-                    param.requires_grad_(True)  # 2. 仅将当前 Task 对应的分类头设为可训练
-            except: # 只有单卡
-                if "classifier_pool" + "." + str(self._network.numtask - 1) in name:
-                    param.requires_grad_(True) # [768,10] 'classifier_pool.0.weight'
+            # try: # 多 GPU 并行训练
+            #     if "classifier_pool" + "." + str(self._network.module.numtask - 1) in name:
+            #         param.requires_grad_(True)  # 2. 仅将当前 Task 对应的分类头设为可训练
+            # except: # 只有单卡
+            #     if "classifier_pool" + "." + str(self._network.numtask - 1) in name:
+            #         param.requires_grad_(True) # [768,10] 'classifier_pool.0.weight'
+            if name.startswith(current_classifier):
+                param.requires_grad_(True) # 将 分类头打开可训
 
-        for module in self._network.modules():
-            if isinstance(module, Attention_LoRA):
-                module.before_task(task=self._cur_task)
-                # module.cur_matrix.zero_(); module.n_cur_matrix = 0 # 初始化协方差矩阵
+        for module in self._iter_lora_modules():
+            module.before_task(task=self._cur_task)
+            # module.cur_matrix.zero_(); module.n_cur_matrix = 0 # 初始化协方差矩阵
 
+        # self._before_lora_weight_init(train_loader)
         # with torch.no_grad():
         #     for i, (_, inputs, targets) in enumerate(train_loader): # task0:1289张
         #         inputs, targets = inputs.to(self._device), targets.to(self._device)
@@ -134,13 +169,12 @@ class Learner(BaseLearner):
             self._network = torch.nn.DataParallel(self._network, self._multiple_gpus)
 
         kk = 0 # Transformer 层号计数器（0 到 11 层）
-        for module in self._network.modules():
-            if isinstance(module, Attention_LoRA):
-                print(f'********** LoRA weights initialization for layer {kk} **********')
-                module._init_lora_weight(task=self._cur_task, layer_idx=kk) # 初始化 LoRA 的 A B 矩阵权重
-                module.set_task_and_stage(task=self._cur_task, layer_idx=kk) # 设置可不可训练
-                # module.cur_matrix.zero_(); module.n_cur_matrix = 0
-                kk += 1
+        for module in self._iter_lora_modules():
+            print(f'********** LoRA weights initialization for layer {kk} **********')
+            module._init_lora_weight(task=self._cur_task, layer_idx=kk) # 初始化 LoRA 的 A B 矩阵权重
+            module.set_task_and_stage(task=self._cur_task, layer_idx=kk) # 设置可不可训练
+            # module.cur_matrix.zero_(); module.n_cur_matrix = 0
+            kk += 1
 
         ############################## set learning rates ##################################
         ############################## set learning rates ##################################
@@ -166,7 +200,7 @@ class Learner(BaseLearner):
         ############################## set learning rates ##################################
         ############################## set learning rates ##################################
         ############################## set learning rates ##################################
-                
+
         if self._cur_task==0:
             if self.optim == 'sgd':
                 optimizer = optim.SGD(params=param_groups)
@@ -203,11 +237,10 @@ class Learner(BaseLearner):
             #     inputs, targets = inputs.to(self._device), targets.to(self._device)
             #     self._network(inputs, get_cur_feat=True)
 
-            for module in self._network.modules():
-                if isinstance(module, Attention_LoRA):
-                    module.after_task(task=self._cur_task)
-                    # module._process_feature_mat() # 存储协方差矩阵
-                    # module.cur_matrix.zero_(); module.n_cur_matrix = 0
+            for module in self._iter_lora_modules():
+                module.after_task(task=self._cur_task)
+                # module._process_feature_mat() # 存储协方差矩阵
+                # module.cur_matrix.zero_(); module.n_cur_matrix = 0
         # # 主干权重融合了新的增量后，模型在处理图像时输出的真实特征已经发生了微调（Feature Shift）
         # with torch.no_grad():
         #     print('*'*10+'Extrace features for saving stastistics!'+'*'*10)
@@ -228,7 +261,7 @@ class Learner(BaseLearner):
             if param.requires_grad:
                 enabled.add(name)
         # logging.info(f"Parameters to be updated: {enabled}")
-
+        logging.info("Parameters to be updated (%d):\n  %s",len(enabled),"\n  ".join(sorted(enabled)),)
         prog_bar = tqdm(range(self.run_epoch))
         # 角度惩罚损失
         loss_cos:AngularPenaltySMLoss = AngularPenaltySMLoss(loss_type='cosface',s=self.scale,m=self.margin)
@@ -244,7 +277,7 @@ class Learner(BaseLearner):
                 mask = (targets >= self._known_classes).nonzero().view(-1)
                 inputs = torch.index_select(inputs, 0, mask)
                 targets = torch.index_select(targets, 0, mask)-self._known_classes
-                
+
                 ## random partition
                 # classes:torch.Tensor = torch.unique(targets)
                 # perm = classes[torch.randperm(len(classes), device=self._device)]
@@ -259,6 +292,11 @@ class Learner(BaseLearner):
                 output = self._network(inputs)
                 logits = output['logits']
                 loss=loss_cos(logits, targets)
+
+                ## mask_loss
+                extra_loss = self._extra_training_loss()
+                if extra_loss is not None:
+                    loss = loss + extra_loss
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -300,7 +338,7 @@ class Learner(BaseLearner):
                 #     loss1b, out1b = perturb_and_train(x2, y2, x1, y1)
                 #     logits = torch.cat([out1b, out2], dim=0); targets = torch.cat([y1, y2], dim=0)
                 #     loss = loss1b + loss2
-                
+
                 losses += loss.item()
 
                 _, preds = torch.max(logits, dim=1)
@@ -310,33 +348,106 @@ class Learner(BaseLearner):
             scheduler.step()
             train_acc = np.around(tensor2numpy(correct) * 100 / total, decimals=2)
             info = 'Task {}, Epoch {}/{} => Loss {:.3f}, Train_accy {:.2f}'.format(
-                self._cur_task, 
-                epoch + 1, 
-                self.run_epoch, 
-                losses / len(train_loader), 
+                self._cur_task,
+                epoch + 1,
+                self.run_epoch,
+                losses / len(train_loader),
                 train_acc
             )
             prog_bar.set_description(info)
-        
+
         # task train finished
         test_acc = self._compute_accuracy(self._network, test_loader)
+        # pre-merge / pre-CA Test_accy
         final_info = 'Task {}, Epoch {}/{} => Loss {:.3f}, Train_accy {:.2f}, Test_accy {:.2f}'.format(
-                self._cur_task, 
-                epoch + 1, 
-                self.run_epoch, 
-                losses / len(train_loader), 
+                self._cur_task,
+                epoch + 1,
+                self.run_epoch,
+                losses / len(train_loader),
                 train_acc,
                 test_acc,
             )
         logging.info(final_info)
+    """
+        Eval task stats: 00-19: 96.40 (443/460) | 20-39: 95.22 (438/460) | 40-59: 98.54 (453/460)
+        Eval total check: weighted_total=96.64 (1334/1380), macro_task_avg=96.72
+        
+        CNN top1 = weighted_total
+        每个 task 的准确率 = 具体 correct/total
+        macro_task_avg = 各 task accuracy 的简单平均
+    """
+    # def accuracy(self, y_pred, y_true, accuracy_matrix=False):
+    #     assert len(y_pred) == len(y_true), 'Data length error.'
+    #
+    #     y_pred = np.asarray(y_pred).reshape(-1)
+    #     y_true = np.asarray(y_true).reshape(-1)
+    #
+    #     all_acc = {}
+    #     total_correct = int((y_pred == y_true).sum()) # 总的预测正确数
+    #     total_num = len(y_true)
+    #     all_acc['total'] = np.around(total_correct * 100 / total_num, decimals=2)
+    #
+    #     i = 0
+    #     task_accs = []
+    #     task_stat_lines = []
+    #     # 每个 task block 的分组准确率 Eval task stats: 00-19: 96.40 (241/250) | 20-39: 95.22 (219/230) | 40-59: 98.54 (202/205)
+    #     for class_id in range(0, np.max(y_true), self.class_num):
+    #         idxes = np.where(
+    #             np.logical_and(y_true >= class_id, y_true < class_id + self.class_num)
+    #         )[0] # 找出真实标签属于当前 block|任务 的样本下标
+    #         if len(idxes) == 0:
+    #             continue
+    #
+    #         label = '{}-{}'.format(
+    #             str(class_id).rjust(2, '0'),
+    #             str(class_id + self.class_num - 1).rjust(2, '0')
+    #         )
+    #         # 当前 task block 中预测正确数量 / 当前 task block 样本总数
+    #         correct = int((y_pred[idxes] == y_true[idxes]).sum())
+    #         count = int(len(idxes))
+    #         acc = np.around(correct * 100 / count, decimals=2)
+    #
+    #         all_acc[label] = acc
+    #         task_accs.append(float(acc))
+    #         task_stat_lines.append(f'{label}: {acc:.2f} ({correct}/{count})')
+    #         # 行：被评估的 task block
+    #         # 列：训练到第几个 task
+    #         # 值：该 block 在当前模型下的准确率
+    #         if accuracy_matrix:
+    #             self.acc_matrix[i, self._cur_task] = all_acc[label]
+    #         i += 1
+    #
+    #     if accuracy_matrix and task_stat_lines:
+    #         macro_task_avg = np.around(np.mean(task_accs), decimals=2)
+    #         logging.info('Eval task stats: %s', ' | '.join(task_stat_lines))
+    #         logging.info(
+    #             'Eval total check: weighted_total=%.2f (%d/%d), macro_task_avg=%.2f',
+    #             all_acc['total'],
+    #             total_correct,
+    #             total_num,
+    #             macro_task_avg,
+    #         )
+    #
+    #     idxes = np.where(y_true < self._known_classes)[0]
+    #     all_acc['old'] = 0 if len(idxes) == 0 else np.around(
+    #         (y_pred[idxes] == y_true[idxes]).sum() * 100 / len(idxes),
+    #         decimals=2,
+    #     )
+    #
+    #     idxes = np.where(y_true >= self._known_classes)[0]
+    #     all_acc['new'] = np.around(
+    #         (y_pred[idxes] == y_true[idxes]).sum() * 100 / len(idxes),
+    #         decimals=2,
+    #     )
+    #
+    #     return all_acc
 
-
-    
     def accuracy(self, y_pred, y_true, accuracy_matrix = False):
         assert len(y_pred) == len(y_true), 'Data length error.'
+
         all_acc = {}
         all_acc['total'] = np.around((y_pred == y_true).sum()*100 / len(y_true), decimals=2)
-        
+
         i = 0
         # Grouped accuracy
         for class_id in range(0, np.max(y_true), self.class_num):
@@ -344,7 +455,7 @@ class Learner(BaseLearner):
             label = '{}-{}'.format(str(class_id).rjust(2, '0'), str(class_id+self.class_num-1).rjust(2, '0'))
             all_acc[label] = np.around((y_pred[idxes] == y_true[idxes]).sum()*100 / len(idxes), decimals=2)
             if accuracy_matrix:
-                self.acc_matrix[i, self._cur_task] = all_acc[label] 
+                self.acc_matrix[i, self._cur_task] = all_acc[label]
             i += 1
 
         # Old accuracy
@@ -361,6 +472,7 @@ class Learner(BaseLearner):
     def _evaluate(self, y_pred, y_true, accuracy_matrix=False):
         ret = {}
         # print(len(y_pred), len(y_true))
+        # {'00-19': 93.93, '20-39': 97.1, '40-59': 95.41, 'new': 95.41, 'old': 95.37, 'total': 95.39}
         grouped = self.accuracy(y_pred, y_true, accuracy_matrix=accuracy_matrix)
         ret['grouped'] = grouped
         ret['top1'] = grouped['total']
@@ -379,22 +491,23 @@ class Learner(BaseLearner):
             with torch.no_grad():
                 task_id = (targets//self.class_num).cpu()
                 y_true_task.append(task_id)
-                outputs = self._network.interface(inputs)
-
+                # 前向推理，不给真实 task id  | 全局 logits
+                outputs = self._network.interface(inputs) # [bs,C*num_task]
+            # topk1 [bs]
             predicts = torch.topk(outputs, k=self.topk, dim=1, largest=True, sorted=True)[1].view(-1)  # [bs, topk]
             y_pred_task.append((predicts//self.class_num).cpu())
-
-            outputs_with_task = torch.zeros_like(outputs)[:,:self.class_num]
-            for idx, i in enumerate(targets//self.class_num):
-                en, be = self.class_num*i, self.class_num*(i+1)
-                outputs_with_task[idx] = outputs[idx, en:be]
-            predicts_with_task = outputs_with_task.argmax(dim=1)
-            predicts_with_task = predicts_with_task + (targets//self.class_num)*self.class_num
+            # CNN top1 with task
+            outputs_with_task = torch.zeros_like(outputs)[:,:self.class_num] # 创建一个只装 20 类 logits 的矩阵
+            for idx, i in enumerate(targets//self.class_num): # 用真实标签算真实 task id
+                en, be = self.class_num*i, self.class_num*(i+1) # task1: en=20, be=40
+                outputs_with_task[idx] = outputs[idx, en:be] # idx -- 真实task标签 [bs,C]
+            predicts_with_task = outputs_with_task.argmax(dim=1) # [bs]
+            predicts_with_task = predicts_with_task + (targets//self.class_num)*self.class_num # 再加回 task 偏移量，变回全局类别编号
 
             y_pred.append(predicts.cpu().numpy())
             y_pred_with_task.append(predicts_with_task.cpu().numpy())
             y_true.append(targets.cpu().numpy())
-
+        # 转成 []
         return np.concatenate(y_pred), np.concatenate(y_pred_with_task), np.concatenate(y_true), torch.cat(y_pred_task), torch.cat(y_true_task)  # [N, topk]
 
     def _compute_accuracy(self, model, loader):
@@ -416,11 +529,12 @@ class Learner(BaseLearner):
         3. 特征快速校准（fc_only=True）：将伪特征直接送入分类头（跳过重型 ViT），通过 CrossEntropy Loss 微调分类头权重，拉平新旧分类头的得分响应，消除分类决策偏差
     """
     def _stage2_compact_classifier(self, task_size, ca_epochs=5):
+        ca_epochs = int(self.args.get("ca_epochs", 5))
         for p in self._network.classifier_pool[:self._cur_task+1].parameters():
             p.requires_grad=True
-            
+
         run_epochs = ca_epochs
-        crct_num = self._total_classes    
+        crct_num = self._total_classes
         param_list = [p for p in self._network.classifier_pool.parameters() if p.requires_grad]
         classifier_lr = self.args["ca_lrate"]
         network_params = [{'params': param_list, 'lr': classifier_lr,
@@ -439,7 +553,7 @@ class Learner(BaseLearner):
             sampled_data = []
             sampled_label = []
             num_sampled_pcls = 256
-        
+
             for c_id in range(crct_num):
                 t_id = c_id//task_size
                 decay = (t_id+1)/(self._cur_task+1)*0.1
@@ -449,7 +563,7 @@ class Learner(BaseLearner):
                 m = MultivariateNormal(cls_mean.float(), cls_cov.float())
 
                 sampled_data_single = m.sample(sample_shape=(num_sampled_pcls,))
-                sampled_data.append(sampled_data_single)                
+                sampled_data.append(sampled_data_single)
                 sampled_label.extend([c_id]*num_sampled_pcls)
 
             sampled_data = torch.cat(sampled_data, dim=0).float().to(self._device)
@@ -461,7 +575,7 @@ class Learner(BaseLearner):
             sf_indexes = torch.randperm(inputs.size(0))
             inputs = inputs[sf_indexes]
             targets = targets[sf_indexes]
-            
+
             for _iter in range(crct_num):
                 inp = inputs[_iter*num_sampled_pcls:(_iter+1)*num_sampled_pcls]
                 tgt = targets[_iter*num_sampled_pcls:(_iter+1)*num_sampled_pcls]
@@ -480,13 +594,13 @@ class Learner(BaseLearner):
                         prev_t_size += self.task_sizes[_ti]
                     per_task_norm = torch.cat(per_task_norm, dim=-1)
                     norms = per_task_norm.mean(dim=-1, keepdim=True)
-                        
+
                     norms_all = torch.norm(logits[:, :crct_num], p=2, dim=-1, keepdim=True) + 1e-7
                     decoupled_logits = torch.div(logits[:, :crct_num], norms) / self.logit_norm
                     loss = F.cross_entropy(decoupled_logits, tgt)
                 else:
                     loss = F.cross_entropy(logits[:, :crct_num] * self.args["scale"], tgt)
-                    
+
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
@@ -494,9 +608,13 @@ class Learner(BaseLearner):
 
             scheduler.step()
             # test_acc = self._compute_accuracy(self._network, self.test_loader)
-            test_acc = 0.0
-            info = 'CA Task {} => Loss {:.3f}, Test_accy {:.3f}'.format(
-                self._cur_task, losses/self._total_classes, test_acc)
+            # test_acc = 0.0
+            # info = 'CA Task {} => Loss {:.3f}, Test_accy {:.3f}'.format(
+            #     self._cur_task, losses/self._total_classes, test_acc)
+            info = (
+                'CA Task {} => Loss {:.3f} '
+                '(classifier alignment; final accuracy is logged after CA)'
+            ).format(self._cur_task, losses/self._total_classes)
             logging.info(info)
 
 
@@ -536,7 +654,7 @@ class Learner(BaseLearner):
         displacement = np.sum(np.tile(W_norm[:, :, None], [
             1, 1, DY.shape[1]]) * np.tile(DY[None, :, :], [W.shape[0], 1, 1]), axis=1)
         return displacement
-    
+
     def extract_features(self, trainloader, model, task_id = None):
         model = model.eval()
         embedding_list = []
@@ -553,7 +671,7 @@ class Learner(BaseLearner):
         embedding_list = torch.cat(embedding_list, dim=0)
         label_list = torch.cat(label_list, dim=0)
         return embedding_list, label_list
-    
+
     def _extract_vectors_adv(self, loader, old=False):
         if old:
             network = self._old_network
@@ -577,23 +695,23 @@ class Learner(BaseLearner):
         alpha2 = 10
         # Compute the mean of the diagonal elements
         diag_mean = torch.mean(torch.diagonal(cov))
-        
+
         # Create a copy of the covariance matrix with zeroed out diagonals
         off_diag = cov.clone()
         off_diag.fill_diagonal_(0.0)
-        
+
         # Compute the mean of the off-diagonal elements (non-zero entries)
         mask = off_diag != 0.0
         off_diag_mean = (off_diag * mask).sum() / mask.sum()
-        
+
         # Identity matrix
         iden = torch.eye(cov.size(0), device=cov.device)
-        
+
         # Shrink the covariance matrix
         cov_ = cov + (alpha1 * diag_mean * iden) + (alpha2 * off_diag_mean * (1 - iden))
-        
+
         return cov_
-    
+
     def _compute_class_invcov(self, data_manager):
         _class_invcovs = torch.zeros((self.class_num, self.feature_dim, self.feature_dim),device=self._device)
 
@@ -608,7 +726,7 @@ class Learner(BaseLearner):
             _class_invcovs[class_idx-self._known_classes, ...] = torch.linalg.pinv(class_cov).detach()
 
         return _class_invcovs
-    
+
 
     ###################################################################################################
     ###################################################################################################
@@ -659,13 +777,13 @@ class Learner(BaseLearner):
             onehot = torch.zeros(targets.shape[0], n_classes).to(targets.device)
             onehot.scatter_(dim=1, index=targets.long().view(-1, 1), value=1.0)
             return onehot
-        
+
         Y=target2onehot(label_list,self.total_classnum)
         if self.args['M']>0:
             Features_h=torch.nn.functional.relu(Features_f @ self._network.W_rand.cpu())
         else:
             Features_h=Features_f
-        self.Q=self.Q+Features_h.T @ Y 
+        self.Q=self.Q+Features_h.T @ Y
         self.G=self.G+Features_h.T @ Features_h
         ridge=self.optimise_ridge_parameter(Features_h,Y)
         Wo=torch.linalg.solve(self.G+ridge*torch.eye(self.G.size(dim=0)),self.Q).T #better nmerical stability than .inv
@@ -684,7 +802,7 @@ class Learner(BaseLearner):
         ridge=ridges[np.argmin(np.array(losses))]
         logging.info("Optimal lambda: "+str(ridge))
         return ridge
-    
+
     ###################################################################################################
     ###################################################################################################
     ###################################################################################################

@@ -22,7 +22,7 @@ class FrozenA_TrainableB(nn.Module):
         with torch.no_grad(): # 参数赋值不是推理/前向传播
             self.A.weight.copy_(A_init.to(self.A.weight.device, dtype=self.A.weight.dtype))
             self.B.weight.copy_(B_init.to(self.B.weight.device, dtype=self.B.weight.dtype))
-
+        # A B都训练
         for p in self.A.parameters(): 
             p.requires_grad_(False)
         for p in self.B.parameters():  
@@ -58,50 +58,54 @@ def _random_fixed_A_init(dim: int, r: int, device, dtype) -> torch.Tensor:
     Q, _ = torch.linalg.qr(M, mode="reduced")
     return Q.T.contiguous()  # (r, dim)
 
+def _kaiming_A_init(dim: int, r: int, device, dtype) -> torch.Tensor:
+    A = torch.empty(r, dim, device=device, dtype=dtype)
+    nn.init.kaiming_uniform_(A, a=math.sqrt(5))
+    return A
 
 def _zero_B_init(dim: int, r: int, device, dtype) -> torch.Tensor:
     return torch.zeros(dim, r, device=device, dtype=dtype)
 
 
-# def _energy_merge(W0:torch.Tensor,
-#                   B_new: torch.Tensor,
-#                   A_fixed: torch.Tensor,
-#                   prev_matrix: torch.Tensor,
-#                   cur_matrix: torch.Tensor,
-#                   gamma:float,
-#                   eps: float, out_type='merge') -> torch.Tensor:
-#
-#     device = B_new.device
-#     dtype = B_new.dtype
-#     r = A_fixed.shape[0]
-#
-#     P_prev = prev_matrix.to(device=device, dtype=dtype)
-#     P_cur = cur_matrix.to(device=device, dtype=dtype)
-#
-#     out_cols = []
-#     eta_list = []
-#     for i in range(r):
-#         if out_type == 'merge':
-#             a_i = A_fixed[i].unsqueeze(0)
-#             g_prev = (a_i @ P_prev @ a_i.T).clamp_min(0.0).squeeze() ## 1
-#             g_cur = (a_i @ P_cur @ a_i.T).clamp_min(0.0).squeeze()
-#
-#             eta = g_prev / (g_prev + float(gamma) * g_cur + eps)
-#             col = (1.0 - eta) * B_new[:, i]
-#             eta_list.append(eta)
-#
-#         elif out_type == 'add':  #'add'
-#             col = B_new[:, i]
-#         out_cols.append(col) # 求得G的缩放矩阵
-#
-#     if out_type == 'merge':
-#         eta_list = torch.stack(eta_list)
-#         msg=('Merging weights: mean:{:.2f} // max:{:.2f} // min:{:.2f}'.format(
-#             eta_list.mean().item(), eta_list.max().item(), eta_list.min().item()))
-#         logging.info(msg)
-#
-#     out_cols = torch.stack(out_cols, dim=1).contiguous()
-#     return out_cols @ A_fixed  # (dim_out, dim_in)
+def _energy_merge(W0:torch.Tensor,
+                  B_new: torch.Tensor,
+                  A_fixed: torch.Tensor,
+                  prev_matrix: torch.Tensor,
+                  cur_matrix: torch.Tensor,
+                  gamma:float,
+                  eps: float, out_type='merge') -> torch.Tensor:
+
+    device = B_new.device
+    dtype = B_new.dtype
+    r = A_fixed.shape[0]
+
+    P_prev = prev_matrix.to(device=device, dtype=dtype)
+    P_cur = cur_matrix.to(device=device, dtype=dtype)
+
+    out_cols = []
+    eta_list = []
+    for i in range(r):
+        if out_type == 'merge':
+            a_i = A_fixed[i].unsqueeze(0)
+            g_prev = (a_i @ P_prev @ a_i.T).clamp_min(0.0).squeeze() ## 1
+            g_cur = (a_i @ P_cur @ a_i.T).clamp_min(0.0).squeeze()
+
+            eta = g_prev / (g_prev + float(gamma) * g_cur + eps)
+            col = (1.0 - eta) * B_new[:, i]
+            eta_list.append(eta)
+
+        elif out_type == 'add':  #'add'
+            col = B_new[:, i]
+        out_cols.append(col) # 求得G的缩放矩阵
+
+    if out_type == 'merge':
+        eta_list = torch.stack(eta_list)
+        msg=('Merging weights: mean:{:.2f} // max:{:.2f} // min:{:.2f}'.format(
+            eta_list.mean().item(), eta_list.max().item(), eta_list.min().item()))
+        logging.info(msg)
+
+    out_cols = torch.stack(out_cols, dim=1).contiguous()
+    return out_cols @ A_fixed  # (dim_out, dim_in)
 
 
 # def drift_regularization(A_fixed: torch.Tensor, B_new: torch.Tensor, ## A:r, D
@@ -402,7 +406,7 @@ class Attention_LoRA(nn.Module):
 
     def _init_lora_weight(self, task, layer_idx:int=0):
 
-        lora_init_scale = 3.0        
+        # lora_init_scale = 3.0
         # M_cur, M_prev = self.cur_matrix, self.prev_matrix # 协方差矩阵
         # total_matrix = M_cur + M_prev # 累计协方差矩阵
         # U, S, V = torch.linalg.svd(total_matrix)
@@ -415,49 +419,3 @@ class Attention_LoRA(nn.Module):
             # if task >= 1:
             #     self.S_lora[task].A.weight.data.copy_(self.S_lora[task-1].A.weight.data)
             #     self.S_lora[task].B.weight.data.copy_(self.S_lora[task-1].B.weight.data)
-
-        # if self.use_slora or self.use_plora:
-        #     s_rank = self.rank  # A
-        #     self.S_lora[task].A.weight.data.copy_(U[:, :s_rank].T / math.sqrt(lora_init_scale))
-        
-        # if task == 0:
-        #     self.P_lora[task].A.weight.data.zero_()
-        # else:
-        #     def init_each():
-        #         M_cur, M_prev = self.cur_matrix, self.prev_matrix
-        #         p_rank = self.p_rank
-        #
-        #         def _get_L(M, eps:float = 1e-12, max_tries=100):
-        #             for i in range(max_tries):
-        #                 try:
-        #                     return eps, torch.linalg.cholesky(M)
-        #                 except RuntimeError:
-        #                     M = M + eps * torch.eye(M.size(0), device=M.device)
-        #                     eps *= 10
-        #             raise RuntimeError("Matrix not SPD even after regularization")
-        #
-        #         eps, L = _get_L(M_prev) ## M = L @ L.T
-        #         print('Regularization term for Cholesky: {:.2e}'.format(eps))
-        #         A = torch.linalg.inv(L) @ M_cur @ torch.linalg.inv(L.T)
-        #         V_res, S_res, _ = torch.linalg.svd(A)
-        #
-        #         V_res_top = V_res[:, :p_rank]
-        #         U_res = torch.linalg.inv(L.T) @ V_res_top
-        #         U_res, _ = torch.linalg.qr(U_res)
-        #
-        #         ## print optimal values
-        #         cur_score = torch.diag(U_res[:, :p_rank].T @ M_cur @ U_res[:, :p_rank]).clamp(min=1e-8)/torch.trace(M_cur)
-        #         prev_score = torch.diag(U_res[:, :p_rank].T @ M_prev @ U_res[:, :p_rank]).clamp(min=1e-8)/torch.trace(M_prev)
-        #         ratio = cur_score.sum() / prev_score.sum()
-        #         msg="Cur:{:.3f}, Prev:{:.3f}, Ratio:{:.3f}".format(
-        #             cur_score.sum().item(),prev_score.sum().item(),ratio.item())
-        #         logging.info(msg)
-        #
-        #         self.P_lora[task].A.weight.data.copy_(U_res[:, :p_rank].T / math.sqrt(lora_init_scale))
-        #
-        #     init_each()
-        
-    # def _process_feature_mat(self):
-    #
-    #     M_cur, M_prev = self.cur_matrix, self.prev_matrix
-    #     self.prev_matrix = self.prev_matrix + deepcopy(M_cur)

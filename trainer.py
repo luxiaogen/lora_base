@@ -107,9 +107,14 @@ def _train(args):
         cnn_curve['top1'].append(cnn_accy['top1'])
         cnn_curve_with_task['top1'].append(cnn_accy_with_task['top1'])
         cnn_curve_task['top1'].append(cnn_accy_task)
+        # 不知道 task id，在所有已见类里选
         logging.info('CNN top1 curve: {}'.format(cnn_curve['top1']))
-        logging.info('CNN top1 with task curve: {}'.format(cnn_curve_with_task['top1']))
-        logging.info('CNN top1 task curve: {}'.format(cnn_curve_task['top1']))
+        # 知道真实 task id，只在该 task 的类里选
+        logging.info('CNN top1 with task curve: {}'.format(cnn_curve_with_task['top1'])) # 已知 Task-ID 时的局部准确率
+        # logging.info('CNN top1 task curve: {}'.format(cnn_curve_task['top1']))
+        task_pred_curve = [round(acc * 100, 2) for acc in cnn_curve_task['top1']]
+        task_pred_avg = round(float(np.mean(cnn_curve_task['top1']) * 100.0), 2)
+        logging.info('Task Prediction Accuracy curve (%): {}'.format(task_pred_curve))
 
         """
             Forgetting 0.0235 →平均而言，历史旧 Task 的准确率相比各自的历史最高点只下降了 2.35%（抗遗忘性能优秀）
@@ -130,8 +135,12 @@ def _train(args):
     logging.info('Average Accuracy: {}'.format(np.mean(cnn_curve['top1'])))
     logging.info('Last Accuracy: {}'.format(cnn_curve['top1'][-1]))
 
-    # 加这两行
-    logging.info('Task Prediction Accuracy curve: {}'.format(cnn_curve_task['top1']))
+    #
+    # task_pred_curve = [round(acc * 100, 2) for acc in cnn_curve_task['top1']]
+    # task_pred_avg = round(float(np.mean(cnn_curve_task['top1']) * 100.0), 2)
+    # logging.info('Task Prediction Accuracy curve (%): {}'.format(task_pred_curve))
+    logging.info('Task Prediction Accuracy average (%): {:.2f}'.format(task_pred_avg))
+    # logging.info('Task Prediction Accuracy curve: {}'.format(cnn_curve_task['top1']))
     logging.info('Final Task Prediction Accuracy: {:.2f}'.format(cnn_curve_task['top1'][-1]))
 
 def _set_device(args):

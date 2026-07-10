@@ -1,5 +1,5 @@
 {
-    "prefix": "",
+    "prefix": "idea1_frlora_init_accum",
     "device": "0",
     "dataset": "CUB",
     "data_path": "/home/shengqin/ds_and_pretrain/ds/cub",
@@ -9,7 +9,7 @@
     "shuffle": true,
     "init_cls": 20,
     "increment": 20,
-    "model_name": "dLoRA",
+    "model_name": "lora_init_accum",
     "embd_dim" : 768,
     "num_heads": 12,
     "total_sessions" : 10,
@@ -33,5 +33,7 @@
     "ca_lrate": 0.01,
     "logit_norm": 0.2,
     "use_slora": false,
-    "use_plora": false
+    "use_plora": false,
+    "track_accumulated_delta": true,
+    "residual_scale": 0.25
 }
