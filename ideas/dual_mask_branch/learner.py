@@ -8,10 +8,10 @@ from models.losses import AngularPenaltySMLoss
 from .attention import Attention_LoRA
 from .network import MANet
 
-
 class Learner(DLoraLearner):
     network_cls = MANet
     attention_cls = Attention_LoRA
+
     # 微调的是当前 task 正在训练的 LoRA 参数 | 惩罚 safe_delta 在 W0 重要区域太大 | safe_delta 在动态 conflict 区域太大
     def _extra_training_loss(self):
         reg_weight = float(self.args.get("dual_mask_reg_weight", 0.0)) # 0.01

@@ -18,9 +18,11 @@ class MANet(nn.Module):
 
         model_kwargs = dict(
             patch_size=16,
-            embed_dim=768,
+            # embed_dim=768,
+            embed_dim=args["embd_dim"],
             depth=12,
-            num_heads=12,
+            # num_heads=12,
+            num_heads=args.get("num_heads", 12),
             n_tasks=args["total_sessions"],
             rank=args["rank"],
             attn_fn=Attention_LoRA,

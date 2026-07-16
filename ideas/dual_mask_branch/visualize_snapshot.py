@@ -134,11 +134,11 @@ def plot_snapshot(snapshot_path, output=None, max_points=260, seed=0):
         ax.set_title(title, fontsize=11, fontweight="bold")
         ax.set_xlabel("input hidden dimension", fontsize=9)
         ax.set_ylabel("qkv output dimension", fontsize=9)
-        for yy, label in [(1.0 / 3.0, "K"), (2.0 / 3.0, "V")]:
+        for yy in (1.0 / 3.0, 2.0 / 3.0):
             ax.axhline(yy, color="#BBBBBB", linewidth=0.8, linestyle="--")
-        ax.text(0.015, 0.17, "Q", fontsize=9, color="#666666")
+        ax.text(0.015, 0.84, "Q", fontsize=9, color="#666666")
         ax.text(0.015, 0.50, "K", fontsize=9, color="#666666")
-        ax.text(0.015, 0.84, "V", fontsize=9, color="#666666")
+        ax.text(0.015, 0.17, "V", fontsize=9, color="#666666")
 
     def draw_partition(ax):
         ax.imshow(
@@ -171,7 +171,7 @@ def plot_snapshot(snapshot_path, output=None, max_points=260, seed=0):
         )
 
     ax1 = fig.add_subplot(gs[0, 0])
-    setup_space(ax1, "1) W0 space partition\nred = protected, blue = plastic")
+    setup_space(ax1, "1) Frozen W_pre partition\nred = protected, blue = plastic")
     draw_partition(ax1)
 
     ax2 = fig.add_subplot(gs[0, 1])
@@ -202,7 +202,7 @@ def plot_snapshot(snapshot_path, output=None, max_points=260, seed=0):
     ax5.set_title("5) Weight combination rule", fontsize=11, fontweight="bold", pad=8)
     flow = [
         ("raw\nBA", "raw LoRA"),
-        ("protect\ngate", "1 - M_W0"),
+        ("protect\ngate", "1 - alpha M_pre"),
         ("conflict\ngate", "1 - M_conf"),
         ("safe\ndelta", "masked BA"),
         ("merge", "W = W + safe delta"),
@@ -246,7 +246,8 @@ def plot_snapshot(snapshot_path, output=None, max_points=260, seed=0):
     ax5.text(
         0.50,
         0.08,
-        "safe delta = BA * (1 - M_W0) * (1 - M_conf)",
+        "S: gamma_s BA_s * (1-alpha M_pre) * (1-beta M_conf_s)\n"
+        "P: gamma_p BA_p * M_plastic * (1-beta M_conf_p)",
         ha="center",
         fontsize=10,
         color="#333333",
@@ -278,7 +279,7 @@ def plot_snapshot(snapshot_path, output=None, max_points=260, seed=0):
     ax7 = fig.add_subplot(gs[1, 3])
     ax7.axis("off")
     legend_items = [
-        Line2D([0], [0], marker="s", color="none", markerfacecolor="#FF6B6B", alpha=0.45, markersize=12, label="protected W0 region"),
+        Line2D([0], [0], marker="s", color="none", markerfacecolor="#FF6B6B", alpha=0.45, markersize=12, label="protected W_pre region"),
         Line2D([0], [0], marker="s", color="none", markerfacecolor="#EAF5FF", markersize=12, label="plastic region"),
         Line2D([0], [0], marker="o", color="none", markerfacecolor="#1F77B4", markersize=8, label="kept LoRA update"),
         Line2D([0], [0], marker="o", color="none", markerfacecolor="#D62728", markersize=8, label="suppressed conflict"),
@@ -287,7 +288,7 @@ def plot_snapshot(snapshot_path, output=None, max_points=260, seed=0):
     message = (
         "\nKey message:\n"
         "LoRA can still learn in plastic regions,\n"
-        "but updates overlapping important W0\n"
+        "but updates overlapping important W_pre\n"
         "entries are removed before merging.\n\n"
         "Total removed: {:.1f}%\n\n"
         "Final merge:\n"

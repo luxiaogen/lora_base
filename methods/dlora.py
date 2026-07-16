@@ -21,6 +21,8 @@ from torch.distributions.multivariate_normal import MultivariateNormal
 from utils.toolkit import count_parameters
 from models.losses import AngularPenaltySMLoss
 import re
+from contextlib import ExitStack
+
 
 class Learner(BaseLearner):
     # 让 methods/dlora.py 变成一个“可被子类替换组件”的基类
@@ -44,14 +46,14 @@ class Learner(BaseLearner):
 
         self.args = args
         self.optim = args["optim"] # sgd
-        self.EPSILON = args["EPSILON"] # 1e-8
+        # self.EPSILON = args["EPSILON"] # 1e-8
         self.init_epoch = args["init_epoch"] # 20
         self.init_lr = args["init_lr"]
-        self.init_lr_decay = args["init_lr_decay"]
+        # self.init_lr_decay = args["init_lr_decay"]
         self.init_weight_decay = args["init_weight_decay"]
         self.epochs = args["epochs"] # 20
         self.lrate = args["lrate"]
-        self.lrate_decay = args["lrate_decay"]
+        # self.lrate_decay = args["lrate_decay"]
         self.batch_size = args["batch_size"]
         self.weight_decay = args["weight_decay"]
         self.num_workers = args["num_workers"]
@@ -74,6 +76,12 @@ class Learner(BaseLearner):
         self._old_class_covs = None
         self.acc_matrix = np.zeros((self.total_sessions, self.total_sessions))
 
+        self._w0_class_means = {}
+        self._w0_competence = 0.0
+        self._w0_accuracy_curve = []
+        self._feature_drift_curve = []
+        self._weight_drift_curve = []
+
     def _iter_lora_modules(self):
         for module in self._network.modules():
             if isinstance(module, self.attention_cls):
@@ -85,8 +93,171 @@ class Learner(BaseLearner):
     def _extra_training_loss(self):
         return None
 
+    #######################################
+    def _backward_and_step(self, task_loss, extra_loss, optimizer, output, targets):
+        """Optimization extension point used by experimental learners."""
+        loss = task_loss if extra_loss is None else task_loss + extra_loss
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        optimizer.step()
+        return loss
+    #######################################
+
+    ###########################
+    """ 
+        把所有 Transformer 层的 LoRA 模块同时切换到“预训练锚点模式”，并在 with 结束后自动恢复原状态。 
+        1. 遍历全部 LoRA Attention 层
+        2. 每层进入 use_pretrained_anchor() 状态
+        3. 整个网络此时按 W_pre / W0 anchor 方式前向
+        4. 提取 feature
+        5. 离开 with 后，所有层恢复原来的当前任务状态
+    """
+    def _pretrained_anchor_context(self):
+        stack = ExitStack()
+        for module in self._iter_lora_modules():
+            stack.enter_context(module.use_pretrained_anchor())
+        return stack
+    """
+        把 loader 里的所有当前任务样本，用冻结的预训练锚点模型提取特征，并连同样本编号、标签一起保存下来 
+            loader 中所有样本
+                ↓
+            切到 eval 模式
+                ↓
+            进入 pretrained anchor context
+                ↓
+            用网络提取 feature vector
+                ↓
+            保存 index、feature、label
+                ↓
+            拼成完整张量并返回
+    """
+    def _collect_anchor_features(self, loader):
+        was_training = self._network.training
+        self._network.eval()
+        indices, features, targets = [], [], []
+        with self._pretrained_anchor_context(), torch.no_grad(): # 应该临时让网络使用预训练锚点 W_pre / W0 + 不建反向图，不计算梯度，不训练参数
+            for batch_indices, inputs, batch_targets in loader:
+                vectors = self._network.extract_vector(inputs.to(self._device)) # 图片 → ViT / W_pre → 768 维 feature
+                indices.append(batch_indices.detach().cpu()) # 样本编号
+                features.append(vectors.detach().cpu()) # W_pre 特征
+                targets.append(batch_targets.detach().cpu()) # 真实标签
+        if was_training:
+            self._network.train()
+        return torch.cat(indices), torch.cat(features), torch.cat(targets)
+    # 测量 W_pre competence
+    def _prepare_w0_prototypes(self, loader):
+        from ideas.dual_mask_branch.metrics import split_prototype_competence
+        # 训练集中的特征
+        indices, features, targets = self._collect_anchor_features(loader)
+        # 使用当前任务训练样本构建类别原型，并做确定性 holdout
+        competence, prototypes, class_ids = split_prototype_competence(
+            features,
+            targets,
+            indices,
+            holdout_mod=int(self.args.get("dual_mask_competence_holdout_mod", 5)),
+        )
+        # 使用当前任务训练样本构建类别原型，并做确定性 holdout
+        self._w0_competence = competence
+        for prototype, class_id in zip(prototypes, class_ids):
+            self._w0_class_means[int(class_id.item())] = prototype.cpu()
+        for module in self._iter_lora_modules():
+            module.set_pretrained_competence(competence) # 确保只使用 W_pre | W_pre 越强，保护越强、Private rank 越小
+        first_module = next(self._iter_lora_modules())
+        logging.info(
+            "Task %s W_pre train-only competence: %.2f%%, importance_coverage=%.3f, "
+            "protect_strength=%.3f, private_rank=%s",
+            self._cur_task,
+            competence * 100.0,
+            first_module.effective_energy_coverage,
+            first_module.effective_protect_strength,
+            first_module.current_private_rank,
+        ) # Task 0 W_pre train-only competence: 96.95%, importance_coverage=0.942, protect_strength=0.882, private_rank=9
+
+    def eval_w0_task(self):
+        if not self._w0_class_means:
+            return None
+
+        class_ids = torch.tensor(
+            sorted(self._w0_class_means),
+            device=self._device,
+            dtype=torch.long,
+        )
+        prototypes = torch.stack(
+            [self._w0_class_means[int(class_id)] for class_id in class_ids.cpu()]
+        ).to(self._device) # [C*t,768]
+        correct, total = 0, 0
+        was_training = self._network.training
+        self._network.eval()
+        with self._pretrained_anchor_context(), torch.no_grad():
+            for _, inputs, targets in self.test_loader:
+                features = self._network.extract_vector(inputs.to(self._device))
+                logits = F.normalize(features, dim=1) @ F.normalize(prototypes, dim=1).T
+                predictions = class_ids[logits.argmax(dim=1)]
+                targets = targets.to(self._device)
+                correct += int((predictions == targets).sum().item())
+                total += targets.numel()
+        if was_training:
+            self._network.train()
+        accuracy = 100.0 * correct / max(total, 1)
+        self._w0_accuracy_curve.append(accuracy)
+        return accuracy
+
+    def _measure_pretrained_drift(self, loader):
+        max_batches = max(1, int(self.args.get("dual_mask_metric_batches", 4)))
+        batches = []
+        for batch_id, (_, inputs, _) in enumerate(loader):
+            if batch_id >= max_batches:
+                break
+            batches.append(inputs)
+
+        was_training = self._network.training
+        self._network.eval()
+        current_features = []
+        with torch.no_grad():
+            for inputs in batches:
+                current_features.append(
+                    self._network.extract_vector(inputs.to(self._device)).detach()
+                )
+
+        anchor_features = []
+        with self._pretrained_anchor_context(), torch.no_grad():
+            for inputs in batches:
+                anchor_features.append(
+                    self._network.extract_vector(inputs.to(self._device)).detach()
+                )
+        if was_training:
+            self._network.train()
+
+        current_features = torch.cat(current_features)
+        anchor_features = torch.cat(anchor_features)
+        feature_drift = float(
+            (1.0 - F.cosine_similarity(current_features, anchor_features, dim=1))
+            .mean()
+            .item()
+        )
+        weight_drifts = [module.relative_weight_drift() for module in self._iter_lora_modules()]
+        mean_weight_drift = float(np.mean(weight_drifts))
+        max_weight_drift = float(np.max(weight_drifts))
+        self._feature_drift_curve.append(feature_drift)
+        self._weight_drift_curve.append(mean_weight_drift)
+        logging.info(
+            "Task %s W_pre drift: feature_cosine=%.6f, weight_relative_mean=%.6f, "
+            "weight_relative_max=%.6f",
+            self._cur_task,
+            feature_drift,
+            mean_weight_drift,
+            max_weight_drift,
+        )
+
+    ###################################
+
+
+
     def after_task(self):
-        self._old_network = self._network.copy().freeze()
+        if bool(self.args.get("retain_old_network", False)):
+            self._old_network = self._network.copy().freeze()
+        else:
+            self._old_network = None
         self._known_classes = self._total_classes
         logging.info('Exemplar size: {}'.format(self.exemplar_size))
         self._old_class_covs = None
@@ -102,17 +273,35 @@ class Learner(BaseLearner):
 
         train_dataset = data_manager.get_dataset(np.arange(self._known_classes, self._total_classes), source='train', mode='train')
         self.train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True,
-                                       num_workers=self.num_workers, pin_memory=True)
+                                       num_workers=self.num_workers, pin_memory=True) # 随机增强视图：用于优化 LoRA
         # 拿到所有已见类的 test set
         test_dataset = data_manager.get_dataset(np.arange(0, self._total_classes), source='test', mode='test')
         self.test_loader = DataLoader(test_dataset, batch_size=self.batch_size, shuffle=False,
                                       num_workers=self.num_workers, pin_memory=True)
+
+
+        track_w0 = bool(self.args.get("dual_mask_track_w0_metrics", False))
+        # 开启参数自适应 --- 也就是使用训练集测试W0原型的能力
+        competence_adaptive = bool(self.args.get("dual_mask_competence_adaptive", False))
+        if track_w0 or competence_adaptive:
+            w0_dataset = data_manager.get_dataset( # 所有训练样本，顺序固定  | 确定性测试视图：用于判断冻结 W0 的原始能力
+                np.arange(self._known_classes, self._total_classes),
+                source='train', # 用训练集样本，但模拟最终测试时的输入方式，评估 W0 的原始能力
+                mode='test', # 同一批训练图，但用测试预处理 | e.g. 固定 resize / center crop
+            ) # 946
+            self.w0_loader = DataLoader(w0_dataset,batch_size=self.batch_size,shuffle=False,num_workers=self.num_workers,pin_memory=True,)
+            self._network.to(self._device)
+            self._prepare_w0_prototypes(self.w0_loader)
+
 
         # Semantic Shift old embedding
         # if self._cur_task > 0 and self._old_network is not None:
         #     self._old_network.to(self._device)
 
         self._train(self.train_loader, self.test_loader)
+
+        if track_w0:
+            self._measure_pretrained_drift(self.w0_loader)
 
         # update mean and cov and classifier alignment
         self._compute_class_mean(data_manager, check_diff=False, oracle=False)
@@ -160,6 +349,7 @@ class Learner(BaseLearner):
             # module.cur_matrix.zero_(); module.n_cur_matrix = 0 # 初始化协方差矩阵
 
         # self._before_lora_weight_init(train_loader)
+        self._before_lora_weight_init(train_loader)
         # with torch.no_grad():
         #     for i, (_, inputs, targets) in enumerate(train_loader): # task0:1289张
         #         inputs, targets = inputs.to(self._device), targets.to(self._device)
@@ -172,7 +362,7 @@ class Learner(BaseLearner):
         for module in self._iter_lora_modules():
             print(f'********** LoRA weights initialization for layer {kk} **********')
             module._init_lora_weight(task=self._cur_task, layer_idx=kk) # 初始化 LoRA 的 A B 矩阵权重
-            module.set_task_and_stage(task=self._cur_task, layer_idx=kk) # 设置可不可训练
+            module.set_task_and_stage(task=self._cur_task, layer_idx=kk) # 设置lora可不可训练
             # module.cur_matrix.zero_(); module.n_cur_matrix = 0
             kk += 1
 
@@ -291,16 +481,24 @@ class Learner(BaseLearner):
                 #     (min(g1_idx.shape[0], g2_idx.shape[0]) == 0):
                 output = self._network(inputs)
                 logits = output['logits']
-                loss=loss_cos(logits, targets)
+                # loss=loss_cos(logits, targets)
+                task_loss=loss_cos(logits, targets)
 
                 ## mask_loss
                 extra_loss = self._extra_training_loss()
-                if extra_loss is not None:
-                    loss = loss + extra_loss
-
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+                # if extra_loss is not None:
+                #     loss = loss + extra_loss
+                #
+                # optimizer.zero_grad()
+                # loss.backward()
+                # optimizer.step()
+                loss = self._backward_and_step(
+                    task_loss,
+                    extra_loss,
+                    optimizer,
+                    output,
+                    targets,
+                )
 
                 ## optimization -- (meta-training)
                 # else: # 使用GAO

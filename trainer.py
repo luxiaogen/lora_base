@@ -90,6 +90,7 @@ def _train(args):
 
 
     cnn_curve, cnn_curve_with_task, nme_curve, cnn_curve_task = {'top1': []}, {'top1': []}, {'top1': []}, {'top1': []}
+    w0_curve = []
     for task_id in range(data_manager.nb_tasks):
         logging.info('All params: {}'.format(count_parameters(model._network)))
         time_start = time.time()
@@ -98,6 +99,13 @@ def _train(args):
         logging.info('Time:{}'.format(time_end - time_start))
         time_start = time.time()
         cnn_accy, cnn_accy_with_task, nme_accy, cnn_accy_task = model.eval_task()
+
+        if bool(args.get('dual_mask_track_w0_metrics', False)):
+            w0_accuracy = model.eval_w0_task()
+            if w0_accuracy is not None:
+                w0_curve.append(round(w0_accuracy, 2))
+                logging.info('W_pre-only NCM top1 curve: {}'.format(w0_curve))
+
         time_end = time.time()
         logging.info('Time:{}'.format(time_end - time_start))
         # raise Exception
@@ -135,20 +143,34 @@ def _train(args):
     logging.info('Average Accuracy: {}'.format(np.mean(cnn_curve['top1'])))
     logging.info('Last Accuracy: {}'.format(cnn_curve['top1'][-1]))
 
+    if w0_curve:
+        logging.info('W_pre-only NCM Average Accuracy: {}'.format(np.mean(w0_curve)))
+        logging.info('W_pre-only NCM Last Accuracy: {}'.format(w0_curve[-1]))
+
     #
     # task_pred_curve = [round(acc * 100, 2) for acc in cnn_curve_task['top1']]
     # task_pred_avg = round(float(np.mean(cnn_curve_task['top1']) * 100.0), 2)
     # logging.info('Task Prediction Accuracy curve (%): {}'.format(task_pred_curve))
     logging.info('Task Prediction Accuracy average (%): {:.2f}'.format(task_pred_avg))
     # logging.info('Task Prediction Accuracy curve: {}'.format(cnn_curve_task['top1']))
-    logging.info('Final Task Prediction Accuracy: {:.2f}'.format(cnn_curve_task['top1'][-1]))
+    # logging.info('Final Task Prediction Accuracy: {:.2f}'.format(cnn_curve_task['top1'][-1]))
+    logging.info( 'Final Task Prediction Accuracy (%): {:.2f}'.format( cnn_curve_task['top1'][-1] * 100.0))
+
+# def _resolve_devices(device_values):
+#     devices = []
+#     for value in device_values:
+#         if str(value) == '-1':
+#             devices.append(torch.device('cpu'))
+#         else:
+#             devices.append(torch.device('cuda:{}'.format(value)))
+#     return devices
 
 def _set_device(args):
     device_type = args['device']
     gpus = []
 
     for device in device_type:
-        if device_type == -1:
+        if str(device) == '-1':
             device = torch.device('cpu')
         else:
             device = torch.device('cuda:{}'.format(device))
@@ -156,6 +178,7 @@ def _set_device(args):
         gpus.append(device)
 
     args['device'] = gpus
+    # args['device'] = _resolve_devices(args['device'])
 
 
 def _set_random(args):
