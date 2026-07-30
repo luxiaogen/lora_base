@@ -24,7 +24,7 @@ run_with_conflict() {
         2>&1 | tee "logs/shell_logs/${name}_with_conflict_${TIMESTAMP}.log"
 }
 
-#run_with_conflict cub10 ideas/dual_mask_branch/configs/cub10.json
+run_with_conflict cub10 ideas/dual_mask_branch/configs/cub10.json
 #run_with_conflict cifar100 ideas/dual_mask_branch/configs/cifar10.json
 run_with_conflict imgr10 ideas/dual_mask_branch/configs/imgr10.json
 

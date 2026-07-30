@@ -14,16 +14,13 @@
     "num_heads": 12,
     "total_sessions": 10,
     "seed": [1993, 1996, 1997],
-
     "batch_size": 48,
     "init_epoch": 20,
     "optim": "sgd",
     "init_lr": 0.005,
-
     "init_weight_decay": 5e-4,
     "epochs": 20,
     "lrate": 0.005,
-
     "weight_decay": 5e-4,
     "rank": 32,
     "scale": 20.0,
@@ -31,39 +28,33 @@
     "num_workers": 8,
     "ca": false,
     "ca_lrate": 0.01,
-    "ca_epochs": 5,
-
     "logit_norm": 0.3,
-
+    "lora_A_init": "kaiming",
     "slora_gamma": 0.5,
     "plora_gamma": 1.0,
-
     "use_slora": true,
     "use_plora": true,
-    "dual_mask_importance": "svd",
-    "dual_mask_svd_rank": 32,
-    "dual_mask_svd_energy_coverage": 0.95,
 
+    "dual_mask_importance": "svd",
+    "dual_mask_svd_rank": 768,
+    "dual_mask_svd_energy_coverage": 0.95,
     "dual_mask_general_ratio": 0.3,
     "dual_mask_conflict_ratio": 0.1,
-    "dual_mask_protect_strength": 0.5,
     "dual_mask_conflict_strength": 0.5,
     "dual_mask_reg_weight": 0.01,
     "dual_mask_conflict_reg_enabled": true,
     "dual_mask_competence_adaptive": true,
-    "dual_mask_energy_coverage_low": 0.70,
-    "dual_mask_energy_coverage_high": 0.95,
-    "dual_mask_protect_strength_low": 0.30,
-    "dual_mask_protect_strength_high": 0.90,
-    "dual_mask_private_rank_min_ratio": 0.25,
+
     "dual_mask_competence_holdout_mod": 5,
     "dual_mask_track_w0_metrics": true,
     "dual_mask_metric_batches": 4,
-    "dual_mask_vis": true,
+    "dual_mask_vis": false,
     "dual_mask_vis_layers": [0, 5, 11],
     "dual_mask_vis_tasks": [0, 1, 9],
     "dual_mask_vis_dir": "visualizations/dual_mask_snapshots/cifar100",
     "dual_mask_vis_save_weight": false,
 
-    "lora_A_init": "kaiming"
+    "dual_mask_competence_all_seen": false,
+    "dual_mask_conflict_old_overlap_adaptive": false,
+    "dual_mask_competence_metric": "accuracy"
 }

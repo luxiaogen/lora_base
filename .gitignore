@@ -43,3 +43,4 @@ run.sh.bak
 
 # vis
 visualizations/
+wandb/

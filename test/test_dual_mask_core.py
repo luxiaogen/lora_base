@@ -132,18 +132,181 @@ class PretrainedAnchorTests(unittest.TestCase):
 
         self.assertGreater(high_density, low_density)
 
+    def test_a1_reduces_only_deep_layer_protection_density(self):
+        def protection_density(layer_idx, enabled=True):
+            module = Attention_LoRA(dim=4, num_heads=1, r=4, n_tasks=2)
+            module._init_params(
+                make_args(
+                    dual_mask_competence_adaptive=True,
+                    dual_mask_deep_coverage_enabled=enabled,
+                    dual_mask_deep_layer_start=8,
+                    dual_mask_deep_energy_coverage_max=0.8,
+                )
+            )
+            module.layer_idx = layer_idx
+            module.cur_task = 1
+            with torch.no_grad():
+                score = torch.arange(1, 49, dtype=torch.float32).reshape(12, 4)
+                module.w0_importance.copy_(score / score.max())
+            module.set_pretrained_competence(1.0)
+            module.rebuild_dual_masks()
+            return module.general_mask.float().mean().item()
 
+        shallow_density = protection_density(layer_idx=7)
+        deep_density = protection_density(layer_idx=8)
+        baseline_density = protection_density(layer_idx=8, enabled=False)
+
+        self.assertLess(deep_density, shallow_density)
+        self.assertEqual(shallow_density, baseline_density)
 
 
 class LoRALifecycleTests(unittest.TestCase):
-    def test_task_zero_does_not_allocate_unused_private_lora(self):
-        module = Attention_LoRA(dim=4, num_heads=1, r=2, n_tasks=2)
+    def test_threshold_calibration_starts_from_existing_binary_mask(self):
+        module = Attention_LoRA(dim=4, num_heads=1, r=2, n_tasks=1)
         module._init_params(make_args())
+        with torch.no_grad():
+            score = torch.arange(1, 49, dtype=torch.float32).reshape(12, 4)
+            module.w0_importance.copy_(score / score.max())
+            module.general_mask.copy_((score >= 24).float())
+            module.isolated_mask.copy_(1.0 - module.general_mask)
+            module.mask_threshold.copy_(
+                module.w0_importance[module.general_mask.bool()].min()
+            )
 
+        correction = module.begin_mask_threshold_calibration(temperature=0.1)
+        calibrated_mask = module.current_protect_mask()
+
+        self.assertTrue(torch.equal(calibrated_mask, module.general_mask))
+        self.assertEqual(correction.numel(), 1)
+
+    def test_positive_threshold_correction_releases_boundary_positions(self):
+        module = Attention_LoRA(dim=4, num_heads=1, r=2, n_tasks=1)
+        module._init_params(make_args())
+        with torch.no_grad():
+            score = torch.arange(1, 49, dtype=torch.float32).reshape(12, 4)
+            module.w0_importance.copy_(score / score.max())
+            module.general_mask.copy_((score >= 24).float())
+            module.isolated_mask.copy_(1.0 - module.general_mask)
+            module.mask_threshold.copy_(
+                module.w0_importance[module.general_mask.bool()].min()
+            )
+
+        correction = module.begin_mask_threshold_calibration(temperature=0.1)
+        original_density = module.general_mask.mean()
+        with torch.no_grad():
+            correction.fill_(0.1)
+        calibrated_mask = module.current_protect_mask()
+        calibrated_mask.mean().backward()
+
+        self.assertLess(calibrated_mask.mean().item(), original_density.item())
+        self.assertIsNotNone(correction.grad)
+        self.assertLess(correction.grad.item(), 0.0)
+
+    def test_threshold_correction_is_merged_once_and_then_cleared(self):
+        torch.manual_seed(1)
+        module = Attention_LoRA(dim=4, num_heads=1, r=2, n_tasks=1)
+        module._init_params(
+            make_args(
+                dual_mask_conflict_ratio=0.0,
+                dual_mask_conflict_strength=0.0,
+            )
+        )
+        base_parameter_count = sum(parameter.numel() for parameter in module.parameters())
         module.before_task(0)
+        module.eval()
+        with torch.no_grad():
+            module.S_lora[0].B.weight.normal_(mean=0.0, std=0.05)
+            module.begin_mask_threshold_calibration(temperature=0.1).fill_(0.02)
 
-        self.assertIsNotNone(module.S_lora[0])
-        self.assertIsNone(module.P_lora[0])
+        inputs = torch.randn(2, 3, 4)
+        output_before_merge = module(inputs, task=0)
+
+        module.after_task(0)
+        output_after_merge = module(inputs, task=0)
+
+        self.assertIsNone(module._mask_threshold_correction)
+        self.assertIsNone(module.S_lora[0])
+        self.assertEqual(
+            sum(parameter.numel() for parameter in module.parameters()),
+            base_parameter_count,
+        )
+        self.assertTrue(
+            torch.allclose(
+                output_before_merge,
+                output_after_merge,
+                atol=1e-5,
+                rtol=1e-5,
+            )
+        )
+
+    def test_layerwise_strength_relaxation_preserves_mask_and_scales_alpha(self):
+        module = Attention_LoRA(dim=4, num_heads=1, r=2, n_tasks=1)
+        module._init_params(
+            make_args(
+                dual_mask_conflict_ratio=0.0,
+                dual_mask_conflict_strength=0.0,
+                dual_mask_competence_adaptive=True,
+                dual_mask_layerwise_strength_enabled=True,
+            )
+        )
+        module.set_pretrained_competence(1.0)
+        module.general_mask.fill_(1.0)
+        original_mask = module.general_mask.clone()
+        delta = torch.ones_like(module.qkv.weight)
+
+        module.layer_idx = 7
+        shallow = module._safe_delta(delta, isolated=False)
+        module.layer_idx = 8
+        middle = module._safe_delta(delta, isolated=False)
+        module.layer_idx = 10
+        deep = module._safe_delta(delta, isolated=False)
+
+        self.assertTrue(torch.equal(module.general_mask, original_mask))
+        self.assertTrue(torch.allclose(shallow, torch.full_like(delta, 0.1)))
+        self.assertTrue(torch.allclose(middle, torch.full_like(delta, 0.19)))
+        self.assertTrue(torch.allclose(deep, torch.full_like(delta, 0.28)))
+
+    def test_layerwise_strength_relaxation_is_disabled_by_default(self):
+        module = Attention_LoRA(dim=4, num_heads=1, r=2, n_tasks=1)
+        module._init_params(
+            make_args(
+                dual_mask_protect_strength=0.5,
+                dual_mask_conflict_ratio=0.0,
+                dual_mask_conflict_strength=0.0,
+            )
+        )
+        module.layer_idx = 10
+        module.general_mask.fill_(1.0)
+        delta = torch.ones_like(module.qkv.weight)
+
+        safe_delta = module._safe_delta(delta, isolated=False)
+
+        self.assertTrue(torch.allclose(safe_delta, torch.full_like(delta, 0.5)))
+
+    def test_layerwise_alpha_correction_changes_safe_delta(self):
+        module = Attention_LoRA(dim=4, num_heads=1, r=2, n_tasks=1)
+        module._init_params(
+            make_args(
+                dual_mask_protect_strength=0.5,
+                dual_mask_conflict_ratio=0.0,
+                dual_mask_conflict_strength=0.0,
+            )
+        )
+        module.general_mask.fill_(1.0)
+        delta = torch.ones_like(module.qkv.weight)
+
+        safe_before = module._safe_delta(delta, isolated=False)
+        correction = module.begin_protect_strength_calibration()
+        with torch.no_grad():
+            correction.fill_(0.2)
+        safe_after = module._safe_delta(delta, isolated=False)
+        safe_after.sum().backward()
+
+        self.assertTrue(torch.allclose(safe_before, torch.full_like(delta, 0.5)))
+        self.assertTrue(torch.allclose(safe_after, torch.full_like(delta, 0.3)))
+        self.assertTrue(module.current_protect_strength().requires_grad)
+        self.assertIsNotNone(correction.grad)
+        self.assertLess(correction.grad.item(), 0.0)
 
     def test_merge_releases_lora_without_changing_output(self):
         torch.manual_seed(0)

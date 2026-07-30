@@ -1,20 +1,49 @@
-import logging
-
 import torch
 
 from methods.dlora import Learner as DLoraLearner
-from models.losses import AngularPenaltySMLoss
 
 from .attention import Attention_LoRA
 from .network import MANet
+
 
 class Learner(DLoraLearner):
     network_cls = MANet
     attention_cls = Attention_LoRA
 
+    def __init__(self, args):
+        removed_options = (
+            "dual_mask_alpha_calibration",
+            "dual_mask_competence_margin_scale",
+            "dual_mask_competence_mix_lambda",
+            "dual_mask_old_overlap_enabled",
+            "dual_mask_conflict_adaptive",
+            "dual_mask_conflict_coverage_adaptive",
+            "dual_mask_conflict_task_adaptive",
+            "dual_mask_conflict_energy50",
+            "dual_mask_grad_alpha",
+            "dual_mask_grad_batches",
+            "dual_mask_task_relevance_enabled",
+            "dual_mask_task_relevance_batches",
+            "dual_mask_task_coverage",
+            "dual_mask_spectral_conflict_adaptive",
+            "dual_mask_static_w0",
+            "dual_mask_plasticity_rank_only",
+            "dual_mask_plasticity_diagnostics",
+        )
+        stale_options = [name for name in removed_options if name in args]
+        if stale_options:
+            raise ValueError(
+                "Removed DualMask options: {}. Delete them from the config or "
+                "--set overrides.".format(", ".join(stale_options))
+            )
+        super().__init__(args)
+        for layer_idx, module in enumerate(self._iter_lora_modules()):
+            module.layer_idx = layer_idx
+
     # 微调的是当前 task 正在训练的 LoRA 参数 | 惩罚 safe_delta 在 W0 重要区域太大 | safe_delta 在动态 conflict 区域太大
     def _extra_training_loss(self):
         reg_weight = float(self.args.get("dual_mask_reg_weight", 0.0)) # 0.01
+        self._last_training_loss_metrics = {}
         if reg_weight <= 0.0:
             return None
 
@@ -36,67 +65,5 @@ class Learner(DLoraLearner):
 
         if not losses:
             return None
-        return reg_weight * torch.stack(losses).mean()
-
-    def _before_lora_weight_init(self, train_loader):
-        mode = str(self.args.get("dual_mask_importance", "svd")).lower()
-        if "grad" not in mode:
-            return
-
-        grad_batches = int(self.args.get("dual_mask_grad_batches", 1))
-        if grad_batches <= 0:
-            return
-
-        modules = list(self._iter_lora_modules())
-        for module in modules:
-            module.clear_gradient_importance()
-
-        previous_requires_grad = []
-        for module in modules:
-            previous_requires_grad.append(module.qkv.weight.requires_grad)
-            module.qkv.weight.requires_grad_(True)
-
-        was_training = self._network.training
-        self._network.train()
-        loss_cos = AngularPenaltySMLoss(
-            loss_type="cosface",
-            s=self.scale,
-            m=self.margin,
-        ).to(self._device)
-
-        used_batches = 0
-        for _, inputs, targets in self._iter_new_class_batches(train_loader):
-            if used_batches >= grad_batches:
-                break
-
-            outputs = self._network(inputs)
-            loss = loss_cos(outputs["logits"], targets)
-
-            self._network.zero_grad(set_to_none=True)
-            loss.backward()
-
-            for module in modules:
-                module.accumulate_qkv_gradient()
-
-            used_batches += 1
-
-        self._network.zero_grad(set_to_none=True)
-        for module, requires_grad in zip(modules, previous_requires_grad):
-            module.qkv.weight.requires_grad_(requires_grad)
-            module.rebuild_dual_masks()
-
-        if not was_training:
-            self._network.eval()
-
-        logging.info("Collected dual-mask gradient sensitivity from %s batches.", used_batches)
-
-    def _iter_new_class_batches(self, train_loader):
-        for _, inputs, targets in train_loader:
-            inputs = inputs.to(self._device)
-            targets = targets.to(self._device)
-            mask = (targets >= self._known_classes).nonzero().view(-1)
-            if mask.numel() == 0:
-                continue
-            inputs = torch.index_select(inputs, 0, mask)
-            targets = torch.index_select(targets, 0, mask) - self._known_classes
-            yield _, inputs, targets
+        regularization = torch.stack(losses).mean()
+        return reg_weight * regularization

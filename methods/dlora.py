@@ -7,20 +7,16 @@ import copy
 import logging
 import numpy as np
 from tqdm import tqdm
-import math
 
 from methods.base import BaseLearner
 from utils.toolkit import tensor2numpy
 from models.network import MANet
 from models.decomposed_lora import Attention_LoRA
-# from models.decomposed_lora_kv import Attention_LoRA
 
-from models.functions import mixup, cutmix
 from utils.schedulers import CosineSchedule
 from torch.distributions.multivariate_normal import MultivariateNormal
 from utils.toolkit import count_parameters
 from models.losses import AngularPenaltySMLoss
-import re
 from contextlib import ExitStack
 
 
@@ -33,9 +29,8 @@ class Learner(BaseLearner):
     def __init__(self, args):
         super().__init__(args)
 
-
         # self._network = MANet(args)
-        self._network = self.network_cls(args) # 调用具体的MANet
+        self._network = self.network_cls(args)  # 调用具体的MANet
         for module in self._network.modules():
             if isinstance(module, self.attention_cls):
                 module._init_params(args)
@@ -45,25 +40,22 @@ class Learner(BaseLearner):
         #         module._init_params(args)
 
         self.args = args
-        self.optim = args["optim"] # sgd
-        # self.EPSILON = args["EPSILON"] # 1e-8
-        self.init_epoch = args["init_epoch"] # 20
+        self.optim = args["optim"]  # sgd
+        self.init_epoch = args["init_epoch"]  # 20
         self.init_lr = args["init_lr"]
-        # self.init_lr_decay = args["init_lr_decay"]
         self.init_weight_decay = args["init_weight_decay"]
-        self.epochs = args["epochs"] # 20
+        self.epochs = args["epochs"]  # 20
         self.lrate = args["lrate"]
-        # self.lrate_decay = args["lrate_decay"]
         self.batch_size = args["batch_size"]
         self.weight_decay = args["weight_decay"]
         self.num_workers = args["num_workers"]
         self.scale = args["scale"]
-        self.margin = args["margin"] # 分类损失函数 CosFace（Large Margin Cosine Loss）中的“角度边距 / 余弦裕度”（Cosine Margin）超参数
-        self.total_sessions = args["total_sessions"] # 任务数
+        self.margin = args["margin"]  # 分类损失函数 CosFace（Large Margin Cosine Loss）中的“角度边距 / 余弦裕度”（Cosine Margin）超参数
+        self.total_sessions = args["total_sessions"]  # 任务数
         # self.total_classnum = self.args["increment"] * self.total_sessions + self.args["init_cls"]
         self.total_classnum = self.args["init_cls"] + self.args["increment"] * (self.total_sessions - 1)
         self.dataset = args["dataset"]
-        self.logit_norm = args["logit_norm"]
+        self.logit_norm = args["logit_norm"]  # 用于CA
         if self.logit_norm == "none":
             self.logit_norm = None
         self.topk = 1  # origin is 5
@@ -73,11 +65,21 @@ class Learner(BaseLearner):
         # class prototypes
         self._class_means = None
         self._class_covs = None
-        self._old_class_covs = None
+
         self.acc_matrix = np.zeros((self.total_sessions, self.total_sessions))
 
         self._w0_class_means = {}
         self._w0_competence = 0.0
+
+        self._w0_competence_new = None
+        self._w0_competence_all_seen = None
+        self._w0_old_overlap_risk = None
+
+        self._w0_ncm_loss_new = None
+        self._w0_plasticity_demand = None
+
+        self._w0_control_competence = None
+
         self._w0_accuracy_curve = []
         self._feature_drift_curve = []
         self._weight_drift_curve = []
@@ -93,7 +95,6 @@ class Learner(BaseLearner):
     def _extra_training_loss(self):
         return None
 
-    #######################################
     def _backward_and_step(self, task_loss, extra_loss, optimizer, output, targets):
         """Optimization extension point used by experimental learners."""
         loss = task_loss if extra_loss is None else task_loss + extra_loss
@@ -101,7 +102,6 @@ class Learner(BaseLearner):
         loss.backward()
         optimizer.step()
         return loss
-    #######################################
 
     ###########################
     """ 
@@ -112,11 +112,13 @@ class Learner(BaseLearner):
         4. 提取 feature
         5. 离开 with 后，所有层恢复原来的当前任务状态
     """
+
     def _pretrained_anchor_context(self):
         stack = ExitStack()
         for module in self._iter_lora_modules():
             stack.enter_context(module.use_pretrained_anchor())
         return stack
+
     """
         把 loader 里的所有当前任务样本，用冻结的预训练锚点模型提取特征，并连同样本编号、标签一起保存下来 
             loader 中所有样本
@@ -131,47 +133,184 @@ class Learner(BaseLearner):
                 ↓
             拼成完整张量并返回
     """
-    def _collect_anchor_features(self, loader):
+
+    #def _collect_anchor_features(self, loader):
+    def _collect_features(self, loader, use_pretrained_anchor=False):
         was_training = self._network.training
         self._network.eval()
         indices, features, targets = [], [], []
-        with self._pretrained_anchor_context(), torch.no_grad(): # 应该临时让网络使用预训练锚点 W_pre / W0 + 不建反向图，不计算梯度，不训练参数
+        """
+          # 等价于手动写法
+          ctx1 = self._pretrained_anchor_context()
+          ctx2 = torch.no_grad()
+          ctx1.__enter__()   # 12层 qkv.weight ← W_pre
+          ctx2.__enter__()   # 关闭梯度计算
+          try:
+              for batch_indices, inputs, batch_targets in loader:
+                  vectors = self._network.extract_vector(inputs.to(self._device))
+                  indices.append(batch_indices.detach().cpu())  # 样本编号
+                  features.append(vectors.detach().cpu())  # W_pre 特征
+                  targets.append(batch_targets.detach().cpu())  # 真实标签
+          finally:
+              ctx2.__exit__()  # 恢复梯度计算
+              ctx1.__exit__()  # 12层 qkv.weight ← W_current（恢复）
+        """
+        # with self._pretrained_anchor_context(), torch.no_grad():  # 应该临时让网络使用预训练锚点 W_pre / W0 + 不建反向图，不计算梯度，不训练参数
+        context = (self._pretrained_anchor_context() if use_pretrained_anchor else ExitStack())
+        with context, torch.no_grad():
             for batch_indices, inputs, batch_targets in loader:
-                vectors = self._network.extract_vector(inputs.to(self._device)) # 图片 → ViT / W_pre → 768 维 feature
-                indices.append(batch_indices.detach().cpu()) # 样本编号
-                features.append(vectors.detach().cpu()) # W_pre 特征
-                targets.append(batch_targets.detach().cpu()) # 真实标签
+                vectors = self._network.extract_vector(inputs.to(self._device))  # 图片 → ViT / W_pre → 768 维 feature
+                indices.append(batch_indices.detach().cpu())  # 样本编号
+                features.append(vectors.detach().cpu())  # W_pre 特征
+                targets.append(batch_targets.detach().cpu())  # 真实标签
         if was_training:
             self._network.train()
         return torch.cat(indices), torch.cat(features), torch.cat(targets)
+
+    def _collect_anchor_features(self, loader):
+        return self._collect_features(loader, use_pretrained_anchor=True)
+
     # 测量 W_pre competence
     def _prepare_w0_prototypes(self, loader):
-        from ideas.dual_mask_branch.metrics import split_prototype_competence
+        # from ideas.dual_mask_branch.metrics import split_prototype_competence
+        from ideas.dual_mask_branch.metrics import (split_prototype_competence,split_prototype_ncm_diagnostics,)
+
         # 训练集中的特征
         indices, features, targets = self._collect_anchor_features(loader)
+
+        ## Ct 是否使用的是所有已见类的原型，还是仅使用当前任务的原型
+        use_all_seen_prototypes = bool(self.args.get("dual_mask_competence_all_seen", False))
+
+        competence_metric = str(self.args.get("dual_mask_competence_metric", "accuracy")).lower()
+
+        use_old_overlap_conflict = bool(self.args.get("dual_mask_conflict_old_overlap_adaptive", False))
+
+        need_all_seen_competence = (
+            use_all_seen_prototypes
+            or use_old_overlap_conflict
+        )
+
+        old_prototypes = None
+        old_class_ids = None
+        # if use_all_seen_prototypes and self._known_classes > 0:
+        if need_all_seen_competence and self._known_classes > 0:
+            old_class_ids = torch.arange(self._known_classes,dtype=torch.long,)
+            old_prototypes = torch.stack([self._w0_class_means[int(class_id)] for class_id in old_class_ids])
+
+
+
         # 使用当前任务训练样本构建类别原型，并做确定性 holdout
-        competence, prototypes, class_ids = split_prototype_competence(
-            features,
-            targets,
+        # w0_competence, prototypes, class_ids = split_prototype_competence(
+        w0_competence_new, prototypes, class_ids = split_prototype_competence(
+            features, # 80% → 建立类别原型
+            targets, # 20% → 测试 W0 NCM 准确率
             indices,
             holdout_mod=int(self.args.get("dual_mask_competence_holdout_mod", 5)),
+            metric=competence_metric,
+            # old_prototypes=old_prototypes,
+            # old_class_ids=old_class_ids,
         )
+
+
+        plasticity_adaptive = bool(self.args.get("dual_mask_plasticity_adaptive", False))
+        self._w0_ncm_loss_new = None
+        self._w0_plasticity_demand = None
+        if plasticity_adaptive:
+            (self._w0_ncm_loss_new,self._w0_plasticity_demand,) = split_prototype_ncm_diagnostics(
+                features,
+                targets,
+                indices,
+                holdout_mod=int(self.args.get("dual_mask_competence_holdout_mod", 5)),
+                scale=self.scale,
+            )
+
+        w0_competence_all_seen = None
+        old_overlap_risk = None
+        if need_all_seen_competence:
+            w0_competence_all_seen, _, _ = split_prototype_competence(
+                features,
+                targets,
+                indices,
+                holdout_mod=int(self.args.get("dual_mask_competence_holdout_mod", 5)),
+                old_prototypes=old_prototypes,
+                old_class_ids=old_class_ids,
+                metric=competence_metric,
+            )
+            old_overlap_risk = max(0.0, w0_competence_new - w0_competence_all_seen,)
+        w0_competence = (
+            w0_competence_new
+            if use_old_overlap_conflict
+            else (
+                w0_competence_all_seen
+                if use_all_seen_prototypes
+                else w0_competence_new
+            )
+        )
+
+
         # 使用当前任务训练样本构建类别原型，并做确定性 holdout
-        self._w0_competence = competence
+        # self._w0_competence = competence   # 任务级别的
+
+        self._w0_competence = w0_competence
+
+        self._w0_competence_new = w0_competence_new
+        self._w0_competence_all_seen = w0_competence_all_seen
+        self._w0_old_overlap_risk = old_overlap_risk
+
         for prototype, class_id in zip(prototypes, class_ids):
             self._w0_class_means[int(class_id.item())] = prototype.cpu()
         for module in self._iter_lora_modules():
-            module.set_pretrained_competence(competence) # 确保只使用 W_pre | W_pre 越强，保护越强、Private rank 越小
+            # 同一个任务中，12 层 Attention 使用的是完全相同的 task-level competence
+            # module.set_pretrained_competence(w0_competence)
+            module.set_pretrained_competence(w0_competence,self._w0_plasticity_demand or 0.0,)
+            module.set_pretrained_old_overlap_risk(old_overlap_risk or 0.0)
+
         first_module = next(self._iter_lora_modules())
+        self._w0_control_competence = (first_module.pretrained_control_competence)
+
         logging.info(
-            "Task %s W_pre train-only competence: %.2f%%, importance_coverage=%.3f, "
+            # "Task %s W_pre train-only competence: %.2f%%, "
+            # "Task %s W_pre train-only competence: %.2f%%, candidate_scope=%s, "
+            "Task %s W_pre train-only competence: %.2f%%, metric=%s, candidate_scope=%s, "
+            "C_new=%.2f%%, C_all=%s, R_old=%s, "
+            "C_control=%.2f%%, D_t=%s, "
+            "importance_coverage=%.3f, "
             "protect_strength=%.3f, private_rank=%s",
             self._cur_task,
-            competence * 100.0,
+            w0_competence * 100.0,
+            competence_metric,
+            # "all_seen" if use_all_seen_prototypes else "new_only",
+            "all_seen"
+            if use_all_seen_prototypes and not use_old_overlap_conflict
+            else "new_only",
+            w0_competence_new * 100.0,
+            "n/a" if w0_competence_all_seen is None else "{:.2f}%".format(
+                w0_competence_all_seen * 100.0
+            ),
+            "n/a" if old_overlap_risk is None else "{:.2f}%".format(
+                old_overlap_risk * 100.0
+            ),
+            self._w0_control_competence * 100.0,
+            "n/a" if self._w0_plasticity_demand is None else "{:.4f}".format(
+                self._w0_plasticity_demand
+            ),
             first_module.effective_energy_coverage,
             first_module.effective_protect_strength,
             first_module.current_private_rank,
-        ) # Task 0 W_pre train-only competence: 96.95%, importance_coverage=0.942, protect_strength=0.882, private_rank=9
+        )
+
+        if plasticity_adaptive:
+            logging.info(
+                "Task %s W_pre new-only NCM diagnostics: "
+                # "L_NCM=%.6f, D_t=%.4f, scale=%.3f (logging only).",
+                "L_NCM=%.6f, D_t=%.4f, scale=%.3f (controls competence).",
+                self._cur_task,
+                self._w0_ncm_loss_new,
+                self._w0_plasticity_demand,
+                self.scale
+            )
+
+
 
     def eval_w0_task(self):
         if not self._w0_class_means:
@@ -184,7 +323,7 @@ class Learner(BaseLearner):
         )
         prototypes = torch.stack(
             [self._w0_class_means[int(class_id)] for class_id in class_ids.cpu()]
-        ).to(self._device) # [C*t,768]
+        ).to(self._device)  # [C*t,768]
         correct, total = 0, 0
         was_training = self._network.training
         self._network.eval()
@@ -201,7 +340,16 @@ class Learner(BaseLearner):
         accuracy = 100.0 * correct / max(total, 1)
         self._w0_accuracy_curve.append(accuracy)
         return accuracy
-
+    """ 
+        测量当前模型相对原始预训练模型 W_pre 漂移了多少:  
+            1. 特征漂移 feature_drift: 计算当前模型提取的特征与 W_pre 提取的特征之间的平均余弦相似度差异
+                接近0：当前特征方向与 W_pre 基本一致
+                越大：当前特征空间偏离 W_pre 越明显
+            2. 权重漂移 weight_drift: 计算当前模型与 W_pre 之间权重的相对变化
+                ||W_current,l - W_pre,l||₂
+                ─────────────────────────
+                       ||W_pre,l||₂
+    """
     def _measure_pretrained_drift(self, loader):
         max_batches = max(1, int(self.args.get("dual_mask_metric_batches", 4)))
         batches = []
@@ -215,26 +363,18 @@ class Learner(BaseLearner):
         current_features = []
         with torch.no_grad():
             for inputs in batches:
-                current_features.append(
-                    self._network.extract_vector(inputs.to(self._device)).detach()
-                )
+                current_features.append(self._network.extract_vector(inputs.to(self._device)).detach())
 
         anchor_features = []
         with self._pretrained_anchor_context(), torch.no_grad():
             for inputs in batches:
-                anchor_features.append(
-                    self._network.extract_vector(inputs.to(self._device)).detach()
-                )
+                anchor_features.append(self._network.extract_vector(inputs.to(self._device)).detach())
         if was_training:
             self._network.train()
 
         current_features = torch.cat(current_features)
         anchor_features = torch.cat(anchor_features)
-        feature_drift = float(
-            (1.0 - F.cosine_similarity(current_features, anchor_features, dim=1))
-            .mean()
-            .item()
-        )
+        feature_drift = float((1.0 - F.cosine_similarity(current_features, anchor_features, dim=1)).mean().item())
         weight_drifts = [module.relative_weight_drift() for module in self._iter_lora_modules()]
         mean_weight_drift = float(np.mean(weight_drifts))
         max_weight_drift = float(np.max(weight_drifts))
@@ -251,52 +391,62 @@ class Learner(BaseLearner):
 
     ###################################
 
-
-
     def after_task(self):
-        if bool(self.args.get("retain_old_network", False)):
-            self._old_network = self._network.copy().freeze()
-        else:
-            self._old_network = None
         self._known_classes = self._total_classes
         logging.info('Exemplar size: {}'.format(self.exemplar_size))
-        self._old_class_covs = None
 
     def incremental_train(self, data_manager):
 
         self._cur_task += 1
+
+
         self._total_classes = self._known_classes + data_manager.get_task_size(self._cur_task)
-        self.task_sizes.append(data_manager.get_task_size(self._cur_task)) # 当前这个 Task 新增的类别数量
+        self.task_sizes.append(data_manager.get_task_size(self._cur_task))  # 当前这个 Task 新增的类别数量
         self._network.update_fc(self._total_classes)
 
         logging.info('Learning on {}-{}'.format(self._known_classes, self._total_classes))
 
-        train_dataset = data_manager.get_dataset(np.arange(self._known_classes, self._total_classes), source='train', mode='train')
+        train_dataset = data_manager.get_dataset(np.arange(self._known_classes, self._total_classes), source='train',
+                                                 mode='train')
         self.train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True,
-                                       num_workers=self.num_workers, pin_memory=True) # 随机增强视图：用于优化 LoRA
+                                       num_workers=self.num_workers, pin_memory=True)  # 随机增强视图：用于优化 LoRA
         # 拿到所有已见类的 test set
         test_dataset = data_manager.get_dataset(np.arange(0, self._total_classes), source='test', mode='test')
         self.test_loader = DataLoader(test_dataset, batch_size=self.batch_size, shuffle=False,
                                       num_workers=self.num_workers, pin_memory=True)
 
-
         track_w0 = bool(self.args.get("dual_mask_track_w0_metrics", False))
         # 开启参数自适应 --- 也就是使用训练集测试W0原型的能力
         competence_adaptive = bool(self.args.get("dual_mask_competence_adaptive", False))
-        if track_w0 or competence_adaptive:
-            w0_dataset = data_manager.get_dataset( # 所有训练样本，顺序固定  | 确定性测试视图：用于判断冻结 W0 的原始能力
+
+        # if track_w0 or competence_adaptive:
+        plasticity_adaptive = bool(self.args.get("dual_mask_plasticity_adaptive", False))
+
+        all_seen_competence = bool(self.args.get("dual_mask_competence_all_seen", False))
+        old_overlap_conflict = bool(self.args.get("dual_mask_conflict_old_overlap_adaptive", False))
+        
+        if (
+                track_w0
+                or competence_adaptive
+                or plasticity_adaptive
+                or all_seen_competence
+                or old_overlap_conflict
+        ):
+        # if track_w0 or competence_adaptive or task_relevance_enabled:
+            w0_dataset = data_manager.get_dataset(  # 所有训练样本，顺序固定  | 确定性测试视图：用于判断冻结 W0 的原始能力
                 np.arange(self._known_classes, self._total_classes),
-                source='train', # 用训练集样本，但模拟最终测试时的输入方式，评估 W0 的原始能力
-                mode='test', # 同一批训练图，但用测试预处理 | e.g. 固定 resize / center crop
-            ) # 946
-            self.w0_loader = DataLoader(w0_dataset,batch_size=self.batch_size,shuffle=False,num_workers=self.num_workers,pin_memory=True,)
+                source='train',  # 用训练集样本，但模拟最终测试时的输入方式，评估 W0 的原始能力
+                mode='test',  # 同一批训练图，但用测试预处理 | e.g. 固定 resize / center crop
+            )  # 946
+            self.w0_loader = DataLoader(
+                w0_dataset,
+                batch_size=self.batch_size,
+                shuffle=False,
+                num_workers=self.num_workers,
+                pin_memory=True,
+            )
             self._network.to(self._device)
             self._prepare_w0_prototypes(self.w0_loader)
-
-
-        # Semantic Shift old embedding
-        # if self._cur_task > 0 and self._old_network is not None:
-        #     self._old_network.to(self._device)
 
         self._train(self.train_loader, self.test_loader)
 
@@ -308,33 +458,21 @@ class Learner(BaseLearner):
         if self._cur_task > 0 and self.args['ca'] is True:
             # CA
             # self._stage2_compact_classifier(self.task_sizes[-1])
-            self._stage2_compact_classifier(
+            self._stage2_compact_classifier( # CA 分类器对齐
                 self.task_sizes[-1],
                 ca_epochs=int(self.args.get("ca_epochs", 5)),
             )
 
-        # if self.args["use_RP"]:
-        #     print("DLORA with random projection and analytic classifier")
-        #     for _, p in self._network.named_parameters():
-        #         p.requires_grad = False
-        #     if self._cur_task == 0:
-        #         self.setup_RP()
-
-        #     train_dataset_for_CPs = data_manager.get_dataset(np.arange(self._known_classes, self._total_classes),source="train", mode="test", )
-        #     self.train_loader_for_CPs = DataLoader(train_dataset_for_CPs, batch_size=self.batch_size,
-        #                                            shuffle=True, num_workers=self.num_workers)
-        #     self.replace_fc(self.train_loader_for_CPs)
-
     def _train(self, train_loader, test_loader):
         try:
-            current_task = self._network.module.numtask - 1 # 多卡
+            current_task = self._network.module.numtask - 1  # 多卡
         except AttributeError:
             current_task = self._network.numtask - 1
         current_classifier = "classifier_pool" + "." + str(current_task) + "."
 
         self._network.to(self._device)
         for name, param in self._network.named_parameters():
-            param.requires_grad_(False) # 1. 先把主干 (ViT Backbone) 所有参数全部冻结
+            param.requires_grad_(False)  # 1. 先把主干 (ViT Backbone) 所有参数全部冻结
             # try: # 多 GPU 并行训练
             #     if "classifier_pool" + "." + str(self._network.module.numtask - 1) in name:
             #         param.requires_grad_(True)  # 2. 仅将当前 Task 对应的分类头设为可训练
@@ -342,7 +480,7 @@ class Learner(BaseLearner):
             #     if "classifier_pool" + "." + str(self._network.numtask - 1) in name:
             #         param.requires_grad_(True) # [768,10] 'classifier_pool.0.weight'
             if name.startswith(current_classifier):
-                param.requires_grad_(True) # 将 分类头打开可训
+                param.requires_grad_(True)  # 将 分类头打开可训
 
         for module in self._iter_lora_modules():
             module.before_task(task=self._cur_task)
@@ -358,24 +496,23 @@ class Learner(BaseLearner):
         if len(self._multiple_gpus) > 1:
             self._network = torch.nn.DataParallel(self._network, self._multiple_gpus)
 
-        kk = 0 # Transformer 层号计数器（0 到 11 层）
+        kk = 0  # Transformer 层号计数器（0 到 11 层）
         for module in self._iter_lora_modules():
             print(f'********** LoRA weights initialization for layer {kk} **********')
-            module._init_lora_weight(task=self._cur_task, layer_idx=kk) # 初始化 LoRA 的 A B 矩阵权重
-            module.set_task_and_stage(task=self._cur_task, layer_idx=kk) # 设置lora可不可训练
+            module._init_lora_weight(task=self._cur_task, layer_idx=kk)  # 初始化 LoRA 的 A B 矩阵权重
+            module.set_task_and_stage(task=self._cur_task, layer_idx=kk)  # 设置lora可不可训练
             # module.cur_matrix.zero_(); module.n_cur_matrix = 0
             kk += 1
 
+
         ############################## set learning rates ##################################
-        ############################## set learning rates ##################################
-        ############################## set learning rates ##################################
-        flora_params, other_params = [], [] # flora_params:收集的是名称带 lora 的参数（即各个 Transformer 层中 LoRA 的 B 矩阵）
+        flora_params, other_params = [], []  # flora_params:收集的是名称带 lora 的参数（即各个 Transformer 层中 LoRA 的 B 矩阵）
         for name, p in self._network.named_parameters():
             if p.requires_grad:
                 if 'lora' in name.lower():
                     flora_params.append(p)
                 else:
-                    other_params.append(p)
+                    other_params.append(p) # 分类头
         print(f"[Param Group] LoRA params: {len(flora_params)}, Other params: {len(other_params)}")
 
         enabled = {name for name, p in self._network.named_parameters() if p.requires_grad}
@@ -388,27 +525,25 @@ class Learner(BaseLearner):
             {'params': other_params, 'lr': lr, 'momentum': 0.9, 'weight_decay': weight_decay}
         ]
         ############################## set learning rates ##################################
-        ############################## set learning rates ##################################
-        ############################## set learning rates ##################################
 
-        if self._cur_task==0:
+        if self._cur_task == 0:
             if self.optim == 'sgd':
                 optimizer = optim.SGD(params=param_groups)
-                scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer=optimizer,T_max=self.init_epoch)
+                scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer=optimizer, T_max=self.init_epoch)
             elif self.optim == 'adam':
-                optimizer = optim.Adam(params=param_groups,weight_decay=self.init_weight_decay, betas=(0.9,0.999))
-                scheduler = CosineSchedule(optimizer=optimizer,K=self.init_epoch)
+                optimizer = optim.Adam(params=param_groups, weight_decay=self.init_weight_decay, betas=(0.9, 0.999))
+                scheduler = CosineSchedule(optimizer=optimizer, K=self.init_epoch)
             else:
                 raise Exception
             self.run_epoch = self.init_epoch
-            self.train_function(train_loader,test_loader,optimizer,scheduler)
+            self.train_function(train_loader, test_loader, optimizer, scheduler)
         else:
             if self.optim == 'sgd':
                 optimizer = optim.SGD(params=param_groups)
-                scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer=optimizer,T_max=self.epochs)
+                scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer=optimizer, T_max=self.epochs)
             elif self.optim == 'adam':
-                optimizer = optim.Adam(params=param_groups,weight_decay=self.weight_decay, betas=(0.9,0.999))
-                scheduler = CosineSchedule(optimizer=optimizer,K=self.epochs)
+                optimizer = optim.Adam(params=param_groups, weight_decay=self.weight_decay, betas=(0.9, 0.999))
+                scheduler = CosineSchedule(optimizer=optimizer, K=self.epochs)
             else:
                 raise Exception
             self.run_epoch = self.epochs
@@ -422,7 +557,7 @@ class Learner(BaseLearner):
 
         with torch.no_grad():
             # Task t 的 LoRA刚训练完，但增量还没有融合进主干网络 W0
-            print('*'*10+'Extrace features for merging shared component!'+'*'*10)
+            print('*' * 10 + 'Extrace features for merging shared component!' + '*' * 10)
             # for i, (_, inputs, targets) in enumerate(train_loader):
             #     inputs, targets = inputs.to(self._device), targets.to(self._device)
             #     self._network(inputs, get_cur_feat=True)
@@ -451,47 +586,41 @@ class Learner(BaseLearner):
             if param.requires_grad:
                 enabled.add(name)
         # logging.info(f"Parameters to be updated: {enabled}")
-        logging.info("Parameters to be updated (%d):\n  %s",len(enabled),"\n  ".join(sorted(enabled)),)
+        logging.info("Parameters to be updated (%d):\n  %s", len(enabled), "\n  ".join(sorted(enabled)), )
         prog_bar = tqdm(range(self.run_epoch))
         # 角度惩罚损失
-        loss_cos:AngularPenaltySMLoss = AngularPenaltySMLoss(loss_type='cosface',s=self.scale,m=self.margin)
+        loss_cos: AngularPenaltySMLoss = AngularPenaltySMLoss(loss_type='cosface', s=self.scale, m=self.margin)
 
         for _, epoch in enumerate(prog_bar):
             self._network.train()
 
             losses = 0.
             correct, total = 0, 0
+            training_metric_totals = {}
+            training_metric_batches = 0
 
             for i, (_, inputs, targets) in enumerate(train_loader):
                 inputs, targets = inputs.to(self._device), targets.to(self._device)
                 mask = (targets >= self._known_classes).nonzero().view(-1)
                 inputs = torch.index_select(inputs, 0, mask)
-                targets = torch.index_select(targets, 0, mask)-self._known_classes
+                targets = torch.index_select(targets, 0, mask) - self._known_classes
 
-                ## random partition
-                # classes:torch.Tensor = torch.unique(targets)
-                # perm = classes[torch.randperm(len(classes), device=self._device)]
-                # m = max(1, len(classes)//2)
-                # g1_classes = perm[:m]; g2_classes = perm[m:]
-                # g1_idx = torch.isin(targets, g1_classes).nonzero(as_tuple=True)[0]
-                # g2_idx = torch.isin(targets, g2_classes).nonzero(as_tuple=True)[0]
-
-                # ## optimization -- cross-entropy
-                # if not self.args["use_gao"] or classes.shape[0] == 1 or \
-                #     (min(g1_idx.shape[0], g2_idx.shape[0]) == 0):
                 output = self._network(inputs)
                 logits = output['logits']
-                # loss=loss_cos(logits, targets)
-                task_loss=loss_cos(logits, targets)
+                task_loss = loss_cos(logits, targets)
 
                 ## mask_loss
                 extra_loss = self._extra_training_loss()
-                # if extra_loss is not None:
-                #     loss = loss + extra_loss
-                #
-                # optimizer.zero_grad()
-                # loss.backward()
-                # optimizer.step()
+
+                batch_training_metrics = getattr(self,"_last_training_loss_metrics",{},)
+                if batch_training_metrics:
+                    for name, value in batch_training_metrics.items():
+                        value = value.detach()
+                        training_metric_totals[name] = (
+                                training_metric_totals.get(name, 0.0) + value
+                        )
+                    training_metric_batches += 1
+
                 loss = self._backward_and_step(
                     task_loss,
                     extra_loss,
@@ -499,43 +628,6 @@ class Learner(BaseLearner):
                     output,
                     targets,
                 )
-
-                ## optimization -- (meta-training)
-                # else: # 使用GAO
-                #     (x1, y1) = inputs[g1_idx], targets[g1_idx]; (x2, y2) = inputs[g2_idx], targets[g2_idx]
-                #     params = [p for name, p in self._network.named_parameters()
-                #               if p.requires_grad and any(s in name.lower() for s in ["lora"]) ]
-                #     rho = -float(self.args["rho"]) * torch.rand(1).to(self._device)
-                #
-                #     def perturb_and_train(x_src, y_src, x_tgt, y_tgt, coeff:float=1.0):
-                #
-                #         meta_logits:torch.Tensor = self._network(x_src)["logits"]
-                #         meta_grads = torch.autograd.grad(
-                #                      loss_cos(meta_logits, y_src),
-                #                      params, create_graph=False, retain_graph=False)
-                #
-                #         with torch.no_grad():
-                #             flat_norm = [g.norm() + 1e-12 for g in meta_grads]
-                #             eps_list = [rho * g / flat_norm[id] for id, g in enumerate(meta_grads)]
-                #             for p, e in zip(params, eps_list):
-                #                 p.add_(e)
-                #
-                #         out_t = self._network(x_tgt)["logits"]
-                #         loss_t = coeff * loss_cos(out_t, y_tgt)
-                #         optimizer.zero_grad()
-                #         loss_t.backward()
-                #         optimizer.step()
-                #
-                #         with torch.no_grad():
-                #             for p, e in zip(params, eps_list):
-                #                 p.sub_(e)
-                #
-                #         return loss_t, out_t
-                #
-                #     loss2, out2 = perturb_and_train(x1, y1, x2, y2)
-                #     loss1b, out1b = perturb_and_train(x2, y2, x1, y1)
-                #     logits = torch.cat([out1b, out2], dim=0); targets = torch.cat([y1, y2], dim=0)
-                #     loss = loss1b + loss2
 
                 losses += loss.item()
 
@@ -545,125 +637,64 @@ class Learner(BaseLearner):
 
             scheduler.step()
             train_acc = np.around(tensor2numpy(correct) * 100 / total, decimals=2)
+
+            self._last_epoch_training_loss_metrics = {}
+            if training_metric_batches > 0:
+                self._last_epoch_training_loss_metrics = {
+                    name: float((value / training_metric_batches).item())
+                    for name, value in training_metric_totals.items()
+                }
+            metric_info = "".join(
+                ", {} {:.3e}".format(name, value)
+                for name, value in self._last_epoch_training_loss_metrics.items()
+            )
+
             info = 'Task {}, Epoch {}/{} => Loss {:.3f}, Train_accy {:.2f}'.format(
                 self._cur_task,
                 epoch + 1,
                 self.run_epoch,
                 losses / len(train_loader),
                 train_acc
-            )
+            ) + metric_info
             prog_bar.set_description(info)
 
-        # task train finished
+        # test train finished  当前任务 LoRA 训练完成→ LoRA 尚未 merge→ CA 分类器校准尚未执行
         test_acc = self._compute_accuracy(self._network, test_loader)
         # pre-merge / pre-CA Test_accy
         final_info = 'Task {}, Epoch {}/{} => Loss {:.3f}, Train_accy {:.2f}, Test_accy {:.2f}'.format(
-                self._cur_task,
-                epoch + 1,
-                self.run_epoch,
-                losses / len(train_loader),
-                train_acc,
-                test_acc,
-            )
+            self._cur_task,
+            epoch + 1,
+            self.run_epoch,
+            losses / len(train_loader),
+            train_acc,
+            test_acc,
+        ) + metric_info
         logging.info(final_info)
-    """
-        Eval task stats: 00-19: 96.40 (443/460) | 20-39: 95.22 (438/460) | 40-59: 98.54 (453/460)
-        Eval total check: weighted_total=96.64 (1334/1380), macro_task_avg=96.72
-        
-        CNN top1 = weighted_total
-        每个 task 的准确率 = 具体 correct/total
-        macro_task_avg = 各 task accuracy 的简单平均
-    """
-    # def accuracy(self, y_pred, y_true, accuracy_matrix=False):
-    #     assert len(y_pred) == len(y_true), 'Data length error.'
-    #
-    #     y_pred = np.asarray(y_pred).reshape(-1)
-    #     y_true = np.asarray(y_true).reshape(-1)
-    #
-    #     all_acc = {}
-    #     total_correct = int((y_pred == y_true).sum()) # 总的预测正确数
-    #     total_num = len(y_true)
-    #     all_acc['total'] = np.around(total_correct * 100 / total_num, decimals=2)
-    #
-    #     i = 0
-    #     task_accs = []
-    #     task_stat_lines = []
-    #     # 每个 task block 的分组准确率 Eval task stats: 00-19: 96.40 (241/250) | 20-39: 95.22 (219/230) | 40-59: 98.54 (202/205)
-    #     for class_id in range(0, np.max(y_true), self.class_num):
-    #         idxes = np.where(
-    #             np.logical_and(y_true >= class_id, y_true < class_id + self.class_num)
-    #         )[0] # 找出真实标签属于当前 block|任务 的样本下标
-    #         if len(idxes) == 0:
-    #             continue
-    #
-    #         label = '{}-{}'.format(
-    #             str(class_id).rjust(2, '0'),
-    #             str(class_id + self.class_num - 1).rjust(2, '0')
-    #         )
-    #         # 当前 task block 中预测正确数量 / 当前 task block 样本总数
-    #         correct = int((y_pred[idxes] == y_true[idxes]).sum())
-    #         count = int(len(idxes))
-    #         acc = np.around(correct * 100 / count, decimals=2)
-    #
-    #         all_acc[label] = acc
-    #         task_accs.append(float(acc))
-    #         task_stat_lines.append(f'{label}: {acc:.2f} ({correct}/{count})')
-    #         # 行：被评估的 task block
-    #         # 列：训练到第几个 task
-    #         # 值：该 block 在当前模型下的准确率
-    #         if accuracy_matrix:
-    #             self.acc_matrix[i, self._cur_task] = all_acc[label]
-    #         i += 1
-    #
-    #     if accuracy_matrix and task_stat_lines:
-    #         macro_task_avg = np.around(np.mean(task_accs), decimals=2)
-    #         logging.info('Eval task stats: %s', ' | '.join(task_stat_lines))
-    #         logging.info(
-    #             'Eval total check: weighted_total=%.2f (%d/%d), macro_task_avg=%.2f',
-    #             all_acc['total'],
-    #             total_correct,
-    #             total_num,
-    #             macro_task_avg,
-    #         )
-    #
-    #     idxes = np.where(y_true < self._known_classes)[0]
-    #     all_acc['old'] = 0 if len(idxes) == 0 else np.around(
-    #         (y_pred[idxes] == y_true[idxes]).sum() * 100 / len(idxes),
-    #         decimals=2,
-    #     )
-    #
-    #     idxes = np.where(y_true >= self._known_classes)[0]
-    #     all_acc['new'] = np.around(
-    #         (y_pred[idxes] == y_true[idxes]).sum() * 100 / len(idxes),
-    #         decimals=2,
-    #     )
-    #
-    #     return all_acc
 
-    def accuracy(self, y_pred, y_true, accuracy_matrix = False):
+    def accuracy(self, y_pred, y_true, accuracy_matrix=False):
         assert len(y_pred) == len(y_true), 'Data length error.'
 
         all_acc = {}
-        all_acc['total'] = np.around((y_pred == y_true).sum()*100 / len(y_true), decimals=2)
+        all_acc['total'] = np.around((y_pred == y_true).sum() * 100 / len(y_true), decimals=2)
 
         i = 0
         # Grouped accuracy
         for class_id in range(0, np.max(y_true), self.class_num):
             idxes = np.where(np.logical_and(y_true >= class_id, y_true < class_id + self.class_num))[0]
-            label = '{}-{}'.format(str(class_id).rjust(2, '0'), str(class_id+self.class_num-1).rjust(2, '0'))
-            all_acc[label] = np.around((y_pred[idxes] == y_true[idxes]).sum()*100 / len(idxes), decimals=2)
+            label = '{}-{}'.format(str(class_id).rjust(2, '0'), str(class_id + self.class_num - 1).rjust(2, '0'))
+            all_acc[label] = np.around((y_pred[idxes] == y_true[idxes]).sum() * 100 / len(idxes), decimals=2)
             if accuracy_matrix:
                 self.acc_matrix[i, self._cur_task] = all_acc[label]
             i += 1
 
         # Old accuracy
         idxes = np.where(y_true < self._known_classes)[0]
-        all_acc['old'] = 0 if len(idxes) == 0 else np.around((y_pred[idxes] == y_true[idxes]).sum()*100 / len(idxes),
-                                                            decimals=2)
+        all_acc['old'] = 0 if len(idxes) == 0 else np.around((y_pred[idxes] == y_true[idxes]).sum() * 100 / len(idxes),
+                                                             decimals=2)
 
         # New accuracy
         idxes = np.where(y_true >= self._known_classes)[0]
-        all_acc['new'] = np.around((y_pred[idxes] == y_true[idxes]).sum()*100 / len(idxes), decimals=2)
+        all_acc['new'] = np.around((y_pred[idxes] == y_true[idxes]).sum() * 100 / len(idxes), decimals=2)
 
         return all_acc
 
@@ -687,26 +718,28 @@ class Learner(BaseLearner):
             targets = targets.to(self._device)
 
             with torch.no_grad():
-                task_id = (targets//self.class_num).cpu()
+                task_id = (targets // self.class_num).cpu()
                 y_true_task.append(task_id)
                 # 前向推理，不给真实 task id  | 全局 logits
-                outputs = self._network.interface(inputs) # [bs,C*num_task]
+                outputs = self._network.interface(inputs)  # [bs,C*num_task]
             # topk1 [bs]
             predicts = torch.topk(outputs, k=self.topk, dim=1, largest=True, sorted=True)[1].view(-1)  # [bs, topk]
-            y_pred_task.append((predicts//self.class_num).cpu())
+            y_pred_task.append((predicts // self.class_num).cpu())
             # CNN top1 with task
-            outputs_with_task = torch.zeros_like(outputs)[:,:self.class_num] # 创建一个只装 20 类 logits 的矩阵
-            for idx, i in enumerate(targets//self.class_num): # 用真实标签算真实 task id
-                en, be = self.class_num*i, self.class_num*(i+1) # task1: en=20, be=40
-                outputs_with_task[idx] = outputs[idx, en:be] # idx -- 真实task标签 [bs,C]
-            predicts_with_task = outputs_with_task.argmax(dim=1) # [bs]
-            predicts_with_task = predicts_with_task + (targets//self.class_num)*self.class_num # 再加回 task 偏移量，变回全局类别编号
+            outputs_with_task = torch.zeros_like(outputs)[:, :self.class_num]  # 创建一个只装 20 类 logits 的矩阵
+            for idx, i in enumerate(targets // self.class_num):  # 用真实标签算真实 task id
+                en, be = self.class_num * i, self.class_num * (i + 1)  # task1: en=20, be=40
+                outputs_with_task[idx] = outputs[idx, en:be]  # idx -- 真实task标签 [bs,C]
+            predicts_with_task = outputs_with_task.argmax(dim=1)  # [bs]
+            predicts_with_task = predicts_with_task + (
+                        targets // self.class_num) * self.class_num  # 再加回 task 偏移量，变回全局类别编号
 
             y_pred.append(predicts.cpu().numpy())
             y_pred_with_task.append(predicts_with_task.cpu().numpy())
             y_true.append(targets.cpu().numpy())
         # 转成 []
-        return np.concatenate(y_pred), np.concatenate(y_pred_with_task), np.concatenate(y_true), torch.cat(y_pred_task), torch.cat(y_true_task)  # [N, topk]
+        return np.concatenate(y_pred), np.concatenate(y_pred_with_task), np.concatenate(y_true), torch.cat(
+            y_pred_task), torch.cat(y_true_task)  # [N, topk]
 
     def _compute_accuracy(self, model, loader):
         model.eval()
@@ -719,17 +752,18 @@ class Learner(BaseLearner):
             correct += (predicts.cpu() == targets).sum()
             total += len(targets)
 
-        return np.around(tensor2numpy(correct)*100 / total, decimals=2)
+        return np.around(tensor2numpy(correct) * 100 / total, decimals=2)
 
     """
         1. 伪特征采样（Exemplar-free Sampling）：利用前面收集的各个类别的均值 _class_means 和协方差 _class_covs 构造高斯分布（MultivariateNormal），随机采样出伪特征
         2. 冻结 Backbone，只开分类头：将主干网络冻结，解锁从 Task 0 到当前 Task 的所有分类头
         3. 特征快速校准（fc_only=True）：将伪特征直接送入分类头（跳过重型 ViT），通过 CrossEntropy Loss 微调分类头权重，拉平新旧分类头的得分响应，消除分类决策偏差
     """
+
     def _stage2_compact_classifier(self, task_size, ca_epochs=5):
         ca_epochs = int(self.args.get("ca_epochs", 5))
-        for p in self._network.classifier_pool[:self._cur_task+1].parameters():
-            p.requires_grad=True
+        for p in self._network.classifier_pool[:self._cur_task + 1].parameters():
+            p.requires_grad = True
 
         run_epochs = ca_epochs
         crct_num = self._total_classes
@@ -753,30 +787,30 @@ class Learner(BaseLearner):
             num_sampled_pcls = 256
 
             for c_id in range(crct_num):
-                t_id = c_id//task_size
-                decay = (t_id+1)/(self._cur_task+1)*0.1
-                cls_mean = self._class_means[c_id].to(self._device)*(0.9+decay)
+                t_id = c_id // task_size
+                decay = (t_id + 1) / (self._cur_task + 1) * 0.1
+                cls_mean = self._class_means[c_id].to(self._device) * (0.9 + decay)
                 cls_cov = self._class_covs[c_id].to(self._device)
 
                 m = MultivariateNormal(cls_mean.float(), cls_cov.float())
 
                 sampled_data_single = m.sample(sample_shape=(num_sampled_pcls,))
                 sampled_data.append(sampled_data_single)
-                sampled_label.extend([c_id]*num_sampled_pcls)
+                sampled_label.extend([c_id] * num_sampled_pcls)
 
             sampled_data = torch.cat(sampled_data, dim=0).float().to(self._device)
             sampled_label = torch.tensor(sampled_label).long().to(self._device)
 
             inputs = sampled_data
-            targets= sampled_label
+            targets = sampled_label
 
             sf_indexes = torch.randperm(inputs.size(0))
             inputs = inputs[sf_indexes]
             targets = targets[sf_indexes]
 
             for _iter in range(crct_num):
-                inp = inputs[_iter*num_sampled_pcls:(_iter+1)*num_sampled_pcls]
-                tgt = targets[_iter*num_sampled_pcls:(_iter+1)*num_sampled_pcls]
+                inp = inputs[_iter * num_sampled_pcls:(_iter + 1) * num_sampled_pcls]
+                tgt = targets[_iter * num_sampled_pcls:(_iter + 1) * num_sampled_pcls]
                 # -stage two only use classifiers
                 outputs = self._network(inp, fc_only=True)
                 logits = outputs
@@ -785,7 +819,7 @@ class Learner(BaseLearner):
                     per_task_norm = []
                     prev_t_size = 0
                     cur_t_size = 0
-                    for _ti in range(self._cur_task+1):
+                    for _ti in range(self._cur_task + 1):
                         cur_t_size += self.task_sizes[_ti]
                         temp_norm = torch.norm(logits[:, prev_t_size:cur_t_size], p=2, dim=-1, keepdim=True) + 1e-7
                         per_task_norm.append(temp_norm)
@@ -812,12 +846,12 @@ class Learner(BaseLearner):
             info = (
                 'CA Task {} => Loss {:.3f} '
                 '(classifier alignment; final accuracy is logged after CA)'
-            ).format(self._cur_task, losses/self._total_classes)
+            ).format(self._cur_task, losses / self._total_classes)
             logging.info(info)
 
-
     def _compute_class_mean(self, data_manager, check_diff=False, oracle=False):
-        if hasattr(self, '_class_means') and self._class_means is not None and not check_diff: # 已经完成过 Task 0，模型中已经存在之前算好的 _class_means（旧类别的均值矩阵）
+        if hasattr(self,
+                   '_class_means') and self._class_means is not None and not check_diff:  # 已经完成过 Task 0，模型中已经存在之前算好的 _class_means（旧类别的均值矩阵）
             ori_classes = self._class_means.shape[0]
             assert ori_classes == self._known_classes
             new_class_means = torch.zeros((self._total_classes, self.feature_dim))
@@ -826,12 +860,11 @@ class Learner(BaseLearner):
             new_class_cov = torch.zeros((self._total_classes, self.feature_dim, self.feature_dim))
             new_class_cov[:self._known_classes] = self._class_covs
             self._class_covs = new_class_cov
-        elif not check_diff: # 首次创建分支 —— 适用于 Task 0
+        elif not check_diff:  # 首次创建分支 —— 适用于 Task 0
             self._class_means = torch.zeros((self._total_classes, self.feature_dim))
             self._class_covs = torch.zeros((self._total_classes, self.feature_dim, self.feature_dim))
 
         for class_idx in range(self._known_classes, self._total_classes):
-
             data, targets, idx_dataset = data_manager.get_dataset(np.arange(class_idx, class_idx + 1), source='train',
                                                                   mode='test', ret_data=True)
             idx_loader = DataLoader(idx_dataset, batch_size=64, shuffle=False, num_workers=4)
@@ -853,7 +886,7 @@ class Learner(BaseLearner):
             1, 1, DY.shape[1]]) * np.tile(DY[None, :, :], [W.shape[0], 1, 1]), axis=1)
         return displacement
 
-    def extract_features(self, trainloader, model, task_id = None):
+    def extract_features(self, trainloader, model, task_id=None):
         model = model.eval()
         embedding_list = []
         label_list = []
@@ -870,100 +903,42 @@ class Learner(BaseLearner):
         label_list = torch.cat(label_list, dim=0)
         return embedding_list, label_list
 
-    def _extract_vectors_adv(self, loader, old=False):
-        if old:
-            network = self._old_network
-        else:
-            network = self._network
-        network.eval()
-        vectors, targets = [], []
-        with torch.no_grad():
-            for i, batch in enumerate(loader):
-                (_,_inputs, _targets) = batch
-                _inputs = _inputs.to(self._device)
-                _vectors = network.extract_vector(_inputs)
-                vectors.append(_vectors)
-                targets.append(_targets)
-
-        return torch.cat(vectors, dim=0), torch.cat(targets, dim=0)
-
-
-    def shrink_cov(self, cov):
-        alpha1 = 10
-        alpha2 = 10
-        # Compute the mean of the diagonal elements
-        diag_mean = torch.mean(torch.diagonal(cov))
-
-        # Create a copy of the covariance matrix with zeroed out diagonals
-        off_diag = cov.clone()
-        off_diag.fill_diagonal_(0.0)
-
-        # Compute the mean of the off-diagonal elements (non-zero entries)
-        mask = off_diag != 0.0
-        off_diag_mean = (off_diag * mask).sum() / mask.sum()
-
-        # Identity matrix
-        iden = torch.eye(cov.size(0), device=cov.device)
-
-        # Shrink the covariance matrix
-        cov_ = cov + (alpha1 * diag_mean * iden) + (alpha2 * off_diag_mean * (1 - iden))
-
-        return cov_
-
-    def _compute_class_invcov(self, data_manager):
-        _class_invcovs = torch.zeros((self.class_num, self.feature_dim, self.feature_dim),device=self._device)
-
-        for class_idx in range(self._known_classes, self._total_classes):
-
-            data, targets, idx_dataset = data_manager.get_dataset(np.arange(class_idx, class_idx + 1), source='train',
-                                                                  mode='test', ret_data=True)
-            idx_loader = DataLoader(idx_dataset, batch_size=64, shuffle=False, num_workers=4)
-            vectors, _ = self._extract_vectors_adv(idx_loader, True)
-
-            class_cov = self.shrink_cov(torch.cov(torch.tensor(vectors, dtype=torch.float64).T)) + torch.eye(self.feature_dim).to(self._device) * 1e-3
-            _class_invcovs[class_idx-self._known_classes, ...] = torch.linalg.pinv(class_cov).detach()
-
-        return _class_invcovs
-
-
     ###################################################################################################
-    ###################################################################################################
-    ###################################################################################################
-    ###################################################################################################
-
     def setup_RP(self):
-        self.initiated_G=False
-        self._network.use_RP=True
-        if self.args['M']>0:
-            #RP with M > 0
-            M=self.args['M']
-            self._network.weight = torch.nn.Parameter(torch.Tensor(self._total_classes, M).to(device=self._device)) #num classes in task x M
-            self._network.W_rand=torch.randn(self._network.dim, M).to(device=self._device)
-            self.W_rand=copy.deepcopy(self._network.W_rand) #make a copy that gets passed each time the head is replaced
+        self.initiated_G = False
+        self._network.use_RP = True
+        if self.args['M'] > 0:
+            # RP with M > 0
+            M = self.args['M']
+            self._network.weight = torch.nn.Parameter(
+                torch.Tensor(self._total_classes, M).to(device=self._device))  # num classes in task x M
+            self._network.W_rand = torch.randn(self._network.dim, M).to(device=self._device)
+            self.W_rand = copy.deepcopy(
+                self._network.W_rand)  # make a copy that gets passed each time the head is replaced
         else:
-            #no RP, only decorrelation
-            M=self._network.dim #this M is L in the paper
-        self.Q=torch.zeros(M,self.total_classnum)
-        self.G=torch.zeros(M,M)
+            # no RP, only decorrelation
+            M = self._network.dim  # this M is L in the paper
+        self.Q = torch.zeros(M, self.total_classnum)
+        self.G = torch.zeros(M, M)
 
-    def replace_fc(self,trainloader):
+    def replace_fc(self, trainloader):
         self._network = self._network.eval()
 
         if self.args['use_RP']:
-            #these lines are needed because the CosineLinear head gets deleted between streams and replaced by one with more classes (for CIL)
-            self._network.use_RP=True
-            if self.args['M']>0:
-                self._network.W_rand=self.W_rand
+            # these lines are needed because the CosineLinear head gets deleted between streams and replaced by one with more classes (for CIL)
+            self._network.use_RP = True
+            if self.args['M'] > 0:
+                self._network.W_rand = self.W_rand
             else:
-                self._network.W_rand=None
+                self._network.W_rand = None
 
         Features_f = []
         label_list = []
         with torch.no_grad():
             for i, batch in enumerate(trainloader):
-                (_,data,label)=batch
-                data=data.to(self._device)
-                label=label.to(self._device)
+                (_, data, label) = batch
+                data = data.to(self._device)
+                label = label.to(self._device)
                 embedding = self._network(data)["features"]
                 Features_f.append(embedding.cpu())
                 label_list.append(label.cpu())
@@ -976,32 +951,31 @@ class Learner(BaseLearner):
             onehot.scatter_(dim=1, index=targets.long().view(-1, 1), value=1.0)
             return onehot
 
-        Y=target2onehot(label_list,self.total_classnum)
-        if self.args['M']>0:
-            Features_h=torch.nn.functional.relu(Features_f @ self._network.W_rand.cpu())
+        Y = target2onehot(label_list, self.total_classnum)
+        if self.args['M'] > 0:
+            Features_h = torch.nn.functional.relu(Features_f @ self._network.W_rand.cpu())
         else:
-            Features_h=Features_f
-        self.Q=self.Q+Features_h.T @ Y
-        self.G=self.G+Features_h.T @ Features_h
-        ridge=self.optimise_ridge_parameter(Features_h,Y)
-        Wo=torch.linalg.solve(self.G+ridge*torch.eye(self.G.size(dim=0)),self.Q).T #better nmerical stability than .inv
-        self._network.weight.data=Wo[0:self._total_classes,:].to(device=self._device)
+            Features_h = Features_f
+        self.Q = self.Q + Features_h.T @ Y
+        self.G = self.G + Features_h.T @ Features_h
+        ridge = self.optimise_ridge_parameter(Features_h, Y)
+        Wo = torch.linalg.solve(self.G + ridge * torch.eye(self.G.size(dim=0)),
+                                self.Q).T  # better nmerical stability than .inv
+        self._network.weight.data = Wo[0:self._total_classes, :].to(device=self._device)
 
-    def optimise_ridge_parameter(self,Features,Y):
-        ridges=10.0**np.arange(3,9)
-        num_val_samples=int(Features.shape[0]*0.8)
-        losses=[]
-        Q_val=Features[0:num_val_samples,:].T @ Y[0:num_val_samples,:]
-        G_val=Features[0:num_val_samples,:].T @ Features[0:num_val_samples,:]
+    def optimise_ridge_parameter(self, Features, Y):
+        ridges = 10.0 ** np.arange(3, 9)
+        num_val_samples = int(Features.shape[0] * 0.8)
+        losses = []
+        Q_val = Features[0:num_val_samples, :].T @ Y[0:num_val_samples, :]
+        G_val = Features[0:num_val_samples, :].T @ Features[0:num_val_samples, :]
         for ridge in ridges:
-            Wo=torch.linalg.solve(G_val+ridge*torch.eye(G_val.size(dim=0)),Q_val).T #better nmerical stability than .inv
-            Y_train_pred=Features[num_val_samples::,:]@Wo.T
-            losses.append(F.mse_loss(Y_train_pred,Y[num_val_samples::,:]))
-        ridge=ridges[np.argmin(np.array(losses))]
-        logging.info("Optimal lambda: "+str(ridge))
+            Wo = torch.linalg.solve(G_val + ridge * torch.eye(G_val.size(dim=0)),
+                                    Q_val).T  # better nmerical stability than .inv
+            Y_train_pred = Features[num_val_samples::, :] @ Wo.T
+            losses.append(F.mse_loss(Y_train_pred, Y[num_val_samples::, :]))
+        ridge = ridges[np.argmin(np.array(losses))]
+        logging.info("Optimal lambda: " + str(ridge))
         return ridge
+    ###################################################################################################
 
-    ###################################################################################################
-    ###################################################################################################
-    ###################################################################################################
-    ###################################################################################################

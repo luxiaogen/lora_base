@@ -57,7 +57,16 @@ def _random_fixed_A_init(dim: int, r: int, device, dtype) -> torch.Tensor:
     M = torch.randn(dim, r, device=device, dtype=dtype)
     Q, _ = torch.linalg.qr(M, mode="reduced")
     return Q.T.contiguous()  # (r, dim)
-
+"""
+    S_lora.A：
+    先由父类进行 QR/正交初始化
+    → 随后被 DualMask 的 Kaiming 权重完全覆盖
+    → 最终使用 Kaiming
+    
+    P_lora.A：
+    直接通过 _init_A_weight() 进行 Kaiming 初始化
+    → 最终使用 Kaiming
+"""
 def _kaiming_A_init(dim: int, r: int, device, dtype) -> torch.Tensor:
     A = torch.empty(r, dim, device=device, dtype=dtype)
     nn.init.kaiming_uniform_(A, a=math.sqrt(5))

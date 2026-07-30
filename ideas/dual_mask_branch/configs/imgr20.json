@@ -7,12 +7,12 @@
     "memory_per_class": 0,
     "fixed_memory": true,
     "shuffle": true,
-    "init_cls": 20,
-    "increment": 20,
+    "init_cls": 10,
+    "increment": 10,
     "model_name": "dual_mask_branch",
     "embd_dim" : 768,
     "num_heads": 12,
-    "total_sessions" : 10,
+    "total_sessions" : 20,
     "seed": [1993, 1996, 1997],
     "batch_size" : 48,
     "init_epoch" : 20,
@@ -51,9 +51,10 @@
     "dual_mask_vis": false,
     "dual_mask_vis_layers": [0, 5, 11],
     "dual_mask_vis_tasks": [0, 1, 9],
-    "dual_mask_vis_dir": "visualizations/dual_mask_snapshots/imgr10",
+    "dual_mask_vis_dir": "visualizations/dual_mask_snapshots/imgr20",
     "dual_mask_vis_save_weight": false,
 
+    
     "dual_mask_competence_all_seen": false,
     "dual_mask_conflict_old_overlap_adaptive": false,
     "dual_mask_competence_metric": "accuracy"
