@@ -12,7 +12,7 @@ echo "Changed: Anchor ablation relative to the main run: disable only Task-0 W0 
 echo "Log: $LOG_DIR/imgr10_energy50_anchor_off_seed1993_${TIMESTAMP}.log"
 echo "============================================================"
 if
-    python main.py --config ideas/dual_mask_branch/configs/imgr10.json \
+    python main.py --config exps/dlora/imgr10.json \
         --set 'seed=[1993]' \
         --set prefix=imgr10_energy50_anchor_off_seed1993 \
         --set init_epoch=20 \
@@ -56,7 +56,7 @@ echo "Changed: Conflict-range ablation relative to the main run: replace Energy5
 echo "Log: $LOG_DIR/imgr10_fixed_top10_anchor_w10_seed1993_${TIMESTAMP}.log"
 echo "============================================================"
 if
-    python main.py --config ideas/dual_mask_branch/configs/imgr10.json \
+    python main.py --config exps/dlora/imgr10.json \
         --set 'seed=[1993]' \
         --set prefix=imgr10_fixed_top10_anchor_w10_seed1993 \
         --set init_epoch=20 \

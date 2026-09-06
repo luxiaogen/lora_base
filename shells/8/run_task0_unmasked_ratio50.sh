@@ -14,7 +14,7 @@ cd "$(dirname "$0")"
 # energy-coverage target (~0.93), releasing deep-layer plasticity.
 #
 # Requires the dual_mask_coverage_mode switch added to
-# ideas/dual_mask_branch/attention.py.
+# models/attention.py.
 
 LOG_DIR="logs/shell_logs/task0_unmasked_ratio50"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
@@ -28,7 +28,7 @@ echo "  seed=${SEED}, Energy-50%, legacy_linear, task0 gate=unmasked"
 echo "  Log: ${LOG_DIR}/cub10_task0_unmasked_ratio50_seed${SEED}_${TIMESTAMP}.log"
 echo "========================================="
 python main.py \
-    --config ideas/dual_mask_branch/configs/cub10.json \
+    --config exps/dlora/cub10.json \
     --set "seed=[${SEED}]" \
     --set "prefix=cub10_task0_unmasked_ratio50_seed${SEED}" \
     --set 'dual_mask_conflict_energy_adaptive=true' \
@@ -46,7 +46,7 @@ echo "  seed=${SEED}, Energy-50%, legacy_linear, task0 gate=unmasked"
 echo "  Log: ${LOG_DIR}/imgr10_task0_unmasked_ratio50_seed${SEED}_${TIMESTAMP}.log"
 echo "========================================="
 python main.py \
-    --config ideas/dual_mask_branch/configs/imgr10.json \
+    --config exps/dlora/imgr10.json \
     --set "seed=[${SEED}]" \
     --set "prefix=imgr10_task0_unmasked_ratio50_seed${SEED}" \
     --set 'dual_mask_conflict_energy_adaptive=true' \
@@ -64,7 +64,7 @@ echo "  seed=${SEED}, Energy-50%, legacy_linear, task0 gate=unmasked"
 echo "  Log: ${LOG_DIR}/imga10_task0_unmasked_ratio50_seed${SEED}_${TIMESTAMP}.log"
 echo "========================================="
 python main.py \
-    --config ideas/dual_mask_branch/configs/imga10.json \
+    --config exps/dlora/imga10.json \
     --set "seed=[${SEED}]" \
     --set "prefix=imga10_task0_unmasked_ratio50_seed${SEED}" \
     --set 'dual_mask_conflict_energy_adaptive=true' \

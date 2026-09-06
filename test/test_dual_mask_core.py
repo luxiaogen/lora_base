@@ -9,7 +9,7 @@ import torch
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from ideas.dual_mask_branch.attention import (  # noqa: E402
+from models.attention import (  # noqa: E402
     Attention_LoRA,
     _energy_coverage_mask,
     _energy_coverage_with_ratio_floor_mask,
@@ -17,7 +17,7 @@ from ideas.dual_mask_branch.attention import (  # noqa: E402
     _select_svd_rank,
     _top_ratio_mask,
 )
-from ideas.dual_mask_branch.metrics import (  # noqa: E402
+from utils.dual_mask_metrics import (  # noqa: E402
     build_prototypes,
     functional_merge_diagnostics,
     prototype_accuracy,
@@ -466,7 +466,7 @@ class PretrainedAnchorTests(unittest.TestCase):
             easydict.EasyDict = EasyDict
             sys.modules["easydict"] = easydict
 
-        from ideas.dual_mask_branch.learner import Learner
+        from methods.dlora import Learner
 
         module = Attention_LoRA(dim=2, num_heads=1, r=2, n_tasks=2)
         module._init_params(

@@ -59,7 +59,7 @@ run_experiment() {
 
 # --- 只运行 cifar10 ---
 dataset="cifar10"
-config="ideas/dual_mask_branch/configs/cifar10.json"
+config="exps/dlora/cifar10.json"
 
 for mode in "${MODES[@]}"; do
     for seed in "${SEEDS[@]}"; do
@@ -70,10 +70,10 @@ done
 ##for dataset in cub10 imgr10 imga10 cifar10; do
 #for dataset in cifar10; do
 #    case "$dataset" in
-##        cub10) config="ideas/dual_mask_branch/configs/cub10.json" ;;
-##        imgr10) config="ideas/dual_mask_branch/configs/imgr10.json" ;;
-##        imga10) config="ideas/dual_mask_branch/configs/imga10.json" ;;
-#        cifar10) config="ideas/dual_mask_branch/configs/cifar10.json" ;;
+##        cub10) config="exps/dlora/cub10.json" ;;
+##        imgr10) config="exps/dlora/imgr10.json" ;;
+##        imga10) config="exps/dlora/imga10.json" ;;
+#        cifar10) config="exps/dlora/cifar10.json" ;;
 #    esac
 #
 #    for mode in "${MODES[@]}"; do

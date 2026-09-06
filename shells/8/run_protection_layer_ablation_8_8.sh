@@ -59,23 +59,23 @@ run_experiment() {
 }
 
 for seed in 1993 1996; do
-    run_experiment cub10 ideas/dual_mask_branch/configs/cub10.json "$seed" fixed_ratio ratio none true
-    run_experiment cub10 ideas/dual_mask_branch/configs/cub10.json "$seed" ct_energy energy none true
-    run_experiment cub10 ideas/dual_mask_branch/configs/cub10.json "$seed" shallow_high ratio shallow_high true
-    run_experiment cub10 ideas/dual_mask_branch/configs/cub10.json "$seed" deep_high ratio deep_high true
-    run_experiment cub10 ideas/dual_mask_branch/configs/cub10.json "$seed" s_protect_off ratio none false
+    run_experiment cub10 exps/dlora/cub10.json "$seed" fixed_ratio ratio none true
+    run_experiment cub10 exps/dlora/cub10.json "$seed" ct_energy energy none true
+    run_experiment cub10 exps/dlora/cub10.json "$seed" shallow_high ratio shallow_high true
+    run_experiment cub10 exps/dlora/cub10.json "$seed" deep_high ratio deep_high true
+    run_experiment cub10 exps/dlora/cub10.json "$seed" s_protect_off ratio none false
 
-    run_experiment imgr10 ideas/dual_mask_branch/configs/imgr10.json "$seed" fixed_ratio ratio none true
-    run_experiment imgr10 ideas/dual_mask_branch/configs/imgr10.json "$seed" ct_energy energy none true
-    run_experiment imgr10 ideas/dual_mask_branch/configs/imgr10.json "$seed" shallow_high ratio shallow_high true
-    run_experiment imgr10 ideas/dual_mask_branch/configs/imgr10.json "$seed" deep_high ratio deep_high true
-    run_experiment imgr10 ideas/dual_mask_branch/configs/imgr10.json "$seed" s_protect_off ratio none false
+    run_experiment imgr10 exps/dlora/imgr10.json "$seed" fixed_ratio ratio none true
+    run_experiment imgr10 exps/dlora/imgr10.json "$seed" ct_energy energy none true
+    run_experiment imgr10 exps/dlora/imgr10.json "$seed" shallow_high ratio shallow_high true
+    run_experiment imgr10 exps/dlora/imgr10.json "$seed" deep_high ratio deep_high true
+    run_experiment imgr10 exps/dlora/imgr10.json "$seed" s_protect_off ratio none false
 
-    run_experiment imga10 ideas/dual_mask_branch/configs/imga10.json "$seed" fixed_ratio ratio none true
-    run_experiment imga10 ideas/dual_mask_branch/configs/imga10.json "$seed" ct_energy energy none true
-    run_experiment imga10 ideas/dual_mask_branch/configs/imga10.json "$seed" shallow_high ratio shallow_high true
-    run_experiment imga10 ideas/dual_mask_branch/configs/imga10.json "$seed" deep_high ratio deep_high true
-    run_experiment imga10 ideas/dual_mask_branch/configs/imga10.json "$seed" s_protect_off ratio none false
+    run_experiment imga10 exps/dlora/imga10.json "$seed" fixed_ratio ratio none true
+    run_experiment imga10 exps/dlora/imga10.json "$seed" ct_energy energy none true
+    run_experiment imga10 exps/dlora/imga10.json "$seed" shallow_high ratio shallow_high true
+    run_experiment imga10 exps/dlora/imga10.json "$seed" deep_high ratio deep_high true
+    run_experiment imga10 exps/dlora/imga10.json "$seed" s_protect_off ratio none false
 done
 
 END_TIME=$(date +%s)

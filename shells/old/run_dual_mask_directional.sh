@@ -6,7 +6,7 @@ mkdir -p logs/shell_logs
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 
 if [ "$#" -eq 0 ]; then
-    set -- ideas/dual_mask_branch/configs/cub10.json
+    set -- exps/dlora/cub10.json
 fi
 
 for config in "$@"; do

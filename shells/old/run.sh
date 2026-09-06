@@ -13,7 +13,7 @@ echo "  Starting Cub200 T10 Experiment"
 echo "========================================="
 #python main.py --config exps/dlora/cifar10.json 2>&1 | tee logs/shell_logs/cifar100_${TIMESTAMP}.log
 python main.py \
-    --config ideas/dual_mask_branch/configs/cub10.json \
+    --config exps/dlora/cub10.json \
     --set 'seed=[1993]' \
     --set prefix=dual_mask_simplified_v1 \
     --set init_epoch=20 \
@@ -34,7 +34,7 @@ echo "========================================="
 #python main.py --config exps/dlora/imgr10.json 2>&1 | tee logs/shell_logs/imgr10_${TIMESTAMP}.log
 
 python main.py \
-    --config ideas/dual_mask_branch/configs/imgr10.json \
+    --config exps/dlora/imgr10.json \
     --set 'seed=[1993]' \
     --set prefix=dual_mask_simplified_v1 \
     --set init_epoch=20 \

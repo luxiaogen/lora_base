@@ -14,7 +14,7 @@ echo "Changed: safe residual weight 0 control"
 echo "Log: $LOG_DIR/imgr10_suppress_safe_w0_seed1993_${TIMESTAMP}.log"
 echo "============================================================"
 if
-    python main.py --config ideas/dual_mask_branch/configs/imgr10.json \
+    python main.py --config exps/dlora/imgr10.json \
         --set 'seed=[1993]' \
         --set prefix=imgr10_suppress_safe_w0_seed1993 \
         --set init_epoch=20 \
@@ -50,7 +50,7 @@ echo "Changed: seed 1996, safe residual weight 0 control"
 echo "Log: $LOG_DIR/imgr10_suppress_safe_w0_seed1996_${TIMESTAMP}.log"
 echo "============================================================"
 if
-    python main.py --config ideas/dual_mask_branch/configs/imgr10.json \
+    python main.py --config exps/dlora/imgr10.json \
         --set 'seed=[1996]' \
         --set prefix=imgr10_suppress_safe_w0_seed1996 \
         --set init_epoch=20 \
@@ -86,7 +86,7 @@ echo "Changed: seed 1996, safe residual weight 1000 treatment"
 echo "Log: $LOG_DIR/imgr10_suppress_safe_w1000_seed1996_${TIMESTAMP}.log"
 echo "============================================================"
 if
-    python main.py --config ideas/dual_mask_branch/configs/imgr10.json \
+    python main.py --config exps/dlora/imgr10.json \
         --set 'seed=[1996]' \
         --set prefix=imgr10_suppress_safe_w1000_seed1996 \
         --set init_epoch=20 \
@@ -122,7 +122,7 @@ echo "Changed: seed 1997, safe residual weight 0 control"
 echo "Log: $LOG_DIR/imgr10_suppress_safe_w0_seed1997_${TIMESTAMP}.log"
 echo "============================================================"
 if
-    python main.py --config ideas/dual_mask_branch/configs/imgr10.json \
+    python main.py --config exps/dlora/imgr10.json \
         --set 'seed=[1997]' \
         --set prefix=imgr10_suppress_safe_w0_seed1997 \
         --set init_epoch=20 \
@@ -158,7 +158,7 @@ echo "Changed: seed 1997, safe residual weight 1000 treatment"
 echo "Log: $LOG_DIR/imgr10_suppress_safe_w1000_seed1997_${TIMESTAMP}.log"
 echo "============================================================"
 if
-    python main.py --config ideas/dual_mask_branch/configs/imgr10.json \
+    python main.py --config exps/dlora/imgr10.json \
         --set 'seed=[1997]' \
         --set prefix=imgr10_suppress_safe_w1000_seed1997 \
         --set init_epoch=20 \
@@ -194,7 +194,7 @@ echo "Changed: suppress_relocate, safe residual weight 0 control"
 echo "Log: $LOG_DIR/imgr10_suppress_relocate_safe_w0_seed1993_${TIMESTAMP}.log"
 echo "============================================================"
 if
-    python main.py --config ideas/dual_mask_branch/configs/imgr10.json \
+    python main.py --config exps/dlora/imgr10.json \
         --set 'seed=[1993]' \
         --set prefix=imgr10_suppress_relocate_safe_w0_seed1993 \
         --set init_epoch=20 \
@@ -233,7 +233,7 @@ echo "Changed: suppress_relocate, safe residual weight 1000 treatment"
 echo "Log: $LOG_DIR/imgr10_suppress_relocate_safe_w1000_seed1993_${TIMESTAMP}.log"
 echo "============================================================"
 if
-    python main.py --config ideas/dual_mask_branch/configs/imgr10.json \
+    python main.py --config exps/dlora/imgr10.json \
         --set 'seed=[1993]' \
         --set prefix=imgr10_suppress_relocate_safe_w1000_seed1993 \
         --set init_epoch=20 \

@@ -79,8 +79,8 @@ run_experiment() {
 
 for dataset in cub10 imgr10; do
     case "$dataset" in
-        cub10) config="ideas/dual_mask_branch/configs/cub10.json" ;;
-        imgr10) config="ideas/dual_mask_branch/configs/imgr10.json" ;;
+        cub10) config="exps/dlora/cub10.json" ;;
+        imgr10) config="exps/dlora/imgr10.json" ;;
     esac
 
     for seed in "${SEEDS[@]}"; do

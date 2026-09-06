@@ -73,9 +73,9 @@ run_experiment() {
 
 for dataset in cub10 imgr10; do
     if [[ "$dataset" == "cub10" ]]; then
-        config="ideas/dual_mask_branch/configs/cub10.json"
+        config="exps/dlora/cub10.json"
     else
-        config="ideas/dual_mask_branch/configs/imgr10.json"
+        config="exps/dlora/imgr10.json"
     fi
 
     for seed in "${SEEDS[@]}"; do

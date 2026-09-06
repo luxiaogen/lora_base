@@ -13,7 +13,7 @@ echo "  CUB10 competence baseline"
 echo "  seed=1993, Energy-50%, alpha=competence"
 echo "========================================="
 python main.py \
-  --config ideas/dual_mask_branch/configs/cub10.json \
+  --config exps/dlora/cub10.json \
   --set 'seed=[1993]' \
   --set prefix=cub10_competence_seed1993 \
   --set dual_mask_protect_strength_mode=competence \
@@ -42,7 +42,7 @@ echo "  CUB10 layer-drift ablation"
 echo "  seed=1993, Energy-50%, alpha=layer_drift"
 echo "========================================="
 python main.py \
-  --config ideas/dual_mask_branch/configs/cub10.json \
+  --config exps/dlora/cub10.json \
   --set 'seed=[1993]' \
   --set prefix=cub10_layer_drift_seed1993 \
   --set dual_mask_protect_strength_mode=layer_drift \
@@ -71,7 +71,7 @@ echo "  ImageNet-R10 competence baseline"
 echo "  seed=1993, Energy-50%, alpha=competence"
 echo "========================================="
 python main.py \
-  --config ideas/dual_mask_branch/configs/imgr10.json \
+  --config exps/dlora/imgr10.json \
   --set 'seed=[1993]' \
   --set prefix=imgr10_competence_seed1993 \
   --set dual_mask_protect_strength_mode=competence \
@@ -100,7 +100,7 @@ echo "  ImageNet-R10 layer-drift ablation"
 echo "  seed=1993, Energy-50%, alpha=layer_drift"
 echo "========================================="
 python main.py \
-  --config ideas/dual_mask_branch/configs/imgr10.json \
+  --config exps/dlora/imgr10.json \
   --set 'seed=[1993]' \
   --set prefix=imgr10_layer_drift_seed1993 \
   --set dual_mask_protect_strength_mode=layer_drift \
@@ -129,7 +129,7 @@ echo "  ImageNet-A competence baseline"
 echo "  seed=1993, Energy-50%, alpha=competence"
 echo "========================================="
 python main.py \
-  --config ideas/dual_mask_branch/configs/imga10.json \
+  --config exps/dlora/imga10.json \
   --set 'seed=[1993]' \
   --set prefix=imga10_competence_seed1993 \
   --set dual_mask_protect_strength_mode=competence \
@@ -158,7 +158,7 @@ echo "  ImageNet-A layer-drift ablation"
 echo "  seed=1993, Energy-50%, alpha=layer_drift"
 echo "========================================="
 python main.py \
-  --config ideas/dual_mask_branch/configs/imga10.json \
+  --config exps/dlora/imga10.json \
   --set 'seed=[1993]' \
   --set prefix=imga10_layer_drift_seed1993 \
   --set dual_mask_protect_strength_mode=layer_drift \

@@ -58,9 +58,9 @@ run_one() {
 
 for SEED in 1993 1996; do
     for VARIANT in reg_off gate_off; do
-        run_one cub10 ideas/dual_mask_branch/configs/cub10.json "$VARIANT" "$SEED"
-        run_one imgr10 ideas/dual_mask_branch/configs/imgr10.json "$VARIANT" "$SEED"
-        run_one imga10 ideas/dual_mask_branch/configs/imga10.json "$VARIANT" "$SEED"
+        run_one cub10 exps/dlora/cub10.json "$VARIANT" "$SEED"
+        run_one imgr10 exps/dlora/imgr10.json "$VARIANT" "$SEED"
+        run_one imga10 exps/dlora/imga10.json "$VARIANT" "$SEED"
     done
 done
 

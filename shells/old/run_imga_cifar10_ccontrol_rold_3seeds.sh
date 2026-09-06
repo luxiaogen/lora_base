@@ -71,11 +71,11 @@ run_experiment() {
 }
 
 for seed in "${SEEDS[@]}"; do
-    run_experiment imga10 ideas/dual_mask_branch/configs/imga10.json "$seed"
+    run_experiment imga10 exps/dlora/imga10.json "$seed"
 done
 
 for seed in "${SEEDS[@]}"; do
-    run_experiment cifar100 ideas/dual_mask_branch/configs/cifar10.json "$seed"
+    run_experiment cifar100 exps/dlora/cifar10.json "$seed"
 done
 
 TOTAL_SECONDS=$(($(date +%s) - START_TIME))

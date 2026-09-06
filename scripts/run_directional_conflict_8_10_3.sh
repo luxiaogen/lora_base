@@ -57,12 +57,12 @@ run_experiment() {
 for seed in "${SEEDS[@]}"; do
     run_experiment \
         imgr10 \
-        ideas/dual_mask_branch/configs/imgr10.json \
+        exps/dlora/imgr10.json \
         "$seed"
 
     run_experiment \
         imga10 \
-        ideas/dual_mask_branch/configs/imga10.json \
+        exps/dlora/imga10.json \
         "$seed"
 done
 

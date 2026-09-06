@@ -59,22 +59,22 @@ run_experiment() {
 }
 
 # CUB: A, B, C, D
-run_experiment cub10 ideas/dual_mask_branch/configs/cub10.json none
-run_experiment cub10 ideas/dual_mask_branch/configs/cub10.json suppress
-run_experiment cub10 ideas/dual_mask_branch/configs/cub10.json relocate
-run_experiment cub10 ideas/dual_mask_branch/configs/cub10.json suppress_relocate
+run_experiment cub10 exps/dlora/cub10.json none
+run_experiment cub10 exps/dlora/cub10.json suppress
+run_experiment cub10 exps/dlora/cub10.json relocate
+run_experiment cub10 exps/dlora/cub10.json suppress_relocate
 
 # ImageNet-R: A, B, C, D
-run_experiment imgr10 ideas/dual_mask_branch/configs/imgr10.json none
-run_experiment imgr10 ideas/dual_mask_branch/configs/imgr10.json suppress
-run_experiment imgr10 ideas/dual_mask_branch/configs/imgr10.json relocate
-run_experiment imgr10 ideas/dual_mask_branch/configs/imgr10.json suppress_relocate
+run_experiment imgr10 exps/dlora/imgr10.json none
+run_experiment imgr10 exps/dlora/imgr10.json suppress
+run_experiment imgr10 exps/dlora/imgr10.json relocate
+run_experiment imgr10 exps/dlora/imgr10.json suppress_relocate
 
 # ImageNet-A: A, B, C, D
-run_experiment imga10 ideas/dual_mask_branch/configs/imga10.json none
-run_experiment imga10 ideas/dual_mask_branch/configs/imga10.json suppress
-run_experiment imga10 ideas/dual_mask_branch/configs/imga10.json relocate
-run_experiment imga10 ideas/dual_mask_branch/configs/imga10.json suppress_relocate
+run_experiment imga10 exps/dlora/imga10.json none
+run_experiment imga10 exps/dlora/imga10.json suppress
+run_experiment imga10 exps/dlora/imga10.json relocate
+run_experiment imga10 exps/dlora/imga10.json suppress_relocate
 
 END_TIME=$(date +%s)
 TOTAL_SECONDS=$((END_TIME - START_TIME))

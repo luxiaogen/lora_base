@@ -3,7 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-CONFIG="ideas/dual_mask_branch/configs/cub10.json"
+CONFIG="exps/dlora/cub10.json"
 SEED=1993
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 LOG_DIR="logs/shell_logs/rt_soft_night_seed1993/${TIMESTAMP}"

@@ -65,11 +65,11 @@ run_experiment() {
 }
 
 # CUB seed 1993 has already completed; these two runs test repeatability.
-run_experiment cub10 ideas/dual_mask_branch/configs/cub10.json 1996
-run_experiment cub10 ideas/dual_mask_branch/configs/cub10.json 1997
+run_experiment cub10 exps/dlora/cub10.json 1996
+run_experiment cub10 exps/dlora/cub10.json 1997
 
 # First cross-dataset validation; keep the same single-variable change.
-run_experiment imgr10 ideas/dual_mask_branch/configs/imgr10.json 1993
+run_experiment imgr10 exps/dlora/imgr10.json 1993
 
 END_TIME=$(date +%s)
 TOTAL_SECONDS=$((END_TIME - START_TIME))

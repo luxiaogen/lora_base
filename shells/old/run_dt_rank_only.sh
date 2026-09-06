@@ -60,8 +60,8 @@ run_experiment() {
     fi
 }
 
-run_experiment cub10 ideas/dual_mask_branch/configs/cub10.json
-run_experiment imgr10 ideas/dual_mask_branch/configs/imgr10.json
+run_experiment cub10 exps/dlora/cub10.json
+run_experiment imgr10 exps/dlora/imgr10.json
 
 echo "============================================================"
 echo "Finished with ${FAILURES} failure(s)"

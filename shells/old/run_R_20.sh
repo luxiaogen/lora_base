@@ -3,7 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-CONFIG="ideas/dual_mask_branch/configs/imgr20.json"
+CONFIG="exps/dlora/imgr20.json"
 LOG_DIR="logs/shell_logs/imgr_svd_vs_svd_grad"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 START_TIME=$(date +%s)

@@ -31,7 +31,7 @@ echo "  seed=${SEED}, Energy-50%, legacy_linear, task0 gate=unmasked"
 echo "  Log: ${LOG_DIR}/cub10_task0_unmasked_ratio50_noconflict_seed${SEED}_${TIMESTAMP}.log"
 echo "========================================="
 python main.py \
-    --config ideas/dual_mask_branch/configs/cub10.json \
+    --config exps/dlora/cub10.json \
     --set "seed=[${SEED}]" \
     --set "prefix=cub10_task0_unmasked_ratio50_noconflict_seed${SEED}" \
     --set 'dual_mask_conflict_energy_adaptive=true' \
@@ -51,7 +51,7 @@ echo "  seed=${SEED}, Energy-50%, legacy_linear, task0 gate=unmasked"
 echo "  Log: ${LOG_DIR}/imgr10_task0_unmasked_ratio50_noconflict_seed${SEED}_${TIMESTAMP}.log"
 echo "========================================="
 python main.py \
-    --config ideas/dual_mask_branch/configs/imgr10.json \
+    --config exps/dlora/imgr10.json \
     --set "seed=[${SEED}]" \
     --set "prefix=imgr10_task0_unmasked_ratio50_noconflict_seed${SEED}" \
     --set 'dual_mask_conflict_energy_adaptive=true' \
@@ -71,7 +71,7 @@ echo "  seed=${SEED}, Energy-50%, legacy_linear, task0 gate=unmasked"
 echo "  Log: ${LOG_DIR}/imga10_task0_unmasked_ratio50_noconflict_seed${SEED}_${TIMESTAMP}.log"
 echo "========================================="
 python main.py \
-    --config ideas/dual_mask_branch/configs/imga10.json \
+    --config exps/dlora/imga10.json \
     --set "seed=[${SEED}]" \
     --set "prefix=imga10_task0_unmasked_ratio50_noconflict_seed${SEED}" \
     --set 'dual_mask_conflict_energy_adaptive=true' \

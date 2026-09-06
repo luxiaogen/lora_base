@@ -24,9 +24,9 @@ run_with_conflict() {
         2>&1 | tee "logs/shell_logs/${name}_with_conflict_${TIMESTAMP}.log"
 }
 
-run_with_conflict cub10 ideas/dual_mask_branch/configs/cub10.json
-#run_with_conflict cifar100 ideas/dual_mask_branch/configs/cifar10.json
-run_with_conflict imgr10 ideas/dual_mask_branch/configs/imgr10.json
+run_with_conflict cub10 exps/dlora/cub10.json
+#run_with_conflict cifar100 exps/dlora/cifar10.json
+run_with_conflict imgr10 exps/dlora/imgr10.json
 
 echo "========================================="
 echo "All with-conflict experiments finished successfully!"
@@ -47,19 +47,19 @@ echo "========================================="
 #echo "  [1/3]Starting Cub T10 Experiment ca=true"
 #echo "  Log: logs/shell_logs/cub10_${TIMESTAMP}.log"
 #echo "========================================="
-#python main.py --config /home/shengqin/lys/baseline/LoDA_ICML2026/ideas/dual_mask_branch/configs/cub10.json 2>&1 | tee logs/shell_logs/cub10_${TIMESTAMP}.log
+#python main.py --config /home/shengqin/lys/baseline/LoDA_ICML2026/exps/dlora/cub10.json 2>&1 | tee logs/shell_logs/cub10_${TIMESTAMP}.log
 #
 #echo "========================================="
 #echo "  [2/3]Starting CIFAR-100 T10 Experiment ca=true"
 #echo "  Log: logs/shell_logs/cifar100_${TIMESTAMP}.log"
 #echo "========================================="
-#python main.py --config /home/shengqin/lys/baseline/LoDA_ICML2026/ideas/dual_mask_branch/configs/cifar10.json 2>&1 | tee logs/shell_logs/cifar100_${TIMESTAMP}.log
+#python main.py --config /home/shengqin/lys/baseline/LoDA_ICML2026/exps/dlora/cifar10.json 2>&1 | tee logs/shell_logs/cifar100_${TIMESTAMP}.log
 #
 #echo "========================================="
 #echo "  [3/3]Starting ImageNet-R T10 Experiment ca=true"
 #echo "  Log: logs/shell_logs/imgr10_${TIMESTAMP}.log"
 #echo "========================================="
-#python main.py --config /home/shengqin/lys/baseline/LoDA_ICML2026/ideas/dual_mask_branch/configs/imgr10.json 2>&1 | tee logs/shell_logs/imgr10_${TIMESTAMP}.log
+#python main.py --config /home/shengqin/lys/baseline/LoDA_ICML2026/exps/dlora/imgr10.json 2>&1 | tee logs/shell_logs/imgr10_${TIMESTAMP}.log
 #
 #
 #

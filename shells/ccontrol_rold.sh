@@ -48,11 +48,11 @@ run_experiment() {
 }
 
 for seed in "${SEEDS[@]}"; do
-    run_experiment cub10 ideas/dual_mask_branch/configs/cub10.json "$seed"
+    run_experiment cub10 exps/dlora/cub10.json "$seed"
 done
 
 for seed in "${SEEDS[@]}"; do
-    run_experiment imgr10 ideas/dual_mask_branch/configs/imgr10.json "$seed"
+    run_experiment imgr10 exps/dlora/imgr10.json "$seed"
 done
 
 echo "All six C_control + R_old experiments finished."

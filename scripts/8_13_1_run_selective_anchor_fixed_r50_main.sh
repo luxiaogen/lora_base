@@ -12,7 +12,7 @@ echo "Changed: Main run: fixed conflict Top-50, Task-0 parameter anchor w10, sel
 echo "Log: $LOG_DIR/cub10_fixed_r50_anchor_task0_w10_selective_w1_seed1993_${TIMESTAMP}.log"
 echo "============================================================"
 if
-    python main.py --config ideas/dual_mask_branch/configs/cub10.json \
+    python main.py --config exps/dlora/cub10.json \
         --set 'seed=[1993]' \
         --set prefix=cub10_fixed_r50_anchor_task0_w10_selective_w1_seed1993 \
         --set init_epoch=20 \
@@ -58,7 +58,7 @@ echo "Changed: Main run: fixed conflict Top-50, Task-0 parameter anchor w10, sel
 echo "Log: $LOG_DIR/cub10_fixed_r50_anchor_task0_w10_selective_w1_seed1996_${TIMESTAMP}.log"
 echo "============================================================"
 if
-    python main.py --config ideas/dual_mask_branch/configs/cub10.json \
+    python main.py --config exps/dlora/cub10.json \
         --set 'seed=[1996]' \
         --set prefix=cub10_fixed_r50_anchor_task0_w10_selective_w1_seed1996 \
         --set init_epoch=20 \
@@ -104,7 +104,7 @@ echo "Changed: Main run: fixed conflict Top-50, Task-0 parameter anchor w10, sel
 echo "Log: $LOG_DIR/cub10_fixed_r50_anchor_task0_w10_selective_w1_seed1997_${TIMESTAMP}.log"
 echo "============================================================"
 if
-    python main.py --config ideas/dual_mask_branch/configs/cub10.json \
+    python main.py --config exps/dlora/cub10.json \
         --set 'seed=[1997]' \
         --set prefix=cub10_fixed_r50_anchor_task0_w10_selective_w1_seed1997 \
         --set init_epoch=20 \
@@ -150,7 +150,7 @@ echo "Changed: Main run: fixed conflict Top-50, Task-0 parameter anchor w10, sel
 echo "Log: $LOG_DIR/imgr10_fixed_r50_anchor_task0_w10_selective_w1_seed1993_${TIMESTAMP}.log"
 echo "============================================================"
 if
-    python main.py --config ideas/dual_mask_branch/configs/imgr10.json \
+    python main.py --config exps/dlora/imgr10.json \
         --set 'seed=[1993]' \
         --set prefix=imgr10_fixed_r50_anchor_task0_w10_selective_w1_seed1993 \
         --set init_epoch=20 \
@@ -196,7 +196,7 @@ echo "Changed: Main run: fixed conflict Top-50, Task-0 parameter anchor w10, sel
 echo "Log: $LOG_DIR/imgr10_fixed_r50_anchor_task0_w10_selective_w1_seed1996_${TIMESTAMP}.log"
 echo "============================================================"
 if
-    python main.py --config ideas/dual_mask_branch/configs/imgr10.json \
+    python main.py --config exps/dlora/imgr10.json \
         --set 'seed=[1996]' \
         --set prefix=imgr10_fixed_r50_anchor_task0_w10_selective_w1_seed1996 \
         --set init_epoch=20 \
@@ -242,7 +242,7 @@ echo "Changed: Main run: fixed conflict Top-50, Task-0 parameter anchor w10, sel
 echo "Log: $LOG_DIR/imgr10_fixed_r50_anchor_task0_w10_selective_w1_seed1997_${TIMESTAMP}.log"
 echo "============================================================"
 if
-    python main.py --config ideas/dual_mask_branch/configs/imgr10.json \
+    python main.py --config exps/dlora/imgr10.json \
         --set 'seed=[1997]' \
         --set prefix=imgr10_fixed_r50_anchor_task0_w10_selective_w1_seed1997 \
         --set init_epoch=20 \
@@ -288,7 +288,7 @@ echo "Changed: Main run: fixed conflict Top-50, Task-0 parameter anchor w10, sel
 echo "Log: $LOG_DIR/imga10_fixed_r50_anchor_task0_w10_selective_w1_seed1993_${TIMESTAMP}.log"
 echo "============================================================"
 if
-    python main.py --config ideas/dual_mask_branch/configs/imga10.json \
+    python main.py --config exps/dlora/imga10.json \
         --set 'seed=[1993]' \
         --set prefix=imga10_fixed_r50_anchor_task0_w10_selective_w1_seed1993 \
         --set init_epoch=20 \
@@ -334,7 +334,7 @@ echo "Changed: Main run: fixed conflict Top-50, Task-0 parameter anchor w10, sel
 echo "Log: $LOG_DIR/imga10_fixed_r50_anchor_task0_w10_selective_w1_seed1996_${TIMESTAMP}.log"
 echo "============================================================"
 if
-    python main.py --config ideas/dual_mask_branch/configs/imga10.json \
+    python main.py --config exps/dlora/imga10.json \
         --set 'seed=[1996]' \
         --set prefix=imga10_fixed_r50_anchor_task0_w10_selective_w1_seed1996 \
         --set init_epoch=20 \
@@ -380,7 +380,7 @@ echo "Changed: Main run: fixed conflict Top-50, Task-0 parameter anchor w10, sel
 echo "Log: $LOG_DIR/imga10_fixed_r50_anchor_task0_w10_selective_w1_seed1997_${TIMESTAMP}.log"
 echo "============================================================"
 if
-    python main.py --config ideas/dual_mask_branch/configs/imga10.json \
+    python main.py --config exps/dlora/imga10.json \
         --set 'seed=[1997]' \
         --set prefix=imga10_fixed_r50_anchor_task0_w10_selective_w1_seed1997 \
         --set init_epoch=20 \

@@ -13,7 +13,7 @@ echo "Changed: Best suppress configuration; only conflict range changes from fix
 echo "Log: $LOG_DIR/cub10_pure_r50_seed1993_${TIMESTAMP}.log"
 echo "============================================================"
 if
-    python main.py --config ideas/dual_mask_branch/configs/cub10.json \
+    python main.py --config exps/dlora/cub10.json \
         --set 'seed=[1993]' \
         --set prefix=cub10_pure_r50_seed1993 \
         --set init_epoch=20 \
@@ -60,7 +60,7 @@ echo "Changed: Best suppress configuration; only conflict range changes from fix
 echo "Log: $LOG_DIR/imgr10_pure_r50_seed1993_${TIMESTAMP}.log"
 echo "============================================================"
 if
-    python main.py --config ideas/dual_mask_branch/configs/imgr10.json \
+    python main.py --config exps/dlora/imgr10.json \
         --set 'seed=[1993]' \
         --set prefix=imgr10_pure_r50_seed1993 \
         --set init_epoch=20 \
@@ -107,7 +107,7 @@ echo "Changed: Best suppress configuration; only conflict range changes from fix
 echo "Log: $LOG_DIR/imga10_pure_r50_seed1993_${TIMESTAMP}.log"
 echo "============================================================"
 if
-    python main.py --config ideas/dual_mask_branch/configs/imga10.json \
+    python main.py --config exps/dlora/imga10.json \
         --set 'seed=[1993]' \
         --set prefix=imga10_pure_r50_seed1993 \
         --set init_epoch=20 \

@@ -44,3 +44,11 @@ run.sh.bak
 # vis
 visualizations/
 wandb/
+figures/
+
+# Local research outputs
+artifacts/
+manuscript/
+*.xlsx
+.reasonix/
+reasonix.toml

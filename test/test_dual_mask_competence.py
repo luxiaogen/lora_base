@@ -8,7 +8,7 @@ import torch
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from ideas.dual_mask_branch.metrics import (  # noqa: E402
+from utils.dual_mask_metrics import (  # noqa: E402
     split_prototype_competence,
     split_prototype_ncm_diagnostics,
 )

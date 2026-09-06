@@ -15,7 +15,7 @@ for SEED in 1993 1996 1997; do
     echo "  Log: ${LOG_DIR}/cub10_conflict_energy50_seed${SEED}_${TIMESTAMP}.log"
     echo "========================================="
     python main.py \
-        --config ideas/dual_mask_branch/configs/cub10.json \
+        --config exps/dlora/cub10.json \
         --set "seed=[${SEED}]" \
         --set "prefix=cub10_conflict_energy50_seed${SEED}" \
         --set 'dual_mask_conflict_energy_adaptive=true' \
@@ -29,7 +29,7 @@ for SEED in 1993 1996 1997; do
     echo "  Log: ${LOG_DIR}/imgr10_conflict_energy50_seed${SEED}_${TIMESTAMP}.log"
     echo "========================================="
     python main.py \
-        --config ideas/dual_mask_branch/configs/imgr10.json \
+        --config exps/dlora/imgr10.json \
         --set "seed=[${SEED}]" \
         --set "prefix=imgr10_conflict_energy50_seed${SEED}" \
         --set 'dual_mask_conflict_energy_adaptive=true' \
@@ -43,7 +43,7 @@ for SEED in 1993 1996 1997; do
     echo "  Log: ${LOG_DIR}/imga10_conflict_energy50_seed${SEED}_${TIMESTAMP}.log"
     echo "========================================="
     python main.py \
-        --config ideas/dual_mask_branch/configs/imga10.json \
+        --config exps/dlora/imga10.json \
         --set "seed=[${SEED}]" \
         --set "prefix=imga10_conflict_energy50_seed${SEED}" \
         --set 'dual_mask_conflict_energy_adaptive=true' \

@@ -17,6 +17,6 @@ run_no_conflict() {
         2>&1 | tee "logs/shell_logs/${name}_no_conflict_${TIMESTAMP}.log"
 }
 
-run_no_conflict cub10 ideas/dual_mask_branch/configs/cub10.json
-run_no_conflict cifar100 ideas/dual_mask_branch/configs/cifar10.json
-run_no_conflict imgr10 ideas/dual_mask_branch/configs/imgr10.json
+run_no_conflict cub10 exps/dlora/cub10.json
+run_no_conflict cifar100 exps/dlora/cifar10.json
+run_no_conflict imgr10 exps/dlora/imgr10.json

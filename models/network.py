@@ -9,8 +9,7 @@ except ImportError:
 import copy
 
 from models.vit import VisionTransformer, PatchEmbed, resolve_pretrained_cfg, build_model_with_cfg, checkpoint_filter_fn
-from models.decomposed_lora import Attention_LoRA
-# from models.decomposed_lora_kv import Attention_LoRA
+from models.attention import Attention_LoRA
 
 
 class ViT(VisionTransformer):
@@ -45,8 +44,7 @@ def _create_vision_transformer(variant, pretrained=False, **kwargs):
     if kwargs.get('features_only', None):
         raise RuntimeError('features_only not implemented for Vision Transformer models.')
 
-    # NOTE this extra code to support handling of repr size for in21k pretrained models
-    # pretrained_cfg = resolve_pretrained_cfg(variant, kwargs=kwargs)
+    # Handle representation size for ImageNet-21K pretrained models.
     pretrained_cfg = resolve_pretrained_cfg(variant)
     default_num_classes = pretrained_cfg['num_classes']
     num_classes = kwargs.get('num_classes', default_num_classes)
@@ -69,16 +67,16 @@ class MANet(nn.Module):
     def __init__(self, args):
         super(MANet, self).__init__()
 
-        model_kwargs = dict(patch_size=16, 
-                            embed_dim=768, 
-                            depth=12, 
-                            num_heads=12, 
-                            n_tasks=args["total_sessions"], 
-                            rank=args["rank"],
-                            )
+        model_kwargs = dict(
+            patch_size=16,
+            embed_dim=args["embd_dim"],
+            depth=12,
+            num_heads=args.get("num_heads", 12),
+            n_tasks=args["total_sessions"],
+            rank=args["rank"],
+            attn_fn=Attention_LoRA,
+        )
         self.image_encoder =_create_vision_transformer('vit_base_patch16_224_in21k', pretrained=True, **model_kwargs)
-        # self.image_encoder =_create_vision_transformer("vit_base_patch16_224.dino", 
-        #                     pretrained=True, **model_kwargs)
 
         # ModuleList((0-19): 20 x Linear(in_features=768, out_features=10, bias=False))
         self.class_num = args["init_cls"]
@@ -116,18 +114,17 @@ class MANet(nn.Module):
                 fc_outs = []
                 
                 for ti in range(self.numtask):
-                    fc_outs.append(1*(F.linear(F.normalize(image, p=2, dim=1),F.normalize(self.classifier_pool[ti].weight, p=2, dim=1))))
+                    fc_outs.append(F.linear(F.normalize(image, p=2, dim=1),F.normalize(self.classifier_pool[ti].weight, p=2, dim=1)))
 
                 return torch.cat(fc_outs, dim=1)
 
-            # logits = []
             image_features = self.image_encoder(image, task_id=self.numtask-1, get_feat=get_feat, get_cur_feat=get_cur_feat)
             class_tokens = image_features[:,0,:]
             class_tokens = class_tokens.view(class_tokens.size(0),-1)
             
             patch_tokens = image_features[:,1:,:]
             # 特征向量与分类头权重向量之间的“余弦相似度得分”（Cosine Similarity Logits） -- 余弦分类器
-            logits = 1*(F.linear(F.normalize(class_tokens, p=2, dim=1),F.normalize(self.classifier_pool[self.numtask-1].weight, p=2, dim=1)))
+            logits = F.linear(F.normalize(class_tokens, p=2, dim=1),F.normalize(self.classifier_pool[self.numtask-1].weight, p=2, dim=1))
 
             return {
                 'logits': logits,
@@ -138,7 +135,6 @@ class MANet(nn.Module):
         else: # 开启随机投影解析分类器，直接通过脊回归闭式求解分类头
             image_features = self.image_encoder(image, task_id=self.numtask-1, get_feat=get_feat, get_cur_feat=get_cur_feat)
             class_tokens = image_features[:,0,:]
-            # class_tokens = F.normalize(class_tokens, dim=1, p=2)
             class_tokens = class_tokens.view(class_tokens.size(0),-1)
             
             patch_tokens = image_features[:,1:,:]
@@ -156,21 +152,6 @@ class MANet(nn.Module):
                 'patch_tokens': patch_tokens
             }
     
-    def get_logits_per_task(self, image_features, with_grad:bool=True):
-        
-        weights, logits = [], []
-        for head in self.classifier_pool[:self.numtask]:
-            if with_grad:
-                logits.append(1*(F.linear(F.normalize(image_features, p=2, dim=1),
-                                        F.normalize(head.weight, p=2, dim=1))))
-            else:
-                logits.append(1*(F.linear(F.normalize(image_features, p=2, dim=1),
-                                        F.normalize(head.weight, p=2, dim=1).detach())))
-            weights.append(F.normalize(head.weight, p=2, dim=1))
-            
-        return torch.stack(logits).permute(1,0,2)
-
-
     def interface(self, image, task_id = None):
         image_features = self.image_encoder(image, task_id=self.numtask-1 if task_id is None else task_id)
         image_features = image_features[:,0,:]

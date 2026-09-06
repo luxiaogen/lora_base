@@ -12,7 +12,7 @@ echo "Changed: Suppress merge with Task-0 W0 anchor w10 and the smallest conflic
 echo "Log: $LOG_DIR/cifar100_t10_suppress_anchor_task0_w10_energy50_floor10_seed1993_${TIMESTAMP}.log"
 echo "============================================================"
 if
-    python main.py --config ideas/dual_mask_branch/configs/cifar10.json \
+    python main.py --config exps/dlora/cifar10.json \
         --set 'seed=[1993]' \
         --set prefix=cifar100_t10_suppress_anchor_task0_w10_energy50_floor10_seed1993 \
         --set init_epoch=20 \
@@ -57,7 +57,7 @@ echo "Changed: Suppress merge with Task-0 W0 anchor w10 and the smallest conflic
 echo "Log: $LOG_DIR/cifar100_t10_suppress_anchor_task0_w10_energy50_floor10_seed1996_${TIMESTAMP}.log"
 echo "============================================================"
 if
-    python main.py --config ideas/dual_mask_branch/configs/cifar10.json \
+    python main.py --config exps/dlora/cifar10.json \
         --set 'seed=[1996]' \
         --set prefix=cifar100_t10_suppress_anchor_task0_w10_energy50_floor10_seed1996 \
         --set init_epoch=20 \
@@ -102,7 +102,7 @@ echo "Changed: Suppress merge with Task-0 W0 anchor w10 and the smallest conflic
 echo "Log: $LOG_DIR/cifar100_t10_suppress_anchor_task0_w10_energy50_floor10_seed1997_${TIMESTAMP}.log"
 echo "============================================================"
 if
-    python main.py --config ideas/dual_mask_branch/configs/cifar10.json \
+    python main.py --config exps/dlora/cifar10.json \
         --set 'seed=[1997]' \
         --set prefix=cifar100_t10_suppress_anchor_task0_w10_energy50_floor10_seed1997 \
         --set init_epoch=20 \
@@ -147,7 +147,7 @@ echo "Changed: Suppress merge with Task-0 W0 anchor w10 and the smallest conflic
 echo "Log: $LOG_DIR/cub10_suppress_anchor_task0_w10_energy50_floor10_seed1993_${TIMESTAMP}.log"
 echo "============================================================"
 if
-    python main.py --config ideas/dual_mask_branch/configs/cub10.json \
+    python main.py --config exps/dlora/cub10.json \
         --set 'seed=[1993]' \
         --set prefix=cub10_suppress_anchor_task0_w10_energy50_floor10_seed1993 \
         --set init_epoch=20 \
@@ -192,7 +192,7 @@ echo "Changed: Suppress merge with Task-0 W0 anchor w10 and the smallest conflic
 echo "Log: $LOG_DIR/cub10_suppress_anchor_task0_w10_energy50_floor10_seed1996_${TIMESTAMP}.log"
 echo "============================================================"
 if
-    python main.py --config ideas/dual_mask_branch/configs/cub10.json \
+    python main.py --config exps/dlora/cub10.json \
         --set 'seed=[1996]' \
         --set prefix=cub10_suppress_anchor_task0_w10_energy50_floor10_seed1996 \
         --set init_epoch=20 \
@@ -237,7 +237,7 @@ echo "Changed: Suppress merge with Task-0 W0 anchor w10 and the smallest conflic
 echo "Log: $LOG_DIR/cub10_suppress_anchor_task0_w10_energy50_floor10_seed1997_${TIMESTAMP}.log"
 echo "============================================================"
 if
-    python main.py --config ideas/dual_mask_branch/configs/cub10.json \
+    python main.py --config exps/dlora/cub10.json \
         --set 'seed=[1997]' \
         --set prefix=cub10_suppress_anchor_task0_w10_energy50_floor10_seed1997 \
         --set init_epoch=20 \
@@ -282,7 +282,7 @@ echo "Changed: Suppress merge with Task-0 W0 anchor w10 and the smallest conflic
 echo "Log: $LOG_DIR/imgr10_suppress_anchor_task0_w10_energy50_floor10_seed1993_${TIMESTAMP}.log"
 echo "============================================================"
 if
-    python main.py --config ideas/dual_mask_branch/configs/imgr10.json \
+    python main.py --config exps/dlora/imgr10.json \
         --set 'seed=[1993]' \
         --set prefix=imgr10_suppress_anchor_task0_w10_energy50_floor10_seed1993 \
         --set init_epoch=20 \
@@ -327,7 +327,7 @@ echo "Changed: Suppress merge with Task-0 W0 anchor w10 and the smallest conflic
 echo "Log: $LOG_DIR/imgr10_suppress_anchor_task0_w10_energy50_floor10_seed1996_${TIMESTAMP}.log"
 echo "============================================================"
 if
-    python main.py --config ideas/dual_mask_branch/configs/imgr10.json \
+    python main.py --config exps/dlora/imgr10.json \
         --set 'seed=[1996]' \
         --set prefix=imgr10_suppress_anchor_task0_w10_energy50_floor10_seed1996 \
         --set init_epoch=20 \
@@ -372,7 +372,7 @@ echo "Changed: Suppress merge with Task-0 W0 anchor w10 and the smallest conflic
 echo "Log: $LOG_DIR/imgr10_suppress_anchor_task0_w10_energy50_floor10_seed1997_${TIMESTAMP}.log"
 echo "============================================================"
 if
-    python main.py --config ideas/dual_mask_branch/configs/imgr10.json \
+    python main.py --config exps/dlora/imgr10.json \
         --set 'seed=[1997]' \
         --set prefix=imgr10_suppress_anchor_task0_w10_energy50_floor10_seed1997 \
         --set init_epoch=20 \
@@ -417,7 +417,7 @@ echo "Changed: Suppress merge with Task-0 W0 anchor w10 and the smallest conflic
 echo "Log: $LOG_DIR/imga10_suppress_anchor_task0_w10_energy50_floor10_seed1993_${TIMESTAMP}.log"
 echo "============================================================"
 if
-    python main.py --config ideas/dual_mask_branch/configs/imga10.json \
+    python main.py --config exps/dlora/imga10.json \
         --set 'seed=[1993]' \
         --set prefix=imga10_suppress_anchor_task0_w10_energy50_floor10_seed1993 \
         --set init_epoch=20 \
@@ -462,7 +462,7 @@ echo "Changed: Suppress merge with Task-0 W0 anchor w10 and the smallest conflic
 echo "Log: $LOG_DIR/imga10_suppress_anchor_task0_w10_energy50_floor10_seed1996_${TIMESTAMP}.log"
 echo "============================================================"
 if
-    python main.py --config ideas/dual_mask_branch/configs/imga10.json \
+    python main.py --config exps/dlora/imga10.json \
         --set 'seed=[1996]' \
         --set prefix=imga10_suppress_anchor_task0_w10_energy50_floor10_seed1996 \
         --set init_epoch=20 \
@@ -507,7 +507,7 @@ echo "Changed: Suppress merge with Task-0 W0 anchor w10 and the smallest conflic
 echo "Log: $LOG_DIR/imga10_suppress_anchor_task0_w10_energy50_floor10_seed1997_${TIMESTAMP}.log"
 echo "============================================================"
 if
-    python main.py --config ideas/dual_mask_branch/configs/imga10.json \
+    python main.py --config exps/dlora/imga10.json \
         --set 'seed=[1997]' \
         --set prefix=imga10_suppress_anchor_task0_w10_energy50_floor10_seed1997 \
         --set init_epoch=20 \

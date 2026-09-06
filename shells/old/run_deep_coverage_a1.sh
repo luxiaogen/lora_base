@@ -17,7 +17,7 @@ echo "Log: ${LOG_FILE}"
 echo "========================================="
 
 python main.py \
-    --config ideas/dual_mask_branch/configs/cub10.json \
+    --config exps/dlora/cub10.json \
     --set "seed=[${SEED}]" \
     --set prefix=dual_mask_A1_deep_cov08_full \
     --set init_epoch=20 \

@@ -11,7 +11,7 @@ from tqdm import tqdm
 from methods.base import BaseLearner
 from utils.toolkit import tensor2numpy
 from models.network import MANet
-from models.decomposed_lora import Attention_LoRA
+from models.attention import Attention_LoRA
 
 from utils.schedulers import CosineSchedule
 from torch.distributions.multivariate_normal import MultivariateNormal
@@ -21,23 +21,107 @@ from contextlib import ExitStack
 
 
 class Learner(BaseLearner):
-    # 让 methods/dlora.py 变成一个“可被子类替换组件”的基类
-    # 只替换网络和 attention,这就是最小改动、即插即用的“接口”
-    network_cls = MANet
-    attention_cls = Attention_LoRA
+    @staticmethod
+    def _selective_functional_anchor_loss(
+            current_features,
+            w0_features,
+            targets,
+            prototypes,
+            min_margin,
+            tolerance,
+    ):
+        current_features = F.normalize(current_features, dim=1)
+        w0_features = F.normalize(w0_features.detach(), dim=1)
+        prototypes = F.normalize(prototypes.detach(), dim=1)
+
+        current_scores = current_features @ prototypes.t()
+        w0_scores = w0_features @ prototypes.t()
+        class_mask = F.one_hot(
+            targets,
+            num_classes=prototypes.shape[0],
+        ).bool()
+
+        current_positive = current_scores.gather(1, targets[:, None]).squeeze(1)
+        current_negative = current_scores.masked_fill(
+            class_mask,
+            float("-inf"),
+        ).max(dim=1).values
+        w0_positive = w0_scores.gather(1, targets[:, None]).squeeze(1)
+        w0_negative = w0_scores.masked_fill(
+            class_mask,
+            float("-inf"),
+        ).max(dim=1).values
+
+        current_margin = current_positive - current_negative
+        w0_margin = w0_positive - w0_negative
+        selected = (w0_scores.argmax(dim=1) == targets) & (
+            w0_margin >= float(min_margin)
+        )
+        violation = F.relu(
+            w0_margin.detach() - float(tolerance) - current_margin
+        )
+
+        selected_ratio = selected.float().mean()
+        if selected.any():
+            selected_violation = violation[selected]
+            weights = w0_margin[selected].detach().clamp_min(0.0)
+            loss = (
+                weights * selected_violation.square()
+            ).sum() / weights.sum().clamp_min(torch.finfo(weights.dtype).eps)
+            violation_ratio = (selected_violation > 0).float().mean()
+        else:
+            loss = current_features.sum() * 0.0
+            violation_ratio = selected_ratio
+
+        return loss, {
+            "selected_ratio": selected_ratio.detach(),
+            "violation_ratio": violation_ratio.detach(),
+        }
 
     def __init__(self, args):
+        removed_options = (
+            "dual_mask_alpha_calibration",
+            "dual_mask_competence_margin_scale",
+            "dual_mask_competence_mix_lambda",
+            "dual_mask_old_overlap_enabled",
+            "dual_mask_conflict_adaptive",
+            "dual_mask_conflict_coverage_adaptive",
+            "dual_mask_conflict_task_adaptive",
+            "dual_mask_conflict_energy50",
+            "dual_mask_grad_alpha",
+            "dual_mask_grad_batches",
+            "dual_mask_task_relevance_enabled",
+            "dual_mask_task_relevance_batches",
+            "dual_mask_task_coverage",
+            "dual_mask_spectral_conflict_adaptive",
+            "dual_mask_static_w0",
+            "dual_mask_plasticity_rank_only",
+            "dual_mask_plasticity_diagnostics",
+        )
+        stale_options = [name for name in removed_options if name in args]
+        if stale_options:
+            raise ValueError(
+                "Removed DualMask options: {}. Delete them from the config or "
+                "--set overrides.".format(", ".join(stale_options))
+            )
+
+        if (
+            bool(args.get("dual_mask_functional_merge_calibration", False))
+            and str(args.get("dual_mask_conflict_merge_mode", "suppress")).lower()
+            != "suppress"
+        ):
+            raise ValueError(
+                "dual_mask_functional_merge_calibration requires "
+                "dual_mask_conflict_merge_mode='suppress'."
+            )
+
         super().__init__(args)
 
-        # self._network = MANet(args)
-        self._network = self.network_cls(args)  # 调用具体的MANet
+        self._network = MANet(args)
         for module in self._network.modules():
-            if isinstance(module, self.attention_cls):
+            if isinstance(module, Attention_LoRA):
                 module._init_params(args)
 
-        # for module in self._network.modules():
-        #     if isinstance(module, Attention_LoRA):
-        #         module._init_params(args)
 
         self.args = args
         self.optim = args["optim"]  # sgd
@@ -53,7 +137,6 @@ class Learner(BaseLearner):
         self.margin = args["margin"]  # 分类损失函数 CosFace（Large Margin Cosine Loss）中的“角度边距 / 余弦裕度”（Cosine Margin）超参数
 
         self.total_sessions = args["total_sessions"]  # 任务数
-        # self.total_classnum = self.args["increment"] * self.total_sessions + self.args["init_cls"]
         self.total_classnum = self.args["init_cls"] + self.args["increment"] * (self.total_sessions - 1)
         self.dataset = args["dataset"]
         self.logit_norm = args["logit_norm"]  # 用于CA
@@ -87,17 +170,40 @@ class Learner(BaseLearner):
 
         self._functional_merge_calibration = None
 
+        for layer_idx, module in enumerate(self._iter_lora_modules()):
+            module.layer_idx = layer_idx
+
     def _iter_lora_modules(self):
         for module in self._network.modules():
-            if isinstance(module, self.attention_cls):
+            if isinstance(module, Attention_LoRA):
                 yield module
 
-    def _before_lora_weight_init(self, train_loader):
-        return
-
-    #def _extra_training_loss(self):
     def _extra_training_context(self, inputs, targets, epoch):
-        return {}
+        enabled = bool(
+            self.args.get("dual_mask_selective_anchor_enabled", False)
+        )
+        weight = float(
+            self.args.get("dual_mask_selective_anchor_weight", 0.0)
+        )
+        start_epoch = int(
+            self.args.get("dual_mask_selective_anchor_start_epoch", 0)
+        )
+        if (
+                not enabled
+                or weight <= 0.0
+                or self._cur_task != 0
+                or int(epoch) < start_epoch
+        ):
+            return {}
+
+        was_training = self._network.training
+        self._network.eval()
+        try:
+            with self._pretrained_anchor_context(), torch.no_grad():
+                w0_features = self._network(inputs)["features"].detach()
+        finally:
+            self._network.train(was_training)
+        return {"selective_anchor_w0_features": w0_features}
 
     def _extra_training_loss(
             self,
@@ -107,7 +213,212 @@ class Learner(BaseLearner):
             epoch=None,
             batch_context=None,
     ):
-        return None
+        reg_weight = float(self.args.get("dual_mask_reg_weight", 0.0)) # 0.01
+
+        anchor_enabled = bool(
+            self.args.get("dual_mask_anchor_reg_enabled", False)
+        )
+        anchor_weight = float(
+            self.args.get("dual_mask_anchor_reg_weight", 0.0)
+        )
+
+        anchor_task0_only = bool(
+            self.args.get("dual_mask_anchor_reg_task0_only", False)
+        )
+        anchor_applies = (
+            anchor_enabled
+            and anchor_weight > 0.0
+            and (not anchor_task0_only or self._cur_task == 0)
+        )
+
+        safe_residual_enabled = bool(
+            self.args.get("dual_mask_safe_residual_enabled", False)
+        )
+        safe_residual_weight = float(
+            self.args.get("dual_mask_safe_residual_weight", 0.0)
+        )
+        safe_residual_applies = (
+            safe_residual_enabled and safe_residual_weight > 0.0
+        )
+
+        selective_anchor_enabled = bool(
+            self.args.get("dual_mask_selective_anchor_enabled", False)
+        )
+        selective_anchor_weight = float(
+            self.args.get("dual_mask_selective_anchor_weight", 0.0)
+        )
+        selective_anchor_start_epoch = int(
+            self.args.get("dual_mask_selective_anchor_start_epoch", 0)
+        )
+        selective_anchor_ramp_epochs = max(
+            1,
+            int(self.args.get("dual_mask_selective_anchor_ramp_epochs", 1)),
+        )
+        current_epoch = 0 if epoch is None else int(epoch)
+        if current_epoch < selective_anchor_start_epoch:
+            selective_anchor_ramp = 0.0
+        else:
+            selective_anchor_ramp = min(
+                1.0,
+                (current_epoch - selective_anchor_start_epoch + 1)
+                / selective_anchor_ramp_epochs,
+            )
+        selective_anchor_applies = (
+            selective_anchor_enabled
+            and selective_anchor_weight > 0.0
+            and self._cur_task == 0
+            and selective_anchor_ramp > 0.0
+        )
+
+        if safe_residual_applies and isinstance(
+                self._network,
+                torch.nn.DataParallel,
+        ):
+            raise RuntimeError(
+                "dual_mask_safe_residual is currently supported only for "
+                "single-GPU training; nn.DataParallel would drop its "
+                "forward-side auxiliary loss."
+            )
+
+        self._last_training_loss_metrics = {}
+        if (
+                reg_weight <= 0.0
+                and not anchor_applies
+                and not safe_residual_applies
+                and not selective_anchor_applies
+        ):
+            return None
+
+        modules = [
+            module
+            for module in self._iter_lora_modules()
+            if self._cur_task >= 0 and module.S_lora[self._cur_task] is not None
+        ]
+        weighted_losses = []
+
+        if reg_weight > 0.0:
+            conflict_losses = []
+            for module in modules:
+                task = self._cur_task
+                if self.args.get("use_slora", True):
+                    conflict_losses.append(
+                        module._joint_conflict_regularization(
+                            module.S_lora[task],
+                            isolated=False,
+                        )
+                    )
+                if (
+                        task > 0
+                        and self.args.get("use_plora", True)
+                        and hasattr(module, "P_lora")
+                        and module.P_lora[task] is not None
+                ):
+                    conflict_losses.append(
+                        module._joint_conflict_regularization(
+                            module.P_lora[task],
+                            isolated=True,
+                        )
+                    )
+            if conflict_losses:
+                weighted_losses.append(
+                    reg_weight * torch.stack(conflict_losses).mean()
+                )
+
+        if anchor_applies and modules:
+            anchor_regularization = torch.stack(
+                [module.anchor_regularization() for module in modules]
+            ).mean()
+            weighted_anchor = anchor_weight * anchor_regularization
+            weighted_losses.append(weighted_anchor)
+            self._last_training_loss_metrics.update({
+                "anchor_reg": anchor_regularization.detach(),
+                "anchor_reg_weighted": weighted_anchor.detach(),
+            })
+        if safe_residual_applies and modules:
+          safe_residual_losses = [
+              module.safe_residual_regularization()
+              for module in modules
+          ]
+          safe_residual_losses = [
+              loss for loss in safe_residual_losses if loss is not None
+          ]
+          if safe_residual_losses:
+              safe_residual = torch.stack(safe_residual_losses).mean()
+              weighted_safe_residual = (
+                  safe_residual_weight * safe_residual
+              )
+              weighted_losses.append(weighted_safe_residual)
+              self._last_training_loss_metrics.update({
+                  "safe_residual": safe_residual.detach(),
+                  "safe_residual_weighted": weighted_safe_residual.detach(),
+              })
+        if selective_anchor_applies:
+            if output is None or targets is None or batch_context is None:
+                raise RuntimeError(
+                    "selective functional anchor requires training output, "
+                    "targets, and the W0 batch context"
+                )
+            w0_features = batch_context.get("selective_anchor_w0_features")
+            if w0_features is None:
+                raise RuntimeError(
+                    "selective functional anchor W0 features were not prepared"
+                )
+            prototype_ids = sorted(self._w0_class_means)
+            if prototype_ids != list(range(len(prototype_ids))):
+                raise RuntimeError(
+                    "Task-0 W0 prototypes must use contiguous local class ids"
+                )
+            current_features = output["features"]
+            prototypes = torch.stack([
+                self._w0_class_means[class_id]
+                for class_id in prototype_ids
+            ]).to(
+                device=current_features.device,
+                dtype=current_features.dtype,
+            )
+            selective_anchor, selective_metrics = (
+                self._selective_functional_anchor_loss(
+                    current_features,
+                    w0_features,
+                    targets,
+                    prototypes,
+                    min_margin=float(self.args.get(
+                        "dual_mask_selective_anchor_min_margin",
+                        0.05,
+                    )),
+                    tolerance=float(self.args.get(
+                        "dual_mask_selective_anchor_tolerance",
+                        0.05,
+                    )),
+                )
+            )
+            weighted_selective_anchor = (
+                selective_anchor_weight
+                * selective_anchor_ramp
+                * selective_anchor
+            )
+            weighted_losses.append(weighted_selective_anchor)
+            self._last_training_loss_metrics.update({
+                "selective_anchor": selective_anchor.detach(),
+                "selective_anchor_weighted": (
+                    weighted_selective_anchor.detach()
+                ),
+                "selective_anchor_selected_ratio": (
+                    selective_metrics["selected_ratio"]
+                ),
+                "selective_anchor_violation_ratio": (
+                    selective_metrics["violation_ratio"]
+                ),
+                "selective_anchor_ramp": current_features.new_tensor(
+                    selective_anchor_ramp
+                ),
+            })
+
+
+
+        if not weighted_losses:
+            return None
+        return torch.stack(weighted_losses).sum()
 
     def _backward_and_step(self, task_loss, extra_loss, optimizer, output, targets):
         """Optimization extension point used by experimental learners."""
@@ -117,59 +428,18 @@ class Learner(BaseLearner):
         optimizer.step()
         return loss
 
-    ###########################
-    """ 
-        把所有 Transformer 层的 LoRA 模块同时切换到“预训练锚点模式”，并在 with 结束后自动恢复原状态。 
-        1. 遍历全部 LoRA Attention 层
-        2. 每层进入 use_pretrained_anchor() 状态
-        3. 整个网络此时按 W_pre / W0 anchor 方式前向
-        4. 提取 feature
-        5. 离开 with 后，所有层恢复原来的当前任务状态
-    """
-
     def _pretrained_anchor_context(self):
+        """Temporarily switch every LoRA attention layer to immutable W_pre."""
         stack = ExitStack()
         for module in self._iter_lora_modules():
             stack.enter_context(module.use_pretrained_anchor())
         return stack
 
-    """
-        把 loader 里的所有当前任务样本，用冻结的预训练锚点模型提取特征，并连同样本编号、标签一起保存下来 
-            loader 中所有样本
-                ↓
-            切到 eval 模式
-                ↓
-            进入 pretrained anchor context
-                ↓
-            用网络提取 feature vector
-                ↓
-            保存 index、feature、label
-                ↓
-            拼成完整张量并返回
-    """
-
-    #def _collect_anchor_features(self, loader):
     def _collect_features(self, loader, use_pretrained_anchor=False):
+        """Collect deterministic feature, index, and label tensors."""
         was_training = self._network.training
         self._network.eval()
         indices, features, targets = [], [], []
-        """
-          # 等价于手动写法
-          ctx1 = self._pretrained_anchor_context()
-          ctx2 = torch.no_grad()
-          ctx1.__enter__()   # 12层 qkv.weight ← W_pre
-          ctx2.__enter__()   # 关闭梯度计算
-          try:
-              for batch_indices, inputs, batch_targets in loader:
-                  vectors = self._network.extract_vector(inputs.to(self._device))
-                  indices.append(batch_indices.detach().cpu())  # 样本编号
-                  features.append(vectors.detach().cpu())  # W_pre 特征
-                  targets.append(batch_targets.detach().cpu())  # 真实标签
-          finally:
-              ctx2.__exit__()  # 恢复梯度计算
-              ctx1.__exit__()  # 12层 qkv.weight ← W_current（恢复）
-        """
-        # with self._pretrained_anchor_context(), torch.no_grad():  # 应该临时让网络使用预训练锚点 W_pre / W0 + 不建反向图，不计算梯度，不训练参数
         context = (self._pretrained_anchor_context() if use_pretrained_anchor else ExitStack())
         with context, torch.no_grad():
             for batch_indices, inputs, batch_targets in loader:
@@ -185,7 +455,7 @@ class Learner(BaseLearner):
         return self._collect_features(loader, use_pretrained_anchor=True)
 
     def _calibrate_functional_merge(self, loader):
-        from ideas.dual_mask_branch.metrics import (
+        from utils.dual_mask_metrics import (
             functional_merge_diagnostics,
             select_functional_merge_candidate,
         )
@@ -292,8 +562,8 @@ class Learner(BaseLearner):
 
     # 测量 W_pre competence
     def _prepare_w0_prototypes(self, loader):
-        # from ideas.dual_mask_branch.metrics import split_prototype_competence
-        from ideas.dual_mask_branch.metrics import (split_prototype_competence,split_prototype_ncm_diagnostics,)
+        # from utils.dual_mask_metrics import split_prototype_competence
+        from utils.dual_mask_metrics import (split_prototype_competence,split_prototype_ncm_diagnostics,)
 
         # 训练集中的特征
         indices, features, targets = self._collect_anchor_features(loader)
@@ -314,7 +584,6 @@ class Learner(BaseLearner):
 
         old_prototypes = None
         old_class_ids = None
-        # if use_all_seen_prototypes and self._known_classes > 0:
         if need_all_seen_competence and self._known_classes > 0:
             old_class_ids = torch.arange(self._known_classes,dtype=torch.long,)
             old_prototypes = torch.stack([self._w0_class_means[int(class_id)] for class_id in old_class_ids])
@@ -322,15 +591,12 @@ class Learner(BaseLearner):
 
 
         # 使用当前任务训练样本构建类别原型，并做确定性 holdout
-        # w0_competence, prototypes, class_ids = split_prototype_competence(
         w0_competence_new, prototypes, class_ids = split_prototype_competence(
             features, # 80% → 建立类别原型
             targets, # 20% → 测试 W0 NCM 准确率
             indices,
             holdout_mod=int(self.args.get("dual_mask_competence_holdout_mod", 5)),
             metric=competence_metric,
-            # old_prototypes=old_prototypes,
-            # old_class_ids=old_class_ids,
         )
 
 
@@ -370,9 +636,6 @@ class Learner(BaseLearner):
         )
 
 
-        # 使用当前任务训练样本构建类别原型，并做确定性 holdout
-        # self._w0_competence = competence   # 任务级别的
-
         self._w0_competence = w0_competence
 
         self._w0_competence_new = w0_competence_new
@@ -383,7 +646,6 @@ class Learner(BaseLearner):
             self._w0_class_means[int(class_id.item())] = prototype.cpu()
         for module in self._iter_lora_modules():
             # 同一个任务中，12 层 Attention 使用的是完全相同的 task-level competence
-            # module.set_pretrained_competence(w0_competence)
             module.set_pretrained_competence(w0_competence,self._w0_plasticity_demand or 0.0,)
             module.set_pretrained_old_overlap_risk(old_overlap_risk or 0.0)
 
@@ -462,17 +724,8 @@ class Learner(BaseLearner):
         accuracy = 100.0 * correct / max(total, 1)
         self._w0_accuracy_curve.append(accuracy)
         return accuracy
-    """ 
-        测量当前模型相对原始预训练模型 W_pre 漂移了多少:  
-            1. 特征漂移 feature_drift: 计算当前模型提取的特征与 W_pre 提取的特征之间的平均余弦相似度差异
-                接近0：当前特征方向与 W_pre 基本一致
-                越大：当前特征空间偏离 W_pre 越明显
-            2. 权重漂移 weight_drift: 计算当前模型与 W_pre 之间权重的相对变化
-                ||W_current,l - W_pre,l||₂
-                ─────────────────────────
-                       ||W_pre,l||₂
-    """
     def _measure_pretrained_drift(self, loader):
+        """Log feature cosine drift and relative QKV weight drift from W_pre."""
         max_batches = max(1, int(self.args.get("dual_mask_metric_batches", 4)))
         batches = []
         for batch_id, (_, inputs, _) in enumerate(loader):
@@ -511,8 +764,6 @@ class Learner(BaseLearner):
             max_weight_drift,
         )
 
-    ###################################
-
     def after_task(self):
         self._known_classes = self._total_classes
         logging.info('Exemplar size: {}'.format(self.exemplar_size))
@@ -541,7 +792,6 @@ class Learner(BaseLearner):
         # 开启参数自适应 --- 也就是使用训练集测试W0原型的能力
         competence_adaptive = bool(self.args.get("dual_mask_competence_adaptive", False))
 
-        # if track_w0 or competence_adaptive:
         plasticity_adaptive = bool(self.args.get("dual_mask_plasticity_adaptive", False))
 
         all_seen_competence = bool(self.args.get("dual_mask_competence_all_seen", False))
@@ -568,7 +818,6 @@ class Learner(BaseLearner):
                 or functional_merge_calibration
                 or selective_anchor_enabled
         ):
-        # if track_w0 or competence_adaptive or task_relevance_enabled:
             w0_dataset = data_manager.get_dataset(  # 所有训练样本，顺序固定  | 确定性测试视图：用于判断冻结 W0 的原始能力
                 np.arange(self._known_classes, self._total_classes),
                 source='train',  # 用训练集样本，但模拟最终测试时的输入方式，评估 W0 的原始能力
@@ -592,8 +841,6 @@ class Learner(BaseLearner):
         # update mean and cov and classifier alignment
         self._compute_class_mean(data_manager, check_diff=False, oracle=False)
         if self._cur_task > 0 and self.args['ca'] is True:
-            # CA
-            # self._stage2_compact_classifier(self.task_sizes[-1])
             self._stage2_compact_classifier( # CA 分类器对齐
                 self.task_sizes[-1],
                 ca_epochs=int(self.args.get("ca_epochs", 5)),
@@ -609,25 +856,11 @@ class Learner(BaseLearner):
         self._network.to(self._device)
         for name, param in self._network.named_parameters():
             param.requires_grad_(False)  # 1. 先把主干 (ViT Backbone) 所有参数全部冻结
-            # try: # 多 GPU 并行训练
-            #     if "classifier_pool" + "." + str(self._network.module.numtask - 1) in name:
-            #         param.requires_grad_(True)  # 2. 仅将当前 Task 对应的分类头设为可训练
-            # except: # 只有单卡
-            #     if "classifier_pool" + "." + str(self._network.numtask - 1) in name:
-            #         param.requires_grad_(True) # [768,10] 'classifier_pool.0.weight'
             if name.startswith(current_classifier):
                 param.requires_grad_(True)  # 将 分类头打开可训
 
         for module in self._iter_lora_modules():
             module.before_task(task=self._cur_task)
-            # module.cur_matrix.zero_(); module.n_cur_matrix = 0 # 初始化协方差矩阵
-
-        # self._before_lora_weight_init(train_loader)
-        self._before_lora_weight_init(train_loader)
-        # with torch.no_grad():
-        #     for i, (_, inputs, targets) in enumerate(train_loader): # task0:1289张
-        #         inputs, targets = inputs.to(self._device), targets.to(self._device)
-        #         self._network(inputs, get_cur_feat=True)
 
         if len(self._multiple_gpus) > 1:
             self._network = torch.nn.DataParallel(self._network, self._multiple_gpus)
@@ -637,7 +870,6 @@ class Learner(BaseLearner):
             print(f'********** LoRA weights initialization for layer {kk} **********')
             module._init_lora_weight(task=self._cur_task, layer_idx=kk)  # 初始化 LoRA 的 A B 矩阵权重
             module.set_task_and_stage(task=self._cur_task, layer_idx=kk)  # 设置lora可不可训练
-            # module.cur_matrix.zero_(); module.n_cur_matrix = 0
             kk += 1
 
 
@@ -716,33 +948,11 @@ class Learner(BaseLearner):
             calibration_loader = getattr(self, "w0_loader", train_loader)
             self._calibrate_functional_merge(calibration_loader)
             
-        # for module in self._network.modules():
-        #     if isinstance(module, Attention_LoRA):
-        #         module.cur_matrix.zero_(); module.n_cur_matrix = 0
-
         with torch.no_grad():
             # Task t 的 LoRA刚训练完，但增量还没有融合进主干网络 W0
             print('*' * 10 + 'Extrace features for merging shared component!' + '*' * 10)
-            # for i, (_, inputs, targets) in enumerate(train_loader):
-            #     inputs, targets = inputs.to(self._device), targets.to(self._device)
-            #     self._network(inputs, get_cur_feat=True)
-
-            # for module in self._iter_lora_modules():
             for module in lora_modules:
                 module.after_task(task=self._cur_task)
-                # module._process_feature_mat() # 存储协方差矩阵
-                # module.cur_matrix.zero_(); module.n_cur_matrix = 0
-        # # 主干权重融合了新的增量后，模型在处理图像时输出的真实特征已经发生了微调（Feature Shift）
-        # with torch.no_grad():
-        #     print('*'*10+'Extrace features for saving stastistics!'+'*'*10)
-        #     for i, (_, inputs, targets) in enumerate(train_loader):
-        #         inputs, targets = inputs.to(self._device), targets.to(self._device)
-        #         self._network(inputs, get_cur_feat=True)
-        #
-        #     for module in self._network.modules():
-        #         if isinstance(module, Attention_LoRA):
-        #             module._process_feature_mat()
-        #             module.cur_matrix.zero_(); module.n_cur_matrix = 0
 
     def train_function(self, train_loader, test_loader, optimizer, scheduler):
         logging.info('Trainable params: {}'.format(count_parameters(self._network, True)))
@@ -751,15 +961,20 @@ class Learner(BaseLearner):
         for name, param in self._network.named_parameters():
             if param.requires_grad:
                 enabled.add(name)
-        # logging.info(f"Parameters to be updated: {enabled}")
         logging.info("Parameters to be updated (%d):\n  %s", len(enabled), "\n  ".join(sorted(enabled)), )
         prog_bar = tqdm(range(self.run_epoch))
         # 角度惩罚损失
-        # loss_cos: AngularPenaltySMLoss = AngularPenaltySMLoss(loss_type='cosface', s=self.scale, m=self.margin)
+        label_smoothing = float(self.args.get('label_smoothing', 0.0))
+        if (
+                bool(self.args.get('label_smoothing_task0_only', False))
+                and self._cur_task != 0
+        ):
+            label_smoothing = 0.0
         loss_cos:AngularPenaltySMLoss = AngularPenaltySMLoss(
             loss_type='cosface',
             s=self.scale,
             m=self.margin,
+            label_smoothing=label_smoothing,
         )
 
         for _, epoch in enumerate(prog_bar):
@@ -786,8 +1001,6 @@ class Learner(BaseLearner):
                 logits = output['logits']
                 task_loss = loss_cos(logits, targets)
 
-                ## mask_loss
-                # extra_loss = self._extra_training_loss()
                 extra_loss = self._extra_training_loss(
                     output=output,
                     inputs=inputs,
@@ -938,13 +1151,8 @@ class Learner(BaseLearner):
 
         return np.around(tensor2numpy(correct) * 100 / total, decimals=2)
 
-    """
-        1. 伪特征采样（Exemplar-free Sampling）：利用前面收集的各个类别的均值 _class_means 和协方差 _class_covs 构造高斯分布（MultivariateNormal），随机采样出伪特征
-        2. 冻结 Backbone，只开分类头：将主干网络冻结，解锁从 Task 0 到当前 Task 的所有分类头
-        3. 特征快速校准（fc_only=True）：将伪特征直接送入分类头（跳过重型 ViT），通过 CrossEntropy Loss 微调分类头权重，拉平新旧分类头的得分响应，消除分类决策偏差
-    """
-
     def _stage2_compact_classifier(self, task_size, ca_epochs=5):
+        """Align classifier heads using Gaussian pseudo-features."""
         ca_epochs = int(self.args.get("ca_epochs", 5))
         for p in self._network.classifier_pool[:self._cur_task + 1].parameters():
             p.requires_grad = True
@@ -1023,10 +1231,6 @@ class Learner(BaseLearner):
                 losses += loss.item()
 
             scheduler.step()
-            # test_acc = self._compute_accuracy(self._network, self.test_loader)
-            # test_acc = 0.0
-            # info = 'CA Task {} => Loss {:.3f}, Test_accy {:.3f}'.format(
-            #     self._cur_task, losses/self._total_classes, test_acc)
             info = (
                 'CA Task {} => Loss {:.3f} '
                 '(classifier alignment; final accuracy is logged after CA)'
@@ -1126,7 +1330,6 @@ class Learner(BaseLearner):
                 embedding = self._network(data)["features"]
                 Features_f.append(embedding.cpu())
                 label_list.append(label.cpu())
-        # Features_f = F.normalize(torch.cat(Features_f, dim=0), dim=1)
         Features_f = torch.cat(Features_f, dim=0)
         label_list = torch.cat(label_list, dim=0)
 
@@ -1162,4 +1365,3 @@ class Learner(BaseLearner):
         logging.info("Optimal lambda: " + str(ridge))
         return ridge
     ###################################################################################################
-

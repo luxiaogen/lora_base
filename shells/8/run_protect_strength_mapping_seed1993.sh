@@ -15,7 +15,7 @@ echo "  alpha = 0.30 + 0.60 * C_control"
 echo "  Log: ${LOG_DIR}/cub10_legacy_linear_seed1993_${TIMESTAMP}.log"
 echo "========================================="
 python main.py \
-  --config ideas/dual_mask_branch/configs/cub10.json \
+  --config exps/dlora/cub10.json \
   --set 'seed=[1993]' \
   --set prefix=cub10_strength_legacy_linear \
   --set dual_mask_protect_strength_mode=legacy_linear \
@@ -29,7 +29,7 @@ echo "  alpha = C_control"
 echo "  Log: ${LOG_DIR}/cub10_competence_seed1993_${TIMESTAMP}.log"
 echo "========================================="
 python main.py \
-  --config ideas/dual_mask_branch/configs/cub10.json \
+  --config exps/dlora/cub10.json \
   --set 'seed=[1993]' \
   --set prefix=cub10_strength_competence \
   --set dual_mask_protect_strength_mode=competence \
@@ -43,7 +43,7 @@ echo "  alpha = 0.30 + 0.60 * C_control"
 echo "  Log: ${LOG_DIR}/imgr10_legacy_linear_seed1993_${TIMESTAMP}.log"
 echo "========================================="
 python main.py \
-  --config ideas/dual_mask_branch/configs/imgr10.json \
+  --config exps/dlora/imgr10.json \
   --set 'seed=[1993]' \
   --set prefix=imgr10_strength_legacy_linear \
   --set dual_mask_protect_strength_mode=legacy_linear \
@@ -57,7 +57,7 @@ echo "  alpha = C_control"
 echo "  Log: ${LOG_DIR}/imgr10_competence_seed1993_${TIMESTAMP}.log"
 echo "========================================="
 python main.py \
-  --config ideas/dual_mask_branch/configs/imgr10.json \
+  --config exps/dlora/imgr10.json \
   --set 'seed=[1993]' \
   --set prefix=imgr10_strength_competence \
   --set dual_mask_protect_strength_mode=competence \
@@ -71,7 +71,7 @@ echo "  alpha = 0.30 + 0.60 * C_control"
 echo "  Log: ${LOG_DIR}/imga10_legacy_linear_seed1993_${TIMESTAMP}.log"
 echo "========================================="
 python main.py \
-  --config ideas/dual_mask_branch/configs/imga10.json \
+  --config exps/dlora/imga10.json \
   --set 'seed=[1993]' \
   --set prefix=imga10_strength_legacy_linear \
   --set dual_mask_protect_strength_mode=legacy_linear \
@@ -85,7 +85,7 @@ echo "  alpha = C_control"
 echo "  Log: ${LOG_DIR}/imga10_competence_seed1993_${TIMESTAMP}.log"
 echo "========================================="
 python main.py \
-  --config ideas/dual_mask_branch/configs/imga10.json \
+  --config exps/dlora/imga10.json \
   --set 'seed=[1993]' \
   --set prefix=imga10_strength_competence \
   --set dual_mask_protect_strength_mode=competence \

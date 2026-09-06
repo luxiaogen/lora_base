@@ -1,33 +1,28 @@
-以下是中文翻译，保留了原文结构和代码块，术语采用业界常见译法：
+# DualMask LoRA
 
----
+本仓库以 DualMask LoRA 作为主实现，不再通过 `ideas/` 下的实验子类加载。
 
-# Idea 2：双掩码 LoRA 分支
+## 代码结构
 
-该分支将双掩码方向作为一个独立实验实现。  
-默认情况下，它**不**使用预训练权重 `W0` 的完整 Fisher 信息来衡量重要性。
+- `methods/dlora.py`：持续学习训练流程、DualMask 训练损失和任务生命周期。
+- `models/attention.py`：LoRA 参数、预训练锚点、保护/冲突掩码以及安全合并。
+- `models/network.py`：使用 DualMask attention 的 ViT 和分类网络。
+- `utils/dual_mask_metrics.py`：原型能力、漂移和功能合并诊断。
+- `exps/dlora/`：CIFAR-100、CUB-200、ImageNet-A 和 ImageNet-R 配置。
 
-- `general_mask` 标记预训练 `qkv.weight` 中需要保护的重要条目。
-- `isolated_mask` 是与之互补的可塑性区域。
-- `w0_importance` 通过 SVD、梯度敏感性或两者结合来估计。
-- `BA` 的重要性通过当前 LoRA 更新幅度来估计。
-- `normalize(I_W0) * normalize(I_BA)` 用于近似 W0-BA 之间的冲突。
-- 高冲突的 BA 更新在前向传播和最终合并时会被抑制。
-- 可通过 `dual_mask_reg_weight` 启用轻量级冲突正则化项。
+`model_name` 的 `dLoRA` 与 `dual_mask_branch` 名称均指向同一份主实现，后者仅用于兼容已有实验记录。
 
-默认配置使用 `svd`，这避免了额外的反向传播探针。如需包含梯度敏感性，请设置：
-
-```json
-"dual_mask_importance": "svd_grad",
-"dual_mask_grad_batches": 1,
-"dual_mask_grad_alpha": 0.5,
-"dual_mask_reg_weight": 0.05
-```
-
-运行：
+## 运行
 
 ```bash
-python main.py --config ideas/dual_mask_branch/configs/cifar10.json
+python main.py --config exps/dlora/imgr10.json
 ```
 
----
+可使用重复的 `--set KEY=VALUE` 覆盖配置，例如：
+
+```bash
+python main.py \
+  --config exps/dlora/imgr10.json \
+  --set 'seed=[1993]' \
+  --set dual_mask_vis=false
+```

@@ -205,8 +205,6 @@ def select_functional_merge_candidate(candidates, tolerance: float):
     return min(candidates, key=lambda item: item["anchor_damage"])
 
 
-# """ 只使用当前任务的训练数据，估计原始预训练模型 W_pre 对当前任务的分类能力，得到一个 0～1 的 competence 分数  """
-"""用当前任务训练样本和可选旧类 W_pre 原型估计 competence"""
 def split_prototype_competence(
     features: torch.Tensor, # 训练集所有特征
     targets: torch.Tensor,
@@ -216,16 +214,7 @@ def split_prototype_competence(
     old_class_ids: Optional[torch.Tensor] = None,
     metric: str = "accuracy",
 ): # 检查:W_pre 提取出的特征是否已经按类别自然聚集
-    # holdout_mod = max(2, int(holdout_mod)) # 5:第 0、5、10、15... 个样本进入 holdout 20%
-    # calibration = torch.zeros(targets.shape[0], dtype=torch.bool, device=targets.device)
-    # # 将每个类别的样本按索引排序，然后每隔 holdout_mod 个样本选一个进入 holdout
-    # for class_id in torch.unique(targets, sorted=True):
-    #     positions = (targets == class_id).nonzero(as_tuple=True)[0]
-    #     order = torch.argsort(indices[positions])
-    #     positions = positions[order]
-    #     if positions.numel() >= 2:
-    #         calibration[positions[::holdout_mod]] = True
-
+    """Estimate W_pre competence from current samples and optional old prototypes."""
     calibration = _prototype_holdout_mask(targets, indices, holdout_mod)
 
     prototype_mask = ~calibration  # 取反
@@ -238,14 +227,6 @@ def split_prototype_competence(
             train_prototypes = torch.cat([old_prototypes.to(features), train_prototypes], dim=0)
             train_class_ids = torch.cat([old_class_ids.to(targets), train_class_ids], dim=0)
         
-        # competence = prototype_accuracy( # 表示 W_pre 在当前任务训练集内部 holdout 上原型分类准确率
-        # accuracy = prototype_accuracy(  # 表示 W_pre 在当前任务训练集内部 holdout 上原型分类准确率
-        #     features[calibration],
-        #     targets[calibration],
-        #     train_prototypes,
-        #     train_class_ids,
-        # )
-        # competence = accuracy
         if metric == "accuracy":
             competence = prototype_accuracy(  # 表示 W_pre 在当前任务训练集内部 holdout 上原型分类准确率
                 features[calibration],

@@ -64,22 +64,22 @@ run_experiment() {
 }
 
 # CUB: protection gate x binary beta calibration.
-run_experiment cub10 ideas/dual_mask_branch/configs/cub10.json protect_on_beta_fixed true false
-run_experiment cub10 ideas/dual_mask_branch/configs/cub10.json protect_off_beta_fixed false false
-run_experiment cub10 ideas/dual_mask_branch/configs/cub10.json protect_on_beta_select true true
-run_experiment cub10 ideas/dual_mask_branch/configs/cub10.json protect_off_beta_select false true
+run_experiment cub10 exps/dlora/cub10.json protect_on_beta_fixed true false
+run_experiment cub10 exps/dlora/cub10.json protect_off_beta_fixed false false
+run_experiment cub10 exps/dlora/cub10.json protect_on_beta_select true true
+run_experiment cub10 exps/dlora/cub10.json protect_off_beta_select false true
 
 # ImageNet-R: same 2x2 design.
-run_experiment imgr10 ideas/dual_mask_branch/configs/imgr10.json protect_on_beta_fixed true false
-run_experiment imgr10 ideas/dual_mask_branch/configs/imgr10.json protect_off_beta_fixed false false
-run_experiment imgr10 ideas/dual_mask_branch/configs/imgr10.json protect_on_beta_select true true
-run_experiment imgr10 ideas/dual_mask_branch/configs/imgr10.json protect_off_beta_select false true
+run_experiment imgr10 exps/dlora/imgr10.json protect_on_beta_fixed true false
+run_experiment imgr10 exps/dlora/imgr10.json protect_off_beta_fixed false false
+run_experiment imgr10 exps/dlora/imgr10.json protect_on_beta_select true true
+run_experiment imgr10 exps/dlora/imgr10.json protect_off_beta_select false true
 
 # ImageNet-A: same 2x2 design.
-run_experiment imga10 ideas/dual_mask_branch/configs/imga10.json protect_on_beta_fixed true false
-run_experiment imga10 ideas/dual_mask_branch/configs/imga10.json protect_off_beta_fixed false false
-run_experiment imga10 ideas/dual_mask_branch/configs/imga10.json protect_on_beta_select true true
-run_experiment imga10 ideas/dual_mask_branch/configs/imga10.json protect_off_beta_select false true
+run_experiment imga10 exps/dlora/imga10.json protect_on_beta_fixed true false
+run_experiment imga10 exps/dlora/imga10.json protect_off_beta_fixed false false
+run_experiment imga10 exps/dlora/imga10.json protect_on_beta_select true true
+run_experiment imga10 exps/dlora/imga10.json protect_off_beta_select false true
 
 END_TIME=$(date +%s)
 TOTAL_SECONDS=$((END_TIME - START_TIME))

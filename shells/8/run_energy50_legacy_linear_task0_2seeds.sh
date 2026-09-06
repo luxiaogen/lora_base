@@ -41,28 +41,28 @@ run_experiment() {
 }
 
 # CUB10: controlled Task-0 pair for each seed.
-#run_experiment cub10 ideas/dual_mask_branch/configs/cub10.json 1993 protect_only
-#run_experiment cub10 ideas/dual_mask_branch/configs/cub10.json 1993 unmasked
-#run_experiment cub10 ideas/dual_mask_branch/configs/cub10.json 1996 protect_only
-#run_experiment cub10 ideas/dual_mask_branch/configs/cub10.json 1996 unmasked
-run_experiment cub10 ideas/dual_mask_branch/configs/cub10.json 1997 protect_only
-run_experiment cub10 ideas/dual_mask_branch/configs/cub10.json 1997 unmasked
+#run_experiment cub10 exps/dlora/cub10.json 1993 protect_only
+#run_experiment cub10 exps/dlora/cub10.json 1993 unmasked
+#run_experiment cub10 exps/dlora/cub10.json 1996 protect_only
+#run_experiment cub10 exps/dlora/cub10.json 1996 unmasked
+run_experiment cub10 exps/dlora/cub10.json 1997 protect_only
+run_experiment cub10 exps/dlora/cub10.json 1997 unmasked
 
 # ImageNet-R10: controlled Task-0 pair for each seed.
-#run_experiment imgr10 ideas/dual_mask_branch/configs/imgr10.json 1993 protect_only
-#run_experiment imgr10 ideas/dual_mask_branch/configs/imgr10.json 1993 unmasked
-#run_experiment imgr10 ideas/dual_mask_branch/configs/imgr10.json 1996 protect_only
-#run_experiment imgr10 ideas/dual_mask_branch/configs/imgr10.json 1996 unmasked
-run_experiment imgr10 ideas/dual_mask_branch/configs/imgr10.json 1997 protect_only
-run_experiment imgr10 ideas/dual_mask_branch/configs/imgr10.json 1997 unmasked
+#run_experiment imgr10 exps/dlora/imgr10.json 1993 protect_only
+#run_experiment imgr10 exps/dlora/imgr10.json 1993 unmasked
+#run_experiment imgr10 exps/dlora/imgr10.json 1996 protect_only
+#run_experiment imgr10 exps/dlora/imgr10.json 1996 unmasked
+run_experiment imgr10 exps/dlora/imgr10.json 1997 protect_only
+run_experiment imgr10 exps/dlora/imgr10.json 1997 unmasked
 
 # ImageNet-A10: controlled Task-0 pair for each seed.
-#run_experiment imga10 ideas/dual_mask_branch/configs/imga10.json 1993 protect_only
-#run_experiment imga10 ideas/dual_mask_branch/configs/imga10.json 1993 unmasked
-#run_experiment imga10 ideas/dual_mask_branch/configs/imga10.json 1996 protect_only
-#run_experiment imga10 ideas/dual_mask_branch/configs/imga10.json 1996 unmasked
-run_experiment imga10 ideas/dual_mask_branch/configs/imga10.json 1997 protect_only
-run_experiment imga10 ideas/dual_mask_branch/configs/imga10.json 1997 unmasked
+#run_experiment imga10 exps/dlora/imga10.json 1993 protect_only
+#run_experiment imga10 exps/dlora/imga10.json 1993 unmasked
+#run_experiment imga10 exps/dlora/imga10.json 1996 protect_only
+#run_experiment imga10 exps/dlora/imga10.json 1996 unmasked
+run_experiment imga10 exps/dlora/imga10.json 1997 protect_only
+run_experiment imga10 exps/dlora/imga10.json 1997 unmasked
 
 END_TIME=$(date +%s)
 TOTAL_SECONDS=$((END_TIME - START_TIME))
