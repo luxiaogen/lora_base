@@ -206,7 +206,7 @@ class iIMAGENET_A(iData):
     def download_data(self):
         # assert 0, "You should specify the folder of your dataset"
         train_dir = os.path.join(self.args['data_path'], 'train')
-        test_dir = os.path.join(self.args['data_path'], 'val')
+        test_dir = os.path.join(self.args['data_path'], 'test')
 
         train_dset = datasets.ImageFolder(train_dir)
         test_dset = datasets.ImageFolder(test_dir)

@@ -10,17 +10,15 @@ import numpy as np
 from utils import factory
 from utils.data_manager import DataManager
 from utils.toolkit import count_parameters
-
+import random
 
 def _init_experiment_tracker(args):
     backend = str(args.get('experiment_tracker', 'none')).strip().lower()
     if backend not in ('none', 'tensorboard', 'wandb'):
-        raise ValueError(
-            'experiment_tracker must be one of: none, tensorboard, wandb'
-        )
+        raise ValueError('experiment_tracker must be one of: none, tensorboard, wandb')
     if backend == 'none':
         return None
-
+    # 实验名称
     experiment_name = str(args.get('prefix') or args['model_name'])
     if backend == 'tensorboard':
         try:
@@ -51,13 +49,9 @@ def _init_experiment_tracker(args):
     try:
         import wandb
     except ImportError as exc:
-        raise RuntimeError(
-            'experiment_tracker=wandb requires wandb. Run: pip install wandb'
-        ) from exc
+        raise RuntimeError('experiment_tracker=wandb requires wandb. Run: pip install wandb') from exc
 
-    group = args.get('wandb_group') or '{}_{}tasks_{}'.format(
-        args['dataset'], args['total_sessions'], experiment_name
-    )
+    group = args.get('wandb_group') or '{}_{}tasks_{}'.format(args['dataset'], args['total_sessions'], experiment_name)
     tags = args.get('wandb_tags', [args['dataset'], args['model_name']])
     if isinstance(tags, str):
         tags = [item.strip() for item in tags.split(',') if item.strip()]
@@ -156,6 +150,12 @@ def _log_experiment_task(
         value = getattr(model, attribute, None)
         if value is not None:
             metrics[name] = float(value)
+
+    functional_merge = getattr(model, '_functional_merge_calibration', None)
+    if functional_merge is not None:
+        for name, value in functional_merge.items():
+            metrics['dual_mask/functional_merge/{}'.format(name)] = float(value)
+
     for attribute, name in (
         ('_feature_drift_curve', 'w0/feature_drift'),
         ('_weight_drift_curve', 'w0/weight_drift_mean'),
@@ -164,11 +164,7 @@ def _log_experiment_task(
         if value is not None:
             metrics[name] = value
 
-    for name, value in getattr(
-            model,
-            '_last_epoch_training_loss_metrics',
-            {},
-    ).items():
+    for name, value in getattr(model,'_last_epoch_training_loss_metrics',{},).items():
         metrics['train/{}'.format(name)] = float(value)
 
     iter_modules = getattr(model, '_iter_lora_modules', None)
@@ -176,25 +172,12 @@ def _log_experiment_task(
         modules = list(iter_modules())
         if modules:
             first_module = modules[0]
-            metrics['dual_mask/coverage'] = float(
-                first_module.effective_energy_coverage
-            )
-            metrics['dual_mask/protect_strength'] = float(
-                first_module.effective_protect_strength
-            )
+            metrics['dual_mask/coverage'] = float(first_module.effective_energy_coverage)
+            metrics['dual_mask/protect_strength'] = float(first_module.effective_protect_strength)
             metrics['dual_mask/private_rank'] = int(first_module.current_private_rank)
             for layer_idx, module in enumerate(modules):
-                metrics['dual_mask/layer_{}/protect_density'.format(layer_idx)] = float(
-                    module.general_mask.detach().float().mean().item()
-                )
-                metrics[
-                    'dual_mask/layer_{}/protected_importance_mean'.format(layer_idx)
-                ] = float(
-                    (
-                        module.general_mask.detach().float()
-                        * module.w0_importance.detach().float()
-                    ).mean().item()
-                )
+                metrics['dual_mask/layer_{}/protect_density'.format(layer_idx)] = float(module.general_mask.detach().float().mean().item())
+                metrics['dual_mask/layer_{}/protected_importance_mean'.format(layer_idx)] = float((module.general_mask.detach().float() * module.w0_importance.detach().float()).mean().item())
 
                 for attribute, name in (
                         ('last_conflict_entropy', 'conflict_entropy'),
@@ -204,12 +187,16 @@ def _log_experiment_task(
                         ('last_safe_suppression', 'safe_suppression'),
                         ('last_effective_conflict_ratio', 'effective_conflict_ratio'),
                         ('last_effective_conflict_strength', 'effective_conflict_strength'),
+                        ('last_private_conflict_mask_overlap', 'private_conflict_mask_overlap'),
+                    ('last_private_conflict_energy_overlap', 'private_conflict_energy_overlap'),
+                    ('last_private_conflict_gate_suppression', 'private_conflict_gate_suppression'),
+                    ('last_relocation_target_energy', 'relocation_target_energy'),
+                    ('last_relocation_recovered_energy', 'relocation_recovered_energy'),
+                    ('last_relocation_activation_error', 'relocation_activation_error'),
                 ):
                     value = getattr(module, attribute, None)
                     if value is not None:
-                        metrics['dual_mask/layer_{}/{}'.format(layer_idx, name)] = (
-                            float(value.detach().item())
-                        )
+                        metrics['dual_mask/layer_{}/{}'.format(layer_idx, name)] = (float(value.detach().item()))
 
     _write_experiment_metrics(tracker, metrics, task_id)
 
@@ -253,9 +240,7 @@ def train(args):
             _close_experiment_tracker(experiment_tracker)
 
     total_time = time.time() - start_time
-    logging.info('Total experiment time: {:.2f}s ({:.2f}min, {:.2f}h)'.format(
-        total_time, total_time / 60, total_time / 3600
-    ))
+    logging.info('Total experiment time: {:.2f}s ({:.2f}min, {:.2f}h)'.format(total_time, total_time / 60, total_time / 3600))
 
 def _train(args, experiment_tracker=None):
     run_start_time = time.time()
@@ -280,9 +265,7 @@ def _train(args, experiment_tracker=None):
     print(logdir)
     if not os.path.exists(logdir):
         os.makedirs(logdir)
-    logfilename = os.path.join(logdir, '{}_slora:{}_plora:{}_rank:{}_{}_{}_{}-{}'.format(
-        args['seed'], args["use_slora"], args["use_plora"], args['rank'],
-        args.get("lora_type", "lora"), args['model_name'], args['optim'], args['lrate']))
+    logfilename = os.path.join(logdir, '{}_slora:{}_plora:{}_rank:{}_{}_{}_{}-{}'.format(args['seed'], args["use_slora"], args["use_plora"], args['rank'], args.get("lora_type", "lora"), args['model_name'], args['optim'], args['lrate']))
     #logfilename = os.path.join(logdir, '{}_slora:{}_plora:{}_rank:{}_{}_{}_{}-{}'.format(args['seed'], args["use_slora"], args["use_plora"], args['rank'], args["lora_type"], args['model_name'], args['optim'], args['lrate']))
     logging.basicConfig(
         level=logging.INFO,
@@ -415,12 +398,18 @@ def _set_device(args):
 
 
 def _set_random(args):
+    random.seed(args["seed"])
+    np.random.seed(args["seed"])
     torch.manual_seed(args['seed'])
     if torch.cuda.is_available():
         torch.cuda.manual_seed(args['seed'])
         torch.cuda.manual_seed_all(args['seed'])
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+    if args.get('disable_fused_sdpa', False):
+        torch.backends.cuda.enable_flash_sdp(False)
+        torch.backends.cuda.enable_mem_efficient_sdp(False)
+        torch.backends.cuda.enable_math_sdp(True)
 
 
 def print_args(args):

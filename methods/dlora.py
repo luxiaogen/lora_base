@@ -51,6 +51,7 @@ class Learner(BaseLearner):
         self.num_workers = args["num_workers"]
         self.scale = args["scale"]
         self.margin = args["margin"]  # 分类损失函数 CosFace（Large Margin Cosine Loss）中的“角度边距 / 余弦裕度”（Cosine Margin）超参数
+
         self.total_sessions = args["total_sessions"]  # 任务数
         # self.total_classnum = self.args["increment"] * self.total_sessions + self.args["init_cls"]
         self.total_classnum = self.args["init_cls"] + self.args["increment"] * (self.total_sessions - 1)
@@ -84,6 +85,8 @@ class Learner(BaseLearner):
         self._feature_drift_curve = []
         self._weight_drift_curve = []
 
+        self._functional_merge_calibration = None
+
     def _iter_lora_modules(self):
         for module in self._network.modules():
             if isinstance(module, self.attention_cls):
@@ -92,7 +95,18 @@ class Learner(BaseLearner):
     def _before_lora_weight_init(self, train_loader):
         return
 
-    def _extra_training_loss(self):
+    #def _extra_training_loss(self):
+    def _extra_training_context(self, inputs, targets, epoch):
+        return {}
+
+    def _extra_training_loss(
+            self,
+            output=None,
+            inputs=None,
+            targets=None,
+            epoch=None,
+            batch_context=None,
+    ):
         return None
 
     def _backward_and_step(self, task_loss, extra_loss, optimizer, output, targets):
@@ -170,6 +184,112 @@ class Learner(BaseLearner):
     def _collect_anchor_features(self, loader):
         return self._collect_features(loader, use_pretrained_anchor=True)
 
+    def _calibrate_functional_merge(self, loader):
+        from ideas.dual_mask_branch.metrics import (
+            functional_merge_diagnostics,
+            select_functional_merge_candidate,
+        )
+
+        modules = list(self._iter_lora_modules())
+        if not modules:
+            return
+        if any(module.dual_mask_conflict_merge_mode != "suppress" for module in modules):
+            raise ValueError(
+                "Functional merge calibration requires "
+                "dual_mask_conflict_merge_mode='suppress'."
+            )
+
+        tolerance = max(
+            0.0,
+            float(self.args.get("dual_mask_functional_merge_tolerance", 0.05)),
+        )
+
+
+        base_beta = min(
+            max(float(self.args.get("dual_mask_conflict_strength", 0.5)), 0.0),
+            1.0,
+        )
+        candidate_betas = sorted({0.0, base_beta})
+        anchor_indices, anchor_features, anchor_targets = (
+            self._collect_anchor_features(loader)
+        )
+        old_prototypes = None
+        old_class_ids = None
+        if self._known_classes > 0:
+            old_class_ids = torch.arange(self._known_classes, dtype=torch.long)
+            old_prototypes = torch.stack(
+                [self._w0_class_means[int(class_id)] for class_id in old_class_ids]
+            )
+
+        candidates = []
+        for beta in candidate_betas:
+            for module in modules:
+                module.set_functional_merge_strength(beta)
+            indices, features, targets = self._collect_features(loader)
+            if not torch.equal(indices, anchor_indices) or not torch.equal(
+                targets, anchor_targets
+            ):
+                raise RuntimeError(
+                    "Functional merge calibration loader order changed between candidates."
+                )
+            metrics = functional_merge_diagnostics(
+                anchor_features,
+                features,
+                targets,
+                indices,
+                holdout_mod=int(
+                    self.args.get("dual_mask_competence_holdout_mod", 5)
+                ),
+                scale=self.scale,
+                old_prototypes=old_prototypes,
+                old_class_ids=old_class_ids,
+            )
+            metrics["beta"] = beta
+            candidates.append(metrics)
+            logging.info(
+                "Task %s functional merge candidate: beta=%.3f, "
+                "current_acc=%.2f%%, current_loss=%.6f, "
+                "anchor_reference_loss=%.6f, anchor_candidate_loss=%.6f, "
+                "anchor_damage=%.6f, eligible=%s (tolerance=%.6f)",
+                self._cur_task,
+                beta,
+                metrics["current_accuracy"] * 100.0,
+                metrics["current_loss"],
+                metrics["anchor_reference_loss"],
+                metrics["anchor_candidate_loss"],
+                metrics["anchor_damage"],
+                metrics["anchor_damage"] <= tolerance,
+                tolerance,
+            )
+
+        selected = select_functional_merge_candidate(candidates, tolerance)
+        for module in modules:
+            module.set_functional_merge_strength(selected["beta"])
+        self._functional_merge_calibration = {
+            "selected_beta": selected["beta"],
+            "selected_current_accuracy": selected["current_accuracy"],
+            "selected_current_loss": selected["current_loss"],
+            "selected_anchor_damage": selected["anchor_damage"],
+        }
+        for candidate in candidates:
+            candidate_name = "beta_{:03d}".format(
+                int(round(candidate["beta"] * 100.0))
+            )
+            self._functional_merge_calibration.update({
+                f"{candidate_name}_current_accuracy": candidate["current_accuracy"],
+                f"{candidate_name}_current_loss": candidate["current_loss"],
+                f"{candidate_name}_anchor_damage": candidate["anchor_damage"],
+            })
+        logging.info(
+            "Task %s functional merge selected beta=%.3f: "
+            "current_acc=%.2f%%, current_loss=%.6f, anchor_damage=%.6f",
+            self._cur_task,
+            selected["beta"],
+            selected["current_accuracy"] * 100.0,
+            selected["current_loss"],
+            selected["anchor_damage"],
+        )
+
     # 测量 W_pre competence
     def _prepare_w0_prototypes(self, loader):
         # from ideas.dual_mask_branch.metrics import split_prototype_competence
@@ -184,6 +304,8 @@ class Learner(BaseLearner):
         competence_metric = str(self.args.get("dual_mask_competence_metric", "accuracy")).lower()
 
         use_old_overlap_conflict = bool(self.args.get("dual_mask_conflict_old_overlap_adaptive", False))
+
+        
 
         need_all_seen_competence = (
             use_all_seen_prototypes
@@ -424,13 +546,27 @@ class Learner(BaseLearner):
 
         all_seen_competence = bool(self.args.get("dual_mask_competence_all_seen", False))
         old_overlap_conflict = bool(self.args.get("dual_mask_conflict_old_overlap_adaptive", False))
-        
+        relocation_enabled = str( # 是否启用重定位
+            self.args.get("dual_mask_conflict_merge_mode", "suppress")
+        ).lower() in {"relocate", "suppress_relocate"}
+
+        functional_merge_calibration = bool(
+            self.args.get("dual_mask_functional_merge_calibration", False)
+        )
+
+        selective_anchor_enabled = bool(
+            self.args.get("dual_mask_selective_anchor_enabled", False)
+        )
+
         if (
                 track_w0
                 or competence_adaptive
                 or plasticity_adaptive
                 or all_seen_competence
                 or old_overlap_conflict
+                or relocation_enabled
+                or functional_merge_calibration
+                or selective_anchor_enabled
         ):
         # if track_w0 or competence_adaptive or task_relevance_enabled:
             w0_dataset = data_manager.get_dataset(  # 所有训练样本，顺序固定  | 确定性测试视图：用于判断冻结 W0 的原始能力
@@ -551,6 +687,35 @@ class Learner(BaseLearner):
         if len(self._multiple_gpus) > 1:
             self._network = self._network.module
 
+        lora_modules = list(self._iter_lora_modules())
+        relocation_enabled = any(
+            module.dual_mask_conflict_merge_mode
+            in {"relocate", "suppress_relocate"}
+            for module in lora_modules
+        )
+        if relocation_enabled:
+            for module in lora_modules:
+                module.begin_relocation_input_collection()
+            self._network.eval()
+            calibration_loader = getattr(self, "w0_loader", train_loader)
+            with torch.no_grad():
+                for _, inputs, _ in calibration_loader:
+                    self._network(inputs.to(self._device))
+                    break
+            for module in lora_modules:
+                calibration_inputs = module.end_relocation_input_collection()
+                if calibration_inputs.numel() == 0:
+                    raise RuntimeError(
+                        "Conflict relocation did not capture attention inputs."
+                    )
+                module.prepare_conflict_relocation(
+                    task=self._cur_task,
+                    inputs=calibration_inputs,
+                )
+        if bool(self.args.get("dual_mask_functional_merge_calibration", False)):
+            calibration_loader = getattr(self, "w0_loader", train_loader)
+            self._calibrate_functional_merge(calibration_loader)
+            
         # for module in self._network.modules():
         #     if isinstance(module, Attention_LoRA):
         #         module.cur_matrix.zero_(); module.n_cur_matrix = 0
@@ -562,7 +727,8 @@ class Learner(BaseLearner):
             #     inputs, targets = inputs.to(self._device), targets.to(self._device)
             #     self._network(inputs, get_cur_feat=True)
 
-            for module in self._iter_lora_modules():
+            # for module in self._iter_lora_modules():
+            for module in lora_modules:
                 module.after_task(task=self._cur_task)
                 # module._process_feature_mat() # 存储协方差矩阵
                 # module.cur_matrix.zero_(); module.n_cur_matrix = 0
@@ -589,7 +755,12 @@ class Learner(BaseLearner):
         logging.info("Parameters to be updated (%d):\n  %s", len(enabled), "\n  ".join(sorted(enabled)), )
         prog_bar = tqdm(range(self.run_epoch))
         # 角度惩罚损失
-        loss_cos: AngularPenaltySMLoss = AngularPenaltySMLoss(loss_type='cosface', s=self.scale, m=self.margin)
+        # loss_cos: AngularPenaltySMLoss = AngularPenaltySMLoss(loss_type='cosface', s=self.scale, m=self.margin)
+        loss_cos:AngularPenaltySMLoss = AngularPenaltySMLoss(
+            loss_type='cosface',
+            s=self.scale,
+            m=self.margin,
+        )
 
         for _, epoch in enumerate(prog_bar):
             self._network.train()
@@ -605,12 +776,25 @@ class Learner(BaseLearner):
                 inputs = torch.index_select(inputs, 0, mask)
                 targets = torch.index_select(targets, 0, mask) - self._known_classes
 
+                batch_context = self._extra_training_context(
+                    inputs,
+                    targets,
+                    epoch,
+                )
+
                 output = self._network(inputs)
                 logits = output['logits']
                 task_loss = loss_cos(logits, targets)
 
                 ## mask_loss
-                extra_loss = self._extra_training_loss()
+                # extra_loss = self._extra_training_loss()
+                extra_loss = self._extra_training_loss(
+                    output=output,
+                    inputs=inputs,
+                    targets=targets,
+                    epoch=epoch,
+                    batch_context=batch_context,
+                )
 
                 batch_training_metrics = getattr(self,"_last_training_loss_metrics",{},)
                 if batch_training_metrics:

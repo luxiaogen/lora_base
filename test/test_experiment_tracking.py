@@ -52,15 +52,12 @@ class FakeWandbRun:
 
 
 class FakeModule:
-    def __init__(self, strength, density):
+    def __init__(self, density, importance):
         self.effective_energy_coverage = 0.94
         self.effective_protect_strength = 0.88
-        self.current_private_rank = 9
-        self._strength = strength
+        self.current_private_rank = 32
         self.general_mask = torch.tensor([density], dtype=torch.float32)
-
-    def current_protect_strength(self):
-        return self._strength
+        self.w0_importance = torch.tensor([importance], dtype=torch.float32)
 
 
 class ExperimentTrackingTests(unittest.TestCase):
@@ -131,11 +128,13 @@ class ExperimentTrackingTests(unittest.TestCase):
     def test_metrics_are_shared_by_both_backends(self):
         writer = FakeWriter()
         modules = [
-            FakeModule(strength=0.88, density=0.8),
-            FakeModule(strength=0.70, density=0.84),
+            FakeModule(density=0.8, importance=0.9),
+            FakeModule(density=0.84, importance=0.7),
         ]
         model = SimpleNamespace(
             _w0_competence=0.97,
+            _w0_ncm_loss_new=0.12,
+            _w0_plasticity_demand=0.08,
             _feature_drift_curve=[0.03],
             _weight_drift_curve=[0.015],
             _iter_lora_modules=lambda: iter(modules),
@@ -157,7 +156,14 @@ class ExperimentTrackingTests(unittest.TestCase):
         metrics = {name: value for name, value, step in writer.scalars if step == 3}
         self.assertEqual(metrics['accuracy/old'], 89.0)
         self.assertEqual(metrics['w0/competence'], 97.0)
-        self.assertEqual(metrics['dual_mask/layer_1/protect_strength'], 0.70)
+        self.assertEqual(metrics['w0/ncm_loss_new'], 0.12)
+        self.assertEqual(metrics['w0/plasticity_demand'], 0.08)
+        self.assertEqual(metrics['dual_mask/protect_strength'], 0.88)
+        self.assertAlmostEqual(
+            metrics['dual_mask/layer_1/protected_importance_mean'],
+            0.84 * 0.7,
+            places=6,
+        )
 
         run = FakeWandbRun()
         _log_experiment_summary(
@@ -176,6 +182,26 @@ class ExperimentTrackingTests(unittest.TestCase):
         _close_experiment_tracker(('wandb', run))
         self.assertTrue(writer.closed)
         self.assertTrue(run.finished)
+
+    def test_unmeasured_fused_competence_is_not_logged(self):
+        writer = FakeWriter()
+        model = SimpleNamespace(
+            _w0_competence=0.0,
+        )
+
+        _log_experiment_task(
+            ('tensorboard', writer),
+            model,
+            task_id=0,
+            cnn_accy={'top1': 90.0, 'grouped': {}},
+            cnn_accy_with_task={'top1': 90.0},
+            task_prediction_accuracy=0.9,
+            w0_accuracy=None,
+            train_seconds=1.0,
+            eval_seconds=1.0,
+        )
+
+        metrics = {name for name, _, _ in writer.scalars}
 
 
 if __name__ == '__main__':

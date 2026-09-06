@@ -3,10 +3,12 @@ import torch.nn as nn
 from torch.nn import functional as F
 
 class AngularPenaltySMLoss(nn.Module):
-    def __init__(self, loss_type='cosface', eps=1e-7, s=20, m=0):
+    def __init__(self, loss_type='cosface', eps=1e-7, s=20, m=0,):
         super(AngularPenaltySMLoss, self).__init__()
         loss_type = loss_type.lower()
         assert loss_type in ['arcface', 'sphereface', 'cosface', 'crossentropy']
+
+
         if loss_type == 'arcface':
             self.s = 64.0 if not s else s
             self.m = 0.5 if not m else m

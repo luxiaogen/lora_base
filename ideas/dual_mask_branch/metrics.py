@@ -91,6 +91,120 @@ def split_prototype_ncm_diagnostics(
         )
     return ncm_loss, plasticity_demand
 
+def functional_merge_diagnostics(
+    anchor_features: torch.Tensor,
+    candidate_features: torch.Tensor,
+    targets: torch.Tensor,
+    indices: torch.Tensor,
+    holdout_mod: int = 5,
+    scale: float = 1.0,
+    old_prototypes: Optional[torch.Tensor] = None,
+    old_class_ids: Optional[torch.Tensor] = None,
+):
+    """Evaluate one merge candidate on a train-only deterministic holdout.
+
+    Current-task utility uses prototypes built from the candidate features.
+    Anchor damage uses fixed W0 prototypes, optionally including cached old
+    classes, so the candidate cannot move the reference decision geometry.
+    """
+    if anchor_features.shape != candidate_features.shape:
+        raise ValueError("anchor and candidate features must have the same shape")
+  
+
+    calibration = _prototype_holdout_mask(targets, indices, holdout_mod)
+    prototype_mask = ~calibration
+    if not calibration.any() or not prototype_mask.any():
+        return {
+            "current_accuracy": 0.0,
+            "current_loss": 0.0,
+            "anchor_reference_loss": 0.0,
+            "anchor_candidate_loss": 0.0,
+            "anchor_damage": 0.0,
+        }
+
+    candidate_prototypes, candidate_class_ids = build_prototypes(
+        candidate_features[prototype_mask],
+        targets[prototype_mask],
+    )
+    anchor_prototypes, anchor_class_ids = build_prototypes(
+        anchor_features[prototype_mask],
+        targets[prototype_mask],
+    )
+    if old_prototypes is not None and old_class_ids is not None:
+        anchor_prototypes = torch.cat(
+            [old_prototypes.to(anchor_features), anchor_prototypes], dim=0
+        )
+        anchor_class_ids = torch.cat(
+            [old_class_ids.to(targets), anchor_class_ids], dim=0
+        )
+
+    def ncm_metrics(features, prototypes, class_ids):
+        logits = (
+            float(scale)
+            * F.normalize(features[calibration], dim=1)
+            @ F.normalize(prototypes, dim=1).T
+        )
+
+        class_ids = class_ids.to(targets.device)
+        labels = targets[calibration]
+        matches = labels.unsqueeze(1).eq(class_ids.unsqueeze(0))
+        if not matches.any(dim=1).all():
+            raise ValueError("holdout target is missing from prototype candidates")
+        local_targets = matches.float().argmax(dim=1).to(logits.device)
+        accuracy = float(
+            (class_ids.to(logits.device)[logits.argmax(dim=1)] == labels.to(logits.device))
+            .float()
+            .mean()
+            .item()
+        )
+        loss = float(F.cross_entropy(logits, local_targets).item())
+        return accuracy, loss
+       
+
+    current_accuracy, current_loss = ncm_metrics(
+        candidate_features,
+        candidate_prototypes,
+        candidate_class_ids,
+    )
+    _, anchor_reference_loss = ncm_metrics(
+        anchor_features,
+        anchor_prototypes,
+        anchor_class_ids,
+    )
+    _, anchor_candidate_loss = ncm_metrics(
+        candidate_features,
+        anchor_prototypes,
+        anchor_class_ids,
+    )
+
+
+    return {
+        "current_accuracy": current_accuracy,
+        "current_loss": current_loss,
+        "anchor_reference_loss": anchor_reference_loss,
+        "anchor_candidate_loss": anchor_candidate_loss,
+        "anchor_damage": max(0.0, anchor_candidate_loss - anchor_reference_loss),
+    }
+
+
+def select_functional_merge_candidate(candidates, tolerance: float):
+    eligible = [
+        item for item in candidates
+        if item["anchor_damage"] <= float(tolerance)
+    ]
+    if eligible:
+        # Prefer current-task utility; a stronger safe beta wins exact ties.
+        return min(
+            eligible,
+            key=lambda item: (
+                item["current_loss"],
+                -item["current_accuracy"],
+                -item["beta"],
+            ),
+        )
+    return min(candidates, key=lambda item: item["anchor_damage"])
+
+
 # """ 只使用当前任务的训练数据，估计原始预训练模型 W_pre 对当前任务的分类能力，得到一个 0～1 的 competence 分数  """
 """用当前任务训练样本和可选旧类 W_pre 原型估计 competence"""
 def split_prototype_competence(

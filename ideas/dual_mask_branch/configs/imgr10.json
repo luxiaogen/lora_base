@@ -27,6 +27,7 @@
     "margin": 0.1,
     "num_workers": 8,
     "ca": true,
+    "ca_epochs": 10,
     "ca_lrate": 0.01,
     "logit_norm": 0.1,
     "slora_gamma": 0.5,
@@ -44,6 +45,9 @@
     "dual_mask_reg_weight": 0.01,
     "dual_mask_conflict_reg_enabled": true,
     "dual_mask_competence_adaptive": true,
+    "dual_mask_plasticity_adaptive": true,
+    "dual_mask_protect_strength_mode": "competence",
+    "dual_mask_conflict_energy_adaptive": false,
 
     "dual_mask_competence_holdout_mod": 5,
     "dual_mask_track_w0_metrics": true,
@@ -55,6 +59,13 @@
     "dual_mask_vis_save_weight": false,
 
     "dual_mask_competence_all_seen": false,
-    "dual_mask_conflict_old_overlap_adaptive": false,
-    "dual_mask_competence_metric": "accuracy"
+    "dual_mask_conflict_old_overlap_adaptive": true,
+    "dual_mask_private_conflict_mode": "global",
+    "dual_mask_task0_gate_mode": "protect_only",
+
+    "dual_mask_competence_metric": "accuracy",
+    
+    "experiment_tracker": "wandb",
+    "wandb_project": "LoDA_ICML2026",
+    "wandb_mode": "online"
 }
