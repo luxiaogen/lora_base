@@ -796,9 +796,6 @@ class Learner(BaseLearner):
 
         all_seen_competence = bool(self.args.get("dual_mask_competence_all_seen", False))
         old_overlap_conflict = bool(self.args.get("dual_mask_conflict_old_overlap_adaptive", False))
-        relocation_enabled = str( # 是否启用重定位
-            self.args.get("dual_mask_conflict_merge_mode", "suppress")
-        ).lower() in {"relocate", "suppress_relocate"}
 
         functional_merge_calibration = bool(
             self.args.get("dual_mask_functional_merge_calibration", False)
@@ -814,7 +811,6 @@ class Learner(BaseLearner):
                 or plasticity_adaptive
                 or all_seen_competence
                 or old_overlap_conflict
-                or relocation_enabled
                 or functional_merge_calibration
                 or selective_anchor_enabled
         ):
@@ -920,30 +916,6 @@ class Learner(BaseLearner):
             self._network = self._network.module
 
         lora_modules = list(self._iter_lora_modules())
-        relocation_enabled = any(
-            module.dual_mask_conflict_merge_mode
-            in {"relocate", "suppress_relocate"}
-            for module in lora_modules
-        )
-        if relocation_enabled:
-            for module in lora_modules:
-                module.begin_relocation_input_collection()
-            self._network.eval()
-            calibration_loader = getattr(self, "w0_loader", train_loader)
-            with torch.no_grad():
-                for _, inputs, _ in calibration_loader:
-                    self._network(inputs.to(self._device))
-                    break
-            for module in lora_modules:
-                calibration_inputs = module.end_relocation_input_collection()
-                if calibration_inputs.numel() == 0:
-                    raise RuntimeError(
-                        "Conflict relocation did not capture attention inputs."
-                    )
-                module.prepare_conflict_relocation(
-                    task=self._cur_task,
-                    inputs=calibration_inputs,
-                )
         if bool(self.args.get("dual_mask_functional_merge_calibration", False)):
             calibration_loader = getattr(self, "w0_loader", train_loader)
             self._calibrate_functional_merge(calibration_loader)

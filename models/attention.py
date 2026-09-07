@@ -254,10 +254,6 @@ class Attention_LoRA(nn.Module):
         self.register_buffer("last_private_conflict_energy_overlap", torch.tensor(0.0), persistent=False)
         self.register_buffer("last_private_conflict_gate_suppression", torch.tensor(0.0), persistent=False)
 
-        self.register_buffer("last_relocation_target_energy", torch.tensor(0.0), persistent=False)
-        self.register_buffer("last_relocation_recovered_energy", torch.tensor(0.0), persistent=False)
-        self.register_buffer("last_relocation_activation_error", torch.tensor(0.0), persistent=False)
-
         self.register_buffer("pretrained_weight", torch.zeros(shape), persistent=True)
         self.register_buffer("pretrained_anchor_captured", torch.tensor(False, dtype=torch.bool), persistent=True)
 
@@ -292,12 +288,6 @@ class Attention_LoRA(nn.Module):
 
         self._functional_merge_strength_override = None
         self.last_functional_merge_strength = float("nan")
-
-        self.dual_mask_relocation_steps = 20
-        self.dual_mask_relocation_lr = 0.1
-        self.dual_mask_relocation_vectors = 64
-        self._pending_relocations = {}
-        self._relocation_input_collection = None
 
         self.dual_mask_safe_residual_enabled = False
         self.dual_mask_safe_residual_vectors = 64
@@ -406,8 +396,6 @@ class Attention_LoRA(nn.Module):
         supported_conflict_merge_modes = {
             "none",
             "suppress",
-            "relocate",
-            "suppress_relocate",
         }
         if self.dual_mask_conflict_merge_mode not in supported_conflict_merge_modes:
             raise ValueError(
@@ -416,16 +404,6 @@ class Attention_LoRA(nn.Module):
                     ", ".join(sorted(supported_conflict_merge_modes)),
                 )
             )
-        self.dual_mask_relocation_steps = max(
-            1, int(args.get("dual_mask_relocation_steps", 20))
-        )
-        self.dual_mask_relocation_lr = float(
-            args.get("dual_mask_relocation_lr", 0.1)
-        )
-        self.dual_mask_relocation_vectors = max(
-            1, int(args.get("dual_mask_relocation_vectors", 64))
-        )
-
         self.dual_mask_safe_residual_enabled = bool(
             args.get("dual_mask_safe_residual_enabled", False)
         )
@@ -1049,7 +1027,6 @@ class Attention_LoRA(nn.Module):
             isolated: bool,
             conflict_ratio: float,
             conflict_strength: float,
-            relocation_delta: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Compose one branch update according to the merge-only ablation."""
         mode = self.dual_mask_conflict_merge_mode
@@ -1061,203 +1038,14 @@ class Attention_LoRA(nn.Module):
                 conflict_strength=conflict_strength,
             )
 
-        base_delta, conflict_mask = self._merge_base_and_conflict(
+        base_delta, _ = self._merge_base_and_conflict(
             raw_delta,
             isolated=isolated,
             conflict_ratio=conflict_ratio,
         )
         if mode == "none":
             return base_delta
-
-        if relocation_delta is None:
-            raise RuntimeError(
-                "Conflict relocation must be prepared before after_task()."
-            )
-        if mode == "relocate":
-            return base_delta * (1.0 - conflict_mask) + relocation_delta
-        if mode == "suppress_relocate":
-            suppressed = self._safe_delta(
-                raw_delta,
-                isolated=isolated,
-                conflict_ratio=conflict_ratio,
-                conflict_strength=conflict_strength,
-            )
-            return suppressed + relocation_delta
         raise RuntimeError(f"Unexpected conflict merge mode: {mode}")
-
-    def _fit_low_rank_relocation(
-            self,
-            unit,
-            gamma: float,
-            target_delta: torch.Tensor,
-            safe_support: torch.Tensor,
-            inputs: torch.Tensor,
-    ):
-        """Fit rank-wise coefficients that reproduce target activations safely."""
-        device = target_delta.device
-        fit_dtype = torch.float32
-        x = inputs.detach().reshape(-1, inputs.shape[-1]).to(device=device, dtype=fit_dtype)
-        if x.shape[0] > self.dual_mask_relocation_vectors:
-            indices = torch.linspace(
-                0,
-                x.shape[0] - 1,
-                steps=self.dual_mask_relocation_vectors,
-                device=device,
-            ).long()
-            x = x.index_select(0, indices)
-
-        target = target_delta.detach().to(dtype=fit_dtype)
-        support = safe_support.detach().to(device=device, dtype=fit_dtype)
-        target_output = F.linear(x, target)
-        target_energy = target_output.pow(2).mean()
-
-        zero = torch.zeros_like(target_delta)
-        if target_energy <= 1e-12 or support.count_nonzero() == 0:
-            return zero, {
-                "target_energy": float(target_energy.item()),
-                "recovered_energy": 0.0,
-                "activation_error": 0.0 if target_energy <= 1e-12 else 1.0,
-            }
-
-        a = unit.A_weight.detach().to(device=device, dtype=fit_dtype)
-        b = unit.B_weight.detach().to(device=device, dtype=fit_dtype)
-        coefficients = torch.zeros(a.shape[0], device=device, dtype=fit_dtype, requires_grad=True)
-        optimizer = torch.optim.Adam(
-            [coefficients],
-            lr=self.dual_mask_relocation_lr,
-        )
-        with torch.enable_grad():
-            for _ in range(self.dual_mask_relocation_steps):
-                candidate = (
-                    float(gamma) * ((b * coefficients.unsqueeze(0)) @ a)
-                    * support
-                )
-                # Optimize relative functional error. The real conflict residual
-                # is often only 1e-10--1e-7 in activation energy; raw MSE makes
-                # Adam's epsilon dominate and leaves the relocation at zero.
-                loss = (
-                    F.mse_loss(F.linear(x, candidate), target_output)
-                    / target_energy.detach().clamp_min(1e-12)
-                )
-                optimizer.zero_grad(set_to_none=True)
-                loss.backward()
-                optimizer.step()
-
-        with torch.no_grad():
-            relocated = (
-                float(gamma)
-                * ((b * coefficients.detach().unsqueeze(0)) @ a)
-                * support
-            )
-            residual_energy = F.mse_loss(F.linear(x, relocated), target_output)
-            relative_error = torch.sqrt(
-                residual_energy / target_energy.clamp_min(1e-12)
-            )
-            recovered = (
-                1.0 - residual_energy / target_energy.clamp_min(1e-12)
-            ).clamp(0.0, 1.0)
-        return relocated.to(dtype=target_delta.dtype), {
-            "target_energy": float(target_energy.item()),
-            "recovered_energy": float(recovered.item()),
-            "activation_error": float(relative_error.item()),
-        }
-
-    def begin_relocation_input_collection(self) -> None:
-        self._relocation_input_collection = []
-
-    def _record_relocation_inputs(self, inputs: torch.Tensor) -> None:
-        if self._relocation_input_collection is None:
-            return
-        collected = sum(item.shape[0] for item in self._relocation_input_collection)
-        remaining = self.dual_mask_relocation_vectors - collected
-        if remaining <= 0:
-            return
-        flattened = inputs.detach().reshape(-1, inputs.shape[-1])
-        if flattened.shape[0] > remaining:
-            indices = torch.linspace(
-                0,
-                flattened.shape[0] - 1,
-                steps=remaining,
-                device=flattened.device,
-            ).long()
-            flattened = flattened.index_select(0, indices)
-        self._relocation_input_collection.append(flattened)
-
-    def end_relocation_input_collection(self) -> torch.Tensor:
-        collected = self._relocation_input_collection
-        self._relocation_input_collection = None
-        if not collected:
-            return self.qkv.weight.new_zeros((0, self.dim))
-        return torch.cat(collected, dim=0)
-
-    def prepare_conflict_relocation(
-            self,
-            task: int,
-            inputs: torch.Tensor,
-    ) -> None:
-        """Fit the merge-time relocation using current-task train-only inputs."""
-        self._pending_relocations = {}
-        mode = self.dual_mask_conflict_merge_mode
-        if mode not in {"relocate", "suppress_relocate"}:
-            return
-
-        t = int(task)
-        branches = []
-        if not self.use_slora and not self.use_plora:
-            branches.append(("S", self.S_lora[t], 1.0, False))
-        else:
-            if self.use_slora or t == 0:
-                branches.append(("S", self.S_lora[t], float(self.slora_gamma), False))
-            if t > 0 and self.use_plora and self.P_lora[t] is not None:
-                branches.append(("P", self.P_lora[t], float(self.plora_gamma), True))
-
-        conflict_ratio, conflict_strength = self._conflict_parameters()
-        plastic_mask = (1.0 - self.general_mask).to(
-            device=inputs.device,
-            dtype=inputs.dtype,
-        )
-        metrics = []
-        for name, unit, gamma, isolated in branches:
-            raw_delta = gamma * (unit.B_weight.detach() @ unit.A_weight.detach())
-            base_delta, conflict_mask = self._merge_base_and_conflict(
-                raw_delta,
-                isolated=isolated,
-                conflict_ratio=conflict_ratio,
-
-            )
-            residual_scale = 1.0 if mode == "relocate" else conflict_strength
-            target_delta = base_delta * conflict_mask * residual_scale
-            safe_support = plastic_mask * (1.0 - conflict_mask)
-            relocated, branch_metrics = self._fit_low_rank_relocation(
-                unit,
-                gamma=gamma,
-                target_delta=target_delta,
-                safe_support=safe_support,
-                inputs=inputs,
-            )
-            self._pending_relocations[name] = relocated.detach()
-            metrics.append(branch_metrics)
-
-        if metrics:
-            target_energy = sum(item["target_energy"] for item in metrics)
-            recovered_energy = sum(item["recovered_energy"] for item in metrics) / len(metrics)
-            activation_error = sum(item["activation_error"] for item in metrics) / len(metrics)
-        else:
-            target_energy = recovered_energy = activation_error = 0.0
-        with torch.no_grad():
-            self.last_relocation_target_energy.fill_(target_energy)
-            self.last_relocation_recovered_energy.fill_(recovered_energy)
-            self.last_relocation_activation_error.fill_(activation_error)
-        logging.info(
-            "Task %s layer %s conflict relocation: mode=%s, target_energy=%.6e, "
-            "recovered_energy=%.4f, activation_error=%.4f",
-            t,
-            self.layer_idx,
-            mode,
-            target_energy,
-            recovered_energy,
-            activation_error,
-        )
 
     def _masked_unit_forward(
             self,
@@ -1642,8 +1430,6 @@ class Attention_LoRA(nn.Module):
         self._pending_safe_residual_deltas = []
         self._last_safe_residual_loss = None
 
-        self._record_relocation_inputs(x)
-
         zero_output = x.new_zeros((*x.shape[:-1], self.dim * 3))
 
         if self.pretrained_anchor_mode:
@@ -1730,7 +1516,6 @@ class Attention_LoRA(nn.Module):
                 isolated=item["isolated"],
                 conflict_ratio=conflict_ratio,
                 conflict_strength=conflict_strength,
-                relocation_delta=self._pending_relocations.get(item["name"]),
             )
             if not torch.isfinite(safe_delta).all():
                 raise RuntimeError(
@@ -1792,7 +1577,6 @@ class Attention_LoRA(nn.Module):
             # safe_delta 已经永久写入 qkv.weight；旧 A/B 后续不再参与前向。
             self.S_lora[t] = None
             self.P_lora[t] = None
-            self._pending_relocations = {}
             self._functional_merge_strength_override = None
 
         return None

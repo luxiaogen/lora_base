@@ -656,92 +656,19 @@ class LoRALifecycleTests(unittest.TestCase):
         self.assertTrue(torch.allclose(suppressed, delta * 0.5))
 
     def test_conflict_merge_modes_are_explicitly_validated(self):
-        for mode in ("none", "suppress", "relocate", "suppress_relocate"):
+        for mode in ("none", "suppress"):
             module = Attention_LoRA(dim=4, num_heads=1, r=2, n_tasks=1)
             module._init_params(
                 make_args(dual_mask_conflict_merge_mode=mode)
             )
             self.assertEqual(module.dual_mask_conflict_merge_mode, mode)
 
-        module = Attention_LoRA(dim=4, num_heads=1, r=2, n_tasks=1)
-        with self.assertRaises(ValueError):
-            module._init_params(
-                make_args(dual_mask_conflict_merge_mode="unknown")
-            )
-
-    def test_low_rank_relocation_stays_in_safe_support_and_recovers_activation(self):
-        module = Attention_LoRA(dim=2, num_heads=1, r=2, n_tasks=1)
-        module._init_params(
-            make_args(
-                dual_mask_relocation_steps=80,
-                dual_mask_relocation_lr=0.1,
-            )
-        )
-        module.before_task(0)
-        unit = module.S_lora[0]
-        with torch.no_grad():
-            unit.A_weight.copy_(torch.eye(2))
-            unit.B_weight.zero_()
-            unit.B_weight[0, 0] = 1.0
-            unit.B_weight[0, 1] = 1.0
-
-        target_delta = torch.zeros_like(module.qkv.weight)
-        target_delta[0, 0] = 1.0
-        safe_support = torch.zeros_like(target_delta)
-        safe_support[:, 1] = 1.0
-        inputs = torch.tensor(
-            [[1.0, 1.0], [2.0, 2.0], [-1.0, -1.0], [0.5, 0.5]]
-        )
-
-        relocated, metrics = module._fit_low_rank_relocation(
-            unit,
-            gamma=1.0,
-            target_delta=target_delta,
-            safe_support=safe_support,
-            inputs=inputs,
-        )
-
-        self.assertEqual(relocated[:, 0].count_nonzero().item(), 0)
-        self.assertLess(metrics["activation_error"], 0.05)
-        self.assertGreater(metrics["recovered_energy"], 0.95)
-
-    def test_low_energy_relocation_uses_relative_not_absolute_fit_scale(self):
-        module = Attention_LoRA(dim=2, num_heads=1, r=2, n_tasks=1)
-        module._init_params(
-            make_args(
-                dual_mask_relocation_steps=20,
-                dual_mask_relocation_lr=0.1,
-            )
-        )
-        module.before_task(0)
-        unit = module.S_lora[0]
-        with torch.no_grad():
-            unit.A_weight.copy_(torch.eye(2))
-            unit.B_weight.zero_()
-            # Match the scale observed for trained LoRA B weights. The safe
-            # column can represent the target exactly, so recovery should not
-            # depend on using an artificially unit-scale basis.
-            unit.B_weight[0, 0] = 1e-4
-            unit.B_weight[0, 1] = 1e-4
-
-        target_delta = torch.zeros_like(module.qkv.weight)
-        target_delta[0, 0] = 1e-4
-        safe_support = torch.zeros_like(target_delta)
-        safe_support[:, 1] = 1.0
-        inputs = torch.tensor(
-            [[1.0, 1.0], [2.0, 2.0], [-1.0, -1.0], [0.5, 0.5]]
-        )
-
-        _, metrics = module._fit_low_rank_relocation(
-            unit,
-            gamma=1.0,
-            target_delta=target_delta,
-            safe_support=safe_support,
-            inputs=inputs,
-        )
-
-        self.assertGreater(metrics["recovered_energy"], 0.9)
-        self.assertLess(metrics["activation_error"], 0.35)
+        for unsupported_mode in ("relocate", "suppress_relocate", "unknown"):
+            module = Attention_LoRA(dim=4, num_heads=1, r=2, n_tasks=1)
+            with self.assertRaises(ValueError):
+                module._init_params(
+                    make_args(dual_mask_conflict_merge_mode=unsupported_mode)
+                )
 
     def test_default_merge_mode_is_identical_to_safe_delta(self):
         module = Attention_LoRA(dim=4, num_heads=1, r=2, n_tasks=1)
@@ -775,75 +702,6 @@ class LoRALifecycleTests(unittest.TestCase):
                 ),
             )
         )
-
-    def test_prepared_relocation_is_merged_once_and_then_cleared(self):
-        module = Attention_LoRA(dim=2, num_heads=1, r=2, n_tasks=1)
-        module._init_params(
-            make_args(
-                dual_mask_conflict_merge_mode="suppress_relocate",
-                dual_mask_conflict_ratio=0.1,
-                dual_mask_conflict_strength=0.5,
-                dual_mask_relocation_steps=80,
-                dual_mask_relocation_lr=0.1,
-            )
-        )
-        module.before_task(0)
-        module.general_mask.zero_()
-        module.general_mask[:, 0] = 1.0
-        module.w0_importance.zero_()
-        module.w0_importance[0, 0] = 1.0
-        module.effective_protect_strength = 0.0
-        unit = module.S_lora[0]
-        with torch.no_grad():
-            unit.A_weight.copy_(torch.eye(2))
-            unit.B_weight.zero_()
-            unit.B_weight[0, 0] = 1.0
-            unit.B_weight[0, 1] = 1.0
-
-        inputs = torch.tensor(
-            [[1.0, 1.0], [2.0, 2.0], [-1.0, -1.0], [0.5, 0.5]]
-        )
-        raw_delta = module.slora_gamma * (unit.B_weight @ unit.A_weight)
-        expected_suppressed = module._safe_delta(
-            raw_delta,
-            isolated=False,
-            conflict_ratio=0.1,
-            conflict_strength=0.5,
-        )
-        weight_before = module.qkv.weight.detach().clone()
-
-        module.prepare_conflict_relocation(0, inputs)
-        relocation = module._pending_relocations["S"].clone()
-        module.after_task(0)
-
-        self.assertGreater(relocation.norm().item(), 0.0)
-        self.assertTrue(
-            torch.allclose(
-                module.qkv.weight,
-                weight_before + expected_suppressed + relocation,
-                atol=1e-5,
-                rtol=1e-5,
-            )
-        )
-        self.assertEqual(module._pending_relocations, {})
-
-    def test_relocation_collection_caches_bounded_attention_inputs(self):
-        module = Attention_LoRA(dim=4, num_heads=1, r=2, n_tasks=1)
-        module._init_params(
-            make_args(
-                dual_mask_conflict_merge_mode="relocate",
-                dual_mask_relocation_vectors=3,
-            )
-        )
-        module.before_task(0)
-        inputs = torch.randn(2, 4, 4, requires_grad=True)
-
-        module.begin_relocation_input_collection()
-        module(inputs, task=0)
-        cached = module.end_relocation_input_collection()
-
-        self.assertEqual(cached.shape, (3, 4))
-        self.assertFalse(cached.requires_grad)
 
     def test_task0_gate_ablation_modes_leave_later_tasks_unchanged(self):
         delta = torch.arange(1, 49, dtype=torch.float32).reshape(12, 4)

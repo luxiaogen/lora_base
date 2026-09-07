@@ -190,9 +190,6 @@ def _log_experiment_task(
                         ('last_private_conflict_mask_overlap', 'private_conflict_mask_overlap'),
                     ('last_private_conflict_energy_overlap', 'private_conflict_energy_overlap'),
                     ('last_private_conflict_gate_suppression', 'private_conflict_gate_suppression'),
-                    ('last_relocation_target_energy', 'relocation_target_energy'),
-                    ('last_relocation_recovered_energy', 'relocation_recovered_energy'),
-                    ('last_relocation_activation_error', 'relocation_activation_error'),
                 ):
                     value = getattr(module, attribute, None)
                     if value is not None:
