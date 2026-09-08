@@ -59,42 +59,6 @@ class Learner(BaseLearner):
         }
 
     def __init__(self, args):
-        # removed_options = (
-        #     "dual_mask_alpha_calibration",
-        #     "dual_mask_competence_margin_scale",
-        #     "dual_mask_competence_mix_lambda",
-        #     "dual_mask_old_overlap_enabled",
-        #     "dual_mask_conflict_adaptive",
-        #     "dual_mask_conflict_coverage_adaptive",
-        #     "dual_mask_conflict_task_adaptive",
-        #     "dual_mask_conflict_energy50",
-        #     "dual_mask_grad_alpha",
-        #     "dual_mask_grad_batches",
-        #     "dual_mask_task_relevance_enabled",
-        #     "dual_mask_task_relevance_batches",
-        #     "dual_mask_task_coverage",
-        #     "dual_mask_spectral_conflict_adaptive",
-        #     "dual_mask_static_w0",
-        #     "dual_mask_plasticity_rank_only",
-        #     "dual_mask_plasticity_diagnostics",
-        # )
-        # stale_options = [name for name in removed_options if name in args]
-        # if stale_options:
-        #     raise ValueError(
-        #         "Removed DualMask options: {}. Delete them from the config or "
-        #         "--set overrides.".format(", ".join(stale_options))
-        #     )
-        #
-        # if (
-        #     bool(args.get("dual_mask_functional_merge_calibration", False))
-        #     and str(args.get("dual_mask_conflict_merge_mode", "suppress")).lower()
-        #     != "suppress"
-        # ):
-        #     raise ValueError(
-        #         "dual_mask_functional_merge_calibration requires "
-        #         "dual_mask_conflict_merge_mode='suppress'."
-        #     )
-
         super().__init__(args)
 
         self._network = MANet(args)
@@ -204,16 +168,6 @@ class Learner(BaseLearner):
             and selective_anchor_ramp > 0.0
         )
 
-        # if safe_residual_applies and isinstance(
-        #         self._network,
-        #         torch.nn.DataParallel,
-        # ):
-        #     raise RuntimeError(
-        #         "dual_mask_safe_residual is currently supported only for "
-        #         "single-GPU training; nn.DataParallel would drop its "
-        #         "forward-side auxiliary loss."
-        #     )
-        #
         self._last_training_loss_metrics = {}
         if (reg_weight <= 0.0
                 and not anchor_applies and not safe_residual_applies and not selective_anchor_applies):
@@ -257,23 +211,10 @@ class Learner(BaseLearner):
                   "safe_residual_weighted": weighted_safe_residual.detach(),
               })
         if selective_anchor_applies:
-            # if output is None or targets is None or batch_context is None:
-            #     raise RuntimeError(
-            #         "selective functional anchor requires training output, "
-            #         "targets, and the W0 batch context"
-            #     )
             w0_features = batch_context.get("selective_anchor_w0_features")
-            # if w0_features is None:
-            #     raise RuntimeError(
-            #         "selective functional anchor W0 features were not prepared"
-            #     )
             prototype_ids = sorted(self._w0_class_means)
-            # if prototype_ids != list(range(len(prototype_ids))):
-            #     raise RuntimeError(
-            #         "Task-0 W0 prototypes must use contiguous local class ids"
-            #     )
             current_features = output["features"]
-            prototypes = torch.stack([self._w0_class_means[class_id]for class_id in prototype_ids]).to(device=current_features.device,dtype=current_features.dtype,)
+            prototypes = torch.stack([self._w0_class_means[class_id] for class_id in prototype_ids]).to(device=current_features.device, dtype=current_features.dtype)
             selective_anchor, selective_metrics = (
                 self._selective_functional_anchor_loss(current_features,w0_features,targets,prototypes,
                     min_margin=float(self.args.get("dual_mask_selective_anchor_min_margin",0.05,)),
@@ -331,23 +272,18 @@ class Learner(BaseLearner):
         return self._collect_features(loader, use_pretrained_anchor=True)
 
     def _calibrate_functional_merge(self, loader):
-        from utils.dual_mask_metrics import (functional_merge_diagnostics,select_functional_merge_candidate,)
+        from utils.dual_mask_metrics import functional_merge_diagnostics, select_functional_merge_candidate
 
         modules = list(self._iter_lora_modules())
         if not modules:
             return
-        # if any(module.dual_mask_conflict_merge_mode != "suppress" for module in modules):
-        #     raise ValueError(
-        #         "Functional merge calibration requires "
-        #         "dual_mask_conflict_merge_mode='suppress'."
-        #     )
 
         tolerance = max(0.0,float(self.args.get("dual_mask_functional_merge_tolerance", 0.05)),)
 
 
         base_beta = min(max(float(self.args.get("dual_mask_conflict_strength", 0.5)), 0.0),1.0,)
         candidate_betas = sorted({0.0, base_beta})
-        anchor_indices, anchor_features, anchor_targets = (self._collect_anchor_features(loader))
+        _, anchor_features, _ = self._collect_anchor_features(loader)
         old_prototypes = None
         old_class_ids = None
         if self._known_classes > 0:
@@ -359,10 +295,6 @@ class Learner(BaseLearner):
             for module in modules:
                 module.set_functional_merge_strength(beta)
             indices, features, targets = self._collect_features(loader)
-            # if not torch.equal(indices, anchor_indices) or not torch.equal(targets, anchor_targets):
-            #     raise RuntimeError(
-            #         "Functional merge calibration loader order changed between candidates."
-            #     )
             metrics = functional_merge_diagnostics(
                 anchor_features,
                 features,

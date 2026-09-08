@@ -338,27 +338,9 @@ class Attention_LoRA(nn.Module):
             self.plora_gamma *= 0.5
         # svd 使用截断方向；soft_svd 对全部奇异方向连续加权。
         self.dual_mask_importance = str(args.get("dual_mask_importance", "svd")).lower()
-        supported_importance_modes = {"svd", "soft_svd"}
-        # if self.dual_mask_importance not in supported_importance_modes:
-        #     raise ValueError(
-        #         "Unsupported dual_mask_importance={!r}. Choose from: {}.".format(
-        #             self.dual_mask_importance,
-        #             ", ".join(sorted(supported_importance_modes)),
-        #         )
-        #     )
         self.dual_mask_general_ratio = float(args.get("dual_mask_general_ratio", 0.5))  # 0.4
 
         self.dual_mask_layerwise_ratio_mode = str(args.get("dual_mask_layerwise_ratio_mode", "none")).lower()
-        # if self.dual_mask_layerwise_ratio_mode not in {
-        #     "none",
-        #     "shallow_high",
-        #     "deep_high",
-        # }:
-        #     raise ValueError(
-        #         "Unsupported dual_mask_layerwise_ratio_mode={!r}. Choose from: none, shallow_high, deep_high.".format(
-        #             self.dual_mask_layerwise_ratio_mode
-        #         )
-        #     )
 
         self.dual_mask_svd_rank = int(args.get("dual_mask_svd_rank", self.rank))  # 32
         self.dual_mask_svd_energy_coverage = float(args.get("dual_mask_svd_energy_coverage", 0.0))
@@ -375,26 +357,11 @@ class Attention_LoRA(nn.Module):
         self.dual_mask_conflict_old_overlap_adaptive = bool(args.get("dual_mask_conflict_old_overlap_adaptive", False))
 
         self.dual_mask_private_conflict_mode = str(args.get("dual_mask_private_conflict_mode", "global")).lower()
-        # supported_private_conflict_modes = {"global", "none", "plastic"}
-        # if self.dual_mask_private_conflict_mode not in supported_private_conflict_modes:
-        #     raise ValueError("Unsupported dual_mask_private_conflict_mode={!r}. Choose from: {}.".format(self.dual_mask_private_conflict_mode,", ".join(sorted(supported_private_conflict_modes)),)
-        #     )
 
         self.dual_mask_task0_gate_mode = str(args.get("dual_mask_task0_gate_mode", "full")).lower()
         self.dual_mask_s_protect_enabled = bool(args.get("dual_mask_s_protect_enabled", True))
-        supported_task0_gate_modes = {"full", "protect_only", "unmasked"}
-        # if self.dual_mask_task0_gate_mode not in supported_task0_gate_modes:
-        #     raise ValueError("Unsupported dual_mask_task0_gate_mode={!r}. Choose from: {}.".format(self.dual_mask_task0_gate_mode,", ".join(sorted(supported_task0_gate_modes)),))
 
         self.dual_mask_conflict_merge_mode = str(args.get("dual_mask_conflict_merge_mode", "suppress")).lower()
-        # supported_conflict_merge_modes = {"none","suppress",}
-        # if self.dual_mask_conflict_merge_mode not in supported_conflict_merge_modes:
-        #     raise ValueError(
-        #         "Unsupported dual_mask_conflict_merge_mode={!r}. Choose from: {}.".format(
-        #             self.dual_mask_conflict_merge_mode,
-        #             ", ".join(sorted(supported_conflict_merge_modes)),
-        #         )
-        #     )
         self.dual_mask_safe_residual_enabled = bool(args.get("dual_mask_safe_residual_enabled", False))
         self.dual_mask_safe_residual_vectors = max(1, int(args.get("dual_mask_safe_residual_vectors", 64)))
 
@@ -403,12 +370,6 @@ class Attention_LoRA(nn.Module):
         self.dual_mask_plasticity_adaptive = bool(args.get("dual_mask_plasticity_adaptive", False))
 
         self.dual_mask_protect_strength_mode = str(args.get("dual_mask_protect_strength_mode", "legacy_linear")).lower()
-        # supported_protect_strength_modes = {"legacy_linear", "competence"}
-
-        # if self.dual_mask_protect_strength_mode not in supported_protect_strength_modes:
-        #     raise ValueError(
-        #         "Unsupported dual_mask_protect_strength_mode={!r}. Choose from: {}.".format(self.dual_mask_protect_strength_mode,", ".join(sorted(supported_protect_strength_modes)),)
-        #     )
         # 固定保存初始预训练权重；自适应模式只改变覆盖率、强度和 private rank。
         self.capture_pretrained_anchor()
         self.set_pretrained_competence(0.0)
@@ -980,21 +941,10 @@ class Attention_LoRA(nn.Module):
         """Compose one branch update according to the merge-only ablation."""
         mode = self.dual_mask_conflict_merge_mode
         if mode == "suppress":
-            return self._safe_delta(
-                raw_delta,
-                isolated=isolated,
-                conflict_ratio=conflict_ratio,
-                conflict_strength=conflict_strength,
-            )
+            return self._safe_delta(raw_delta, isolated=isolated, conflict_ratio=conflict_ratio, conflict_strength=conflict_strength)
 
-        base_delta, _ = self._merge_base_and_conflict(
-            raw_delta,
-            isolated=isolated,
-            conflict_ratio=conflict_ratio,
-        )
-        # if mode == "none":
-        #     return base_delta
-        # raise RuntimeError(f"Unexpected conflict merge mode: {mode}")
+        base_delta, _ = self._merge_base_and_conflict(raw_delta, isolated=isolated, conflict_ratio=conflict_ratio)
+        return base_delta
 
     def _masked_unit_forward(
             self,
@@ -1007,15 +957,8 @@ class Attention_LoRA(nn.Module):
         ## isolated=True: safe_delta_p = BA_p * plastic_mask * conflict_gate
         ## isolated=False: safe_delta_s = BA_s * protect_gate * conflict_gate
         safe_delta = self._safe_delta(raw_delta, isolated=isolated)
-        if (self.dual_mask_safe_residual_enabled
-                and self.training and torch.is_grad_enabled()
-        ):
-            base_delta, _ = self._merge_base_and_conflict(
-                raw_delta,
-                isolated=isolated,
-                conflict_ratio=self._conflict_parameters()[0],
-                compute_conflict=False,
-            )
+        if self.dual_mask_safe_residual_enabled and self.training and torch.is_grad_enabled():
+            base_delta, _ = self._merge_base_and_conflict(raw_delta, isolated=isolated, conflict_ratio=self._conflict_parameters()[0], compute_conflict=False)
             self._pending_safe_residual_deltas.append(residual_scale * (base_delta - safe_delta))
         return F.linear(x, safe_delta)  # 输出 = x @ safe_delta.T
 
@@ -1024,18 +967,12 @@ class Attention_LoRA(nn.Module):
             return
         sampled_inputs = x.detach().reshape(-1, x.shape[-1])
         if sampled_inputs.shape[0] > self.dual_mask_safe_residual_vectors:
-            indices = torch.linspace(
-                0,
-                sampled_inputs.shape[0] - 1,
-                steps=self.dual_mask_safe_residual_vectors,
-                device=sampled_inputs.device,).long()
+            indices = torch.linspace(0, sampled_inputs.shape[0] - 1, steps=self.dual_mask_safe_residual_vectors, device=sampled_inputs.device).long()
             sampled_inputs = sampled_inputs.index_select(0, indices)
         residual_delta = torch.stack(self._pending_safe_residual_deltas).sum(dim=0)
         residual_output = F.linear(sampled_inputs, residual_delta)
-        input_energy = (sampled_inputs.float().pow(2).sum(dim=-1).mean()
-            .detach().clamp_min(1e-12))
-        self._last_safe_residual_loss = (
-            residual_output.float().pow(2).sum(dim=-1).mean() / input_energy)
+        input_energy = sampled_inputs.float().pow(2).sum(dim=-1).mean().detach().clamp_min(1e-12)
+        self._last_safe_residual_loss = residual_output.float().pow(2).sum(dim=-1).mean() / input_energy
         self._pending_safe_residual_deltas = []
 
     def safe_residual_regularization(self):
@@ -1345,26 +1282,23 @@ class Attention_LoRA(nn.Module):
         out = zero_output
 
         if unit_s is not None and (self.use_slora or t_idx == 0):
-            out = out + slora_gamma * self._masked_unit_forward(
-                x,unit_s,isolated=False,residual_scale=slora_gamma,)
+            out = out + slora_gamma * self._masked_unit_forward(x, unit_s, isolated=False, residual_scale=slora_gamma)
 
         if t_idx > 0 and self.use_plora and unit_p is not None:
             ## P_lora 只能在 W0 非重要区域更新
-            out = out + plora_gamma * self._masked_unit_forward(
-                x,unit_p,isolated=True,residual_scale=plora_gamma,)
+            out = out + plora_gamma * self._masked_unit_forward(x, unit_p, isolated=True, residual_scale=plora_gamma)
 
         self._finalize_safe_residual(x)
         return out
 
-    def forward(self, x: torch.Tensor, task: int, register_hook: bool = False,
-                get_feat: bool = False, get_cur_feat: bool = False):
+    def forward(self, x: torch.Tensor, task: int, register_hook: bool = False, get_feat: bool = False, get_cur_feat: bool = False):
 
         Bsz, N, C = x.shape
         qkv:torch.Tensor = self.qkv(x) + self._contrib_from_units(x, task) # y=W0x+ΔWx
         qkv:torch.Tensor = qkv.reshape(Bsz, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
 
         q, k, v = qkv.unbind(0)
-        x = torch.nn.functional.scaled_dot_product_attention(q, k, v,dropout_p=self.attn_drop.p if self.training else 0.,)
+        x = F.scaled_dot_product_attention(q, k, v, dropout_p=self.attn_drop.p if self.training else 0.0)
 
         x = x.transpose(1, 2).reshape(Bsz, N, C)
         x = self.proj(x)
@@ -1386,21 +1320,8 @@ class Attention_LoRA(nn.Module):
                 "raw_delta": delta,
             }
 
-        def mask_delta(
-                item,
-                conflict_ratio: float,
-                conflict_strength: float,
-        ):
-            safe_delta = self._compose_merge_delta(
-                item["raw_delta"],
-                isolated=item["isolated"],
-                conflict_ratio=conflict_ratio,
-                conflict_strength=conflict_strength,
-            )
-            # if not torch.isfinite(safe_delta).all():
-            #     raise RuntimeError(
-            #         f"Task {t} {item['name']} branch produced a non-finite masked LoRA delta"
-            #     )
+        def mask_delta(item, conflict_ratio: float, conflict_strength: float):
+            safe_delta = self._compose_merge_delta(item["raw_delta"], isolated=item["isolated"], conflict_ratio=conflict_ratio, conflict_strength=conflict_strength)
             item["safe_delta"] = safe_delta
 
         branch_deltas = []
@@ -1420,18 +1341,10 @@ class Attention_LoRA(nn.Module):
             for item in branch_deltas:
                 mask_delta(item, conflict_ratio, conflict_strength)
 
-            self._save_dual_mask_snapshot(
-                t,branch_deltas,
-                conflict_ratio=conflict_ratio,
-                conflict_strength=conflict_strength,
-            )
+            self._save_dual_mask_snapshot(t, branch_deltas, conflict_ratio=conflict_ratio, conflict_strength=conflict_strength)
 
             #########################
-            self._log_merge_stats(
-                t,branch_deltas,
-                conflict_ratio=conflict_ratio,
-                conflict_strength=conflict_strength,
-            )
+            self._log_merge_stats(t, branch_deltas, conflict_ratio=conflict_ratio, conflict_strength=conflict_strength)
             with torch.no_grad():
                 delta = torch.stack([item["safe_delta"] for item in branch_deltas]).sum(dim=0)
                 self.qkv.weight.add_(delta.to(device, dtype))

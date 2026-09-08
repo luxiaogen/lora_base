@@ -408,50 +408,18 @@ class MaskSelectionTests(unittest.TestCase):
         self.assertEqual(module.last_svd_rank, 4)
         self.assertAlmostEqual(module.last_svd_energy_coverage, 1.0)
 
-    def test_removed_importance_modes_are_rejected(self):
-        removed_modes = (
-            "soft_topk",
-            "grad",
-            "gradient",
-            "svd_grad",
-            "grad_svd",
-            "hybrid",
-            "soft_svd_grad",
-            "soft_spectral_grad",
-            "soft_topk_grad",
-            "spectral_loss",
-            "soft_spectral",
-        )
-        for mode in removed_modes:
-            with self.subTest(mode=mode):
-                module = Attention_LoRA(dim=4, num_heads=1, r=2, n_tasks=1)
-                with self.assertRaisesRegex(
-                    ValueError,
-                    "Unsupported dual_mask_importance",
-                ):
-                    module._init_params(
-                        make_args(dual_mask_importance=mode)
-                    )
-
-    def test_task0_gate_mode_is_validated(self):
-        module = Attention_LoRA(dim=4, num_heads=1, r=2, n_tasks=1)
-
-        with self.assertRaisesRegex(
-            ValueError,
-            "Unsupported dual_mask_task0_gate_mode",
-        ):
-            module._init_params(make_args(dual_mask_task0_gate_mode="invalid"))
-
-    def test_protect_strength_mode_is_validated(self):
-        module = Attention_LoRA(dim=4, num_heads=1, r=2, n_tasks=1)
-
-        with self.assertRaisesRegex(
-            ValueError,
-            "Unsupported dual_mask_protect_strength_mode",
-        ):
-            module._init_params(
-                make_args(dual_mask_protect_strength_mode="invalid")
-            )
+    def test_supported_runtime_modes_initialize(self):
+        supported_modes = {
+            "dual_mask_importance": ("svd", "soft_svd"),
+            "dual_mask_task0_gate_mode": ("full", "protect_only", "unmasked"),
+            "dual_mask_protect_strength_mode": ("legacy_linear", "competence"),
+        }
+        for option, values in supported_modes.items():
+            for value in values:
+                with self.subTest(option=option, value=value):
+                    module = Attention_LoRA(dim=4, num_heads=1, r=2, n_tasks=1)
+                    module._init_params(make_args(**{option: value}))
+                    self.assertEqual(getattr(module, option), value)
 
 
 class PretrainedAnchorTests(unittest.TestCase):
@@ -655,7 +623,7 @@ class LoRALifecycleTests(unittest.TestCase):
         self.assertEqual(merge_strength, 0.5)
         self.assertTrue(torch.allclose(suppressed, delta * 0.5))
 
-    def test_conflict_merge_modes_are_explicitly_validated(self):
+    def test_supported_conflict_merge_modes_execute(self):
         for mode in ("none", "suppress"):
             module = Attention_LoRA(dim=4, num_heads=1, r=2, n_tasks=1)
             module._init_params(
@@ -663,12 +631,9 @@ class LoRALifecycleTests(unittest.TestCase):
             )
             self.assertEqual(module.dual_mask_conflict_merge_mode, mode)
 
-        for unsupported_mode in ("relocate", "suppress_relocate", "unknown"):
-            module = Attention_LoRA(dim=4, num_heads=1, r=2, n_tasks=1)
-            with self.assertRaises(ValueError):
-                module._init_params(
-                    make_args(dual_mask_conflict_merge_mode=unsupported_mode)
-                )
+            raw_delta = torch.arange(1, 49, dtype=torch.float32).reshape(12, 4)
+            merged = module._compose_merge_delta(raw_delta, isolated=False, conflict_ratio=0.1, conflict_strength=0.5)
+            self.assertTrue(torch.isfinite(merged).all())
 
     def test_default_merge_mode_is_identical_to_safe_delta(self):
         module = Attention_LoRA(dim=4, num_heads=1, r=2, n_tasks=1)

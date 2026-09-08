@@ -291,7 +291,6 @@ def _train(args, experiment_tracker=None):
         time_end = time.time()
         eval_seconds = time_end - time_start
         logging.info('Time:{}'.format(eval_seconds))
-        # raise Exception
         model.after_task()
 
         logging.info('CNN: {}'.format(cnn_accy['grouped']))
