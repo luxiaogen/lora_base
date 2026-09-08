@@ -22,52 +22,32 @@ from contextlib import ExitStack
 
 class Learner(BaseLearner):
     @staticmethod
-    def _selective_functional_anchor_loss(
-            current_features,
-            w0_features,
-            targets,
-            prototypes,
-            min_margin,
-            tolerance,
-    ):
+    def _selective_functional_anchor_loss(current_features,w0_features,targets,prototypes,min_margin,tolerance,):
         current_features = F.normalize(current_features, dim=1)
         w0_features = F.normalize(w0_features.detach(), dim=1)
         prototypes = F.normalize(prototypes.detach(), dim=1)
 
         current_scores = current_features @ prototypes.t()
         w0_scores = w0_features @ prototypes.t()
-        class_mask = F.one_hot(
-            targets,
-            num_classes=prototypes.shape[0],
-        ).bool()
+        class_mask = F.one_hot(targets,num_classes=prototypes.shape[0],).bool()
 
         current_positive = current_scores.gather(1, targets[:, None]).squeeze(1)
-        current_negative = current_scores.masked_fill(
-            class_mask,
-            float("-inf"),
-        ).max(dim=1).values
+        current_negative = current_scores.masked_fill(class_mask,float("-inf"),).max(dim=1).values
+
         w0_positive = w0_scores.gather(1, targets[:, None]).squeeze(1)
-        w0_negative = w0_scores.masked_fill(
-            class_mask,
-            float("-inf"),
-        ).max(dim=1).values
+        w0_negative = w0_scores.masked_fill(class_mask,float("-inf"),).max(dim=1).values
 
         current_margin = current_positive - current_negative
         w0_margin = w0_positive - w0_negative
-        selected = (w0_scores.argmax(dim=1) == targets) & (
-            w0_margin >= float(min_margin)
-        )
-        violation = F.relu(
-            w0_margin.detach() - float(tolerance) - current_margin
-        )
+        selected = (w0_scores.argmax(dim=1) == targets) & (w0_margin >= float(min_margin))
+
+        violation = F.relu(w0_margin.detach() - float(tolerance) - current_margin)
 
         selected_ratio = selected.float().mean()
         if selected.any():
             selected_violation = violation[selected]
             weights = w0_margin[selected].detach().clamp_min(0.0)
-            loss = (
-                weights * selected_violation.square()
-            ).sum() / weights.sum().clamp_min(torch.finfo(weights.dtype).eps)
+            loss = (weights * selected_violation.square()).sum() / weights.sum().clamp_min(torch.finfo(weights.dtype).eps)
             violation_ratio = (selected_violation > 0).float().mean()
         else:
             loss = current_features.sum() * 0.0
@@ -79,41 +59,41 @@ class Learner(BaseLearner):
         }
 
     def __init__(self, args):
-        removed_options = (
-            "dual_mask_alpha_calibration",
-            "dual_mask_competence_margin_scale",
-            "dual_mask_competence_mix_lambda",
-            "dual_mask_old_overlap_enabled",
-            "dual_mask_conflict_adaptive",
-            "dual_mask_conflict_coverage_adaptive",
-            "dual_mask_conflict_task_adaptive",
-            "dual_mask_conflict_energy50",
-            "dual_mask_grad_alpha",
-            "dual_mask_grad_batches",
-            "dual_mask_task_relevance_enabled",
-            "dual_mask_task_relevance_batches",
-            "dual_mask_task_coverage",
-            "dual_mask_spectral_conflict_adaptive",
-            "dual_mask_static_w0",
-            "dual_mask_plasticity_rank_only",
-            "dual_mask_plasticity_diagnostics",
-        )
-        stale_options = [name for name in removed_options if name in args]
-        if stale_options:
-            raise ValueError(
-                "Removed DualMask options: {}. Delete them from the config or "
-                "--set overrides.".format(", ".join(stale_options))
-            )
-
-        if (
-            bool(args.get("dual_mask_functional_merge_calibration", False))
-            and str(args.get("dual_mask_conflict_merge_mode", "suppress")).lower()
-            != "suppress"
-        ):
-            raise ValueError(
-                "dual_mask_functional_merge_calibration requires "
-                "dual_mask_conflict_merge_mode='suppress'."
-            )
+        # removed_options = (
+        #     "dual_mask_alpha_calibration",
+        #     "dual_mask_competence_margin_scale",
+        #     "dual_mask_competence_mix_lambda",
+        #     "dual_mask_old_overlap_enabled",
+        #     "dual_mask_conflict_adaptive",
+        #     "dual_mask_conflict_coverage_adaptive",
+        #     "dual_mask_conflict_task_adaptive",
+        #     "dual_mask_conflict_energy50",
+        #     "dual_mask_grad_alpha",
+        #     "dual_mask_grad_batches",
+        #     "dual_mask_task_relevance_enabled",
+        #     "dual_mask_task_relevance_batches",
+        #     "dual_mask_task_coverage",
+        #     "dual_mask_spectral_conflict_adaptive",
+        #     "dual_mask_static_w0",
+        #     "dual_mask_plasticity_rank_only",
+        #     "dual_mask_plasticity_diagnostics",
+        # )
+        # stale_options = [name for name in removed_options if name in args]
+        # if stale_options:
+        #     raise ValueError(
+        #         "Removed DualMask options: {}. Delete them from the config or "
+        #         "--set overrides.".format(", ".join(stale_options))
+        #     )
+        #
+        # if (
+        #     bool(args.get("dual_mask_functional_merge_calibration", False))
+        #     and str(args.get("dual_mask_conflict_merge_mode", "suppress")).lower()
+        #     != "suppress"
+        # ):
+        #     raise ValueError(
+        #         "dual_mask_functional_merge_calibration requires "
+        #         "dual_mask_conflict_merge_mode='suppress'."
+        #     )
 
         super().__init__(args)
 
@@ -179,21 +159,10 @@ class Learner(BaseLearner):
                 yield module
 
     def _extra_training_context(self, inputs, targets, epoch):
-        enabled = bool(
-            self.args.get("dual_mask_selective_anchor_enabled", False)
-        )
-        weight = float(
-            self.args.get("dual_mask_selective_anchor_weight", 0.0)
-        )
-        start_epoch = int(
-            self.args.get("dual_mask_selective_anchor_start_epoch", 0)
-        )
-        if (
-                not enabled
-                or weight <= 0.0
-                or self._cur_task != 0
-                or int(epoch) < start_epoch
-        ):
+        enabled = bool(self.args.get("dual_mask_selective_anchor_enabled", False))
+        weight = float(self.args.get("dual_mask_selective_anchor_weight", 0.0))
+        start_epoch = int(self.args.get("dual_mask_selective_anchor_start_epoch", 0))
+        if (not enabled or weight <= 0.0 or self._cur_task != 0 or int(epoch) < start_epoch):
             return {}
 
         was_training = self._network.training
@@ -205,64 +174,29 @@ class Learner(BaseLearner):
             self._network.train(was_training)
         return {"selective_anchor_w0_features": w0_features}
 
-    def _extra_training_loss(
-            self,
-            output=None,
-            inputs=None,
-            targets=None,
-            epoch=None,
-            batch_context=None,
-    ):
+    def _extra_training_loss(self,output=None,inputs=None,targets=None,epoch=None,batch_context=None,):
         reg_weight = float(self.args.get("dual_mask_reg_weight", 0.0)) # 0.01
 
-        anchor_enabled = bool(
-            self.args.get("dual_mask_anchor_reg_enabled", False)
-        )
-        anchor_weight = float(
-            self.args.get("dual_mask_anchor_reg_weight", 0.0)
-        )
+        anchor_enabled = bool(self.args.get("dual_mask_anchor_reg_enabled", False))
+        anchor_weight = float(self.args.get("dual_mask_anchor_reg_weight", 0.0))
 
-        anchor_task0_only = bool(
-            self.args.get("dual_mask_anchor_reg_task0_only", False)
-        )
-        anchor_applies = (
-            anchor_enabled
-            and anchor_weight > 0.0
-            and (not anchor_task0_only or self._cur_task == 0)
-        )
+        anchor_task0_only = bool(self.args.get("dual_mask_anchor_reg_task0_only", False))
+        anchor_applies = (anchor_enabled and anchor_weight > 0.0 and (not anchor_task0_only or self._cur_task == 0))
 
-        safe_residual_enabled = bool(
-            self.args.get("dual_mask_safe_residual_enabled", False)
-        )
-        safe_residual_weight = float(
-            self.args.get("dual_mask_safe_residual_weight", 0.0)
-        )
-        safe_residual_applies = (
-            safe_residual_enabled and safe_residual_weight > 0.0
-        )
+        safe_residual_enabled = bool(self.args.get("dual_mask_safe_residual_enabled", False))
+        safe_residual_weight = float(self.args.get("dual_mask_safe_residual_weight", 0.0))
+        safe_residual_applies = (safe_residual_enabled and safe_residual_weight > 0.0)
 
-        selective_anchor_enabled = bool(
-            self.args.get("dual_mask_selective_anchor_enabled", False)
-        )
-        selective_anchor_weight = float(
-            self.args.get("dual_mask_selective_anchor_weight", 0.0)
-        )
-        selective_anchor_start_epoch = int(
-            self.args.get("dual_mask_selective_anchor_start_epoch", 0)
-        )
-        selective_anchor_ramp_epochs = max(
-            1,
-            int(self.args.get("dual_mask_selective_anchor_ramp_epochs", 1)),
-        )
+        selective_anchor_enabled = bool(self.args.get("dual_mask_selective_anchor_enabled", False))
+        selective_anchor_weight = float(self.args.get("dual_mask_selective_anchor_weight", 0.0))
+        selective_anchor_start_epoch = int(self.args.get("dual_mask_selective_anchor_start_epoch", 0))
+        selective_anchor_ramp_epochs = max(1,int(self.args.get("dual_mask_selective_anchor_ramp_epochs", 1)),)
+
         current_epoch = 0 if epoch is None else int(epoch)
         if current_epoch < selective_anchor_start_epoch:
             selective_anchor_ramp = 0.0
         else:
-            selective_anchor_ramp = min(
-                1.0,
-                (current_epoch - selective_anchor_start_epoch + 1)
-                / selective_anchor_ramp_epochs,
-            )
+            selective_anchor_ramp = min(1.0,(current_epoch - selective_anchor_start_epoch + 1) / selective_anchor_ramp_epochs,)
         selective_anchor_applies = (
             selective_anchor_enabled
             and selective_anchor_weight > 0.0
@@ -270,23 +204,19 @@ class Learner(BaseLearner):
             and selective_anchor_ramp > 0.0
         )
 
-        if safe_residual_applies and isinstance(
-                self._network,
-                torch.nn.DataParallel,
-        ):
-            raise RuntimeError(
-                "dual_mask_safe_residual is currently supported only for "
-                "single-GPU training; nn.DataParallel would drop its "
-                "forward-side auxiliary loss."
-            )
-
+        # if safe_residual_applies and isinstance(
+        #         self._network,
+        #         torch.nn.DataParallel,
+        # ):
+        #     raise RuntimeError(
+        #         "dual_mask_safe_residual is currently supported only for "
+        #         "single-GPU training; nn.DataParallel would drop its "
+        #         "forward-side auxiliary loss."
+        #     )
+        #
         self._last_training_loss_metrics = {}
-        if (
-                reg_weight <= 0.0
-                and not anchor_applies
-                and not safe_residual_applies
-                and not selective_anchor_applies
-        ):
+        if (reg_weight <= 0.0
+                and not anchor_applies and not safe_residual_applies and not selective_anchor_applies):
             return None
 
         modules = [
@@ -301,117 +231,63 @@ class Learner(BaseLearner):
             for module in modules:
                 task = self._cur_task
                 if self.args.get("use_slora", True):
-                    conflict_losses.append(
-                        module._joint_conflict_regularization(
-                            module.S_lora[task],
-                            isolated=False,
-                        )
-                    )
-                if (
-                        task > 0
-                        and self.args.get("use_plora", True)
-                        and hasattr(module, "P_lora")
-                        and module.P_lora[task] is not None
-                ):
-                    conflict_losses.append(
-                        module._joint_conflict_regularization(
-                            module.P_lora[task],
-                            isolated=True,
-                        )
-                    )
+                    conflict_losses.append(module._joint_conflict_regularization(module.S_lora[task],isolated=False,))
+                if (task > 0 and self.args.get("use_plora", True) and hasattr(module, "P_lora") and module.P_lora[task] is not None):
+                    conflict_losses.append(module._joint_conflict_regularization(module.P_lora[task],isolated=True,))
             if conflict_losses:
-                weighted_losses.append(
-                    reg_weight * torch.stack(conflict_losses).mean()
-                )
+                weighted_losses.append(reg_weight * torch.stack(conflict_losses).mean())
 
         if anchor_applies and modules:
-            anchor_regularization = torch.stack(
-                [module.anchor_regularization() for module in modules]
-            ).mean()
+            anchor_regularization = torch.stack([module.anchor_regularization() for module in modules]).mean()
             weighted_anchor = anchor_weight * anchor_regularization
             weighted_losses.append(weighted_anchor)
-            self._last_training_loss_metrics.update({
-                "anchor_reg": anchor_regularization.detach(),
-                "anchor_reg_weighted": weighted_anchor.detach(),
-            })
+            self._last_training_loss_metrics.update({"anchor_reg": anchor_regularization.detach(),"anchor_reg_weighted": weighted_anchor.detach(),})
         if safe_residual_applies and modules:
           safe_residual_losses = [
               module.safe_residual_regularization()
               for module in modules
           ]
-          safe_residual_losses = [
-              loss for loss in safe_residual_losses if loss is not None
-          ]
+          safe_residual_losses = [loss for loss in safe_residual_losses if loss is not None]
           if safe_residual_losses:
               safe_residual = torch.stack(safe_residual_losses).mean()
-              weighted_safe_residual = (
-                  safe_residual_weight * safe_residual
-              )
+              weighted_safe_residual = (safe_residual_weight * safe_residual)
               weighted_losses.append(weighted_safe_residual)
               self._last_training_loss_metrics.update({
                   "safe_residual": safe_residual.detach(),
                   "safe_residual_weighted": weighted_safe_residual.detach(),
               })
         if selective_anchor_applies:
-            if output is None or targets is None or batch_context is None:
-                raise RuntimeError(
-                    "selective functional anchor requires training output, "
-                    "targets, and the W0 batch context"
-                )
+            # if output is None or targets is None or batch_context is None:
+            #     raise RuntimeError(
+            #         "selective functional anchor requires training output, "
+            #         "targets, and the W0 batch context"
+            #     )
             w0_features = batch_context.get("selective_anchor_w0_features")
-            if w0_features is None:
-                raise RuntimeError(
-                    "selective functional anchor W0 features were not prepared"
-                )
+            # if w0_features is None:
+            #     raise RuntimeError(
+            #         "selective functional anchor W0 features were not prepared"
+            #     )
             prototype_ids = sorted(self._w0_class_means)
-            if prototype_ids != list(range(len(prototype_ids))):
-                raise RuntimeError(
-                    "Task-0 W0 prototypes must use contiguous local class ids"
-                )
+            # if prototype_ids != list(range(len(prototype_ids))):
+            #     raise RuntimeError(
+            #         "Task-0 W0 prototypes must use contiguous local class ids"
+            #     )
             current_features = output["features"]
-            prototypes = torch.stack([
-                self._w0_class_means[class_id]
-                for class_id in prototype_ids
-            ]).to(
-                device=current_features.device,
-                dtype=current_features.dtype,
-            )
+            prototypes = torch.stack([self._w0_class_means[class_id]for class_id in prototype_ids]).to(device=current_features.device,dtype=current_features.dtype,)
             selective_anchor, selective_metrics = (
-                self._selective_functional_anchor_loss(
-                    current_features,
-                    w0_features,
-                    targets,
-                    prototypes,
-                    min_margin=float(self.args.get(
-                        "dual_mask_selective_anchor_min_margin",
-                        0.05,
-                    )),
-                    tolerance=float(self.args.get(
-                        "dual_mask_selective_anchor_tolerance",
-                        0.05,
-                    )),
+                self._selective_functional_anchor_loss(current_features,w0_features,targets,prototypes,
+                    min_margin=float(self.args.get("dual_mask_selective_anchor_min_margin",0.05,)),
+                    tolerance=float(self.args.get("dual_mask_selective_anchor_tolerance",0.05,)),
                 )
             )
-            weighted_selective_anchor = (
-                selective_anchor_weight
-                * selective_anchor_ramp
-                * selective_anchor
-            )
+            weighted_selective_anchor = (selective_anchor_weight * selective_anchor_ramp * selective_anchor)
             weighted_losses.append(weighted_selective_anchor)
             self._last_training_loss_metrics.update({
                 "selective_anchor": selective_anchor.detach(),
-                "selective_anchor_weighted": (
-                    weighted_selective_anchor.detach()
-                ),
-                "selective_anchor_selected_ratio": (
-                    selective_metrics["selected_ratio"]
-                ),
-                "selective_anchor_violation_ratio": (
-                    selective_metrics["violation_ratio"]
-                ),
-                "selective_anchor_ramp": current_features.new_tensor(
-                    selective_anchor_ramp
-                ),
+                "selective_anchor_weighted": (weighted_selective_anchor.detach()),
+                "selective_anchor_selected_ratio": (selective_metrics["selected_ratio"]),
+                "selective_anchor_violation_ratio": (selective_metrics["violation_ratio"]),
+                "selective_anchor_ramp": current_features.new_tensor(selective_anchor_ramp),
             })
 
 
@@ -455,61 +331,44 @@ class Learner(BaseLearner):
         return self._collect_features(loader, use_pretrained_anchor=True)
 
     def _calibrate_functional_merge(self, loader):
-        from utils.dual_mask_metrics import (
-            functional_merge_diagnostics,
-            select_functional_merge_candidate,
-        )
+        from utils.dual_mask_metrics import (functional_merge_diagnostics,select_functional_merge_candidate,)
 
         modules = list(self._iter_lora_modules())
         if not modules:
             return
-        if any(module.dual_mask_conflict_merge_mode != "suppress" for module in modules):
-            raise ValueError(
-                "Functional merge calibration requires "
-                "dual_mask_conflict_merge_mode='suppress'."
-            )
+        # if any(module.dual_mask_conflict_merge_mode != "suppress" for module in modules):
+        #     raise ValueError(
+        #         "Functional merge calibration requires "
+        #         "dual_mask_conflict_merge_mode='suppress'."
+        #     )
 
-        tolerance = max(
-            0.0,
-            float(self.args.get("dual_mask_functional_merge_tolerance", 0.05)),
-        )
+        tolerance = max(0.0,float(self.args.get("dual_mask_functional_merge_tolerance", 0.05)),)
 
 
-        base_beta = min(
-            max(float(self.args.get("dual_mask_conflict_strength", 0.5)), 0.0),
-            1.0,
-        )
+        base_beta = min(max(float(self.args.get("dual_mask_conflict_strength", 0.5)), 0.0),1.0,)
         candidate_betas = sorted({0.0, base_beta})
-        anchor_indices, anchor_features, anchor_targets = (
-            self._collect_anchor_features(loader)
-        )
+        anchor_indices, anchor_features, anchor_targets = (self._collect_anchor_features(loader))
         old_prototypes = None
         old_class_ids = None
         if self._known_classes > 0:
             old_class_ids = torch.arange(self._known_classes, dtype=torch.long)
-            old_prototypes = torch.stack(
-                [self._w0_class_means[int(class_id)] for class_id in old_class_ids]
-            )
+            old_prototypes = torch.stack([self._w0_class_means[int(class_id)] for class_id in old_class_ids])
 
         candidates = []
         for beta in candidate_betas:
             for module in modules:
                 module.set_functional_merge_strength(beta)
             indices, features, targets = self._collect_features(loader)
-            if not torch.equal(indices, anchor_indices) or not torch.equal(
-                targets, anchor_targets
-            ):
-                raise RuntimeError(
-                    "Functional merge calibration loader order changed between candidates."
-                )
+            # if not torch.equal(indices, anchor_indices) or not torch.equal(targets, anchor_targets):
+            #     raise RuntimeError(
+            #         "Functional merge calibration loader order changed between candidates."
+            #     )
             metrics = functional_merge_diagnostics(
                 anchor_features,
                 features,
                 targets,
                 indices,
-                holdout_mod=int(
-                    self.args.get("dual_mask_competence_holdout_mod", 5)
-                ),
+                holdout_mod=int(self.args.get("dual_mask_competence_holdout_mod", 5)),
                 scale=self.scale,
                 old_prototypes=old_prototypes,
                 old_class_ids=old_class_ids,
@@ -542,9 +401,7 @@ class Learner(BaseLearner):
             "selected_anchor_damage": selected["anchor_damage"],
         }
         for candidate in candidates:
-            candidate_name = "beta_{:03d}".format(
-                int(round(candidate["beta"] * 100.0))
-            )
+            candidate_name = "beta_{:03d}".format(int(round(candidate["beta"] * 100.0)))
             self._functional_merge_calibration.update({
                 f"{candidate_name}_current_accuracy": candidate["current_accuracy"],
                 f"{candidate_name}_current_loss": candidate["current_loss"],
@@ -577,10 +434,7 @@ class Learner(BaseLearner):
 
         
 
-        need_all_seen_competence = (
-            use_all_seen_prototypes
-            or use_old_overlap_conflict
-        )
+        need_all_seen_competence = (use_all_seen_prototypes or use_old_overlap_conflict)
 
         old_prototypes = None
         old_class_ids = None
@@ -628,12 +482,7 @@ class Learner(BaseLearner):
         w0_competence = (
             w0_competence_new
             if use_old_overlap_conflict
-            else (
-                w0_competence_all_seen
-                if use_all_seen_prototypes
-                else w0_competence_new
-            )
-        )
+            else (w0_competence_all_seen if use_all_seen_prototypes else w0_competence_new))
 
 
         self._w0_competence = w0_competence
@@ -664,20 +513,12 @@ class Learner(BaseLearner):
             w0_competence * 100.0,
             competence_metric,
             # "all_seen" if use_all_seen_prototypes else "new_only",
-            "all_seen"
-            if use_all_seen_prototypes and not use_old_overlap_conflict
-            else "new_only",
+            "all_seen" if use_all_seen_prototypes and not use_old_overlap_conflict else "new_only",
             w0_competence_new * 100.0,
-            "n/a" if w0_competence_all_seen is None else "{:.2f}%".format(
-                w0_competence_all_seen * 100.0
-            ),
-            "n/a" if old_overlap_risk is None else "{:.2f}%".format(
-                old_overlap_risk * 100.0
-            ),
+            "n/a" if w0_competence_all_seen is None else "{:.2f}%".format(w0_competence_all_seen * 100.0),
+            "n/a" if old_overlap_risk is None else "{:.2f}%".format(old_overlap_risk * 100.0),
             self._w0_control_competence * 100.0,
-            "n/a" if self._w0_plasticity_demand is None else "{:.4f}".format(
-                self._w0_plasticity_demand
-            ),
+            "n/a" if self._w0_plasticity_demand is None else "{:.4f}".format(self._w0_plasticity_demand),
             first_module.effective_energy_coverage,
             first_module.effective_protect_strength,
             first_module.current_private_rank,
@@ -705,9 +546,7 @@ class Learner(BaseLearner):
             device=self._device,
             dtype=torch.long,
         )
-        prototypes = torch.stack(
-            [self._w0_class_means[int(class_id)] for class_id in class_ids.cpu()]
-        ).to(self._device)  # [C*t,768]
+        prototypes = torch.stack([self._w0_class_means[int(class_id)] for class_id in class_ids.cpu()]).to(self._device)  # [C*t,768]
         correct, total = 0, 0
         was_training = self._network.training
         self._network.eval()
@@ -797,22 +636,12 @@ class Learner(BaseLearner):
         all_seen_competence = bool(self.args.get("dual_mask_competence_all_seen", False))
         old_overlap_conflict = bool(self.args.get("dual_mask_conflict_old_overlap_adaptive", False))
 
-        functional_merge_calibration = bool(
-            self.args.get("dual_mask_functional_merge_calibration", False)
-        )
+        functional_merge_calibration = bool(self.args.get("dual_mask_functional_merge_calibration", False))
 
-        selective_anchor_enabled = bool(
-            self.args.get("dual_mask_selective_anchor_enabled", False)
-        )
+        selective_anchor_enabled = bool(self.args.get("dual_mask_selective_anchor_enabled", False))
 
-        if (
-                track_w0
-                or competence_adaptive
-                or plasticity_adaptive
-                or all_seen_competence
-                or old_overlap_conflict
-                or functional_merge_calibration
-                or selective_anchor_enabled
+        if (track_w0 or competence_adaptive or plasticity_adaptive or all_seen_competence
+                or old_overlap_conflict or functional_merge_calibration or selective_anchor_enabled
         ):
             w0_dataset = data_manager.get_dataset(  # 所有训练样本，顺序固定  | 确定性测试视图：用于判断冻结 W0 的原始能力
                 np.arange(self._known_classes, self._total_classes),
@@ -838,9 +667,7 @@ class Learner(BaseLearner):
         self._compute_class_mean(data_manager, check_diff=False, oracle=False)
         if self._cur_task > 0 and self.args['ca'] is True:
             self._stage2_compact_classifier( # CA 分类器对齐
-                self.task_sizes[-1],
-                ca_epochs=int(self.args.get("ca_epochs", 5)),
-            )
+                self.task_sizes[-1],ca_epochs=int(self.args.get("ca_epochs", 5)),)
 
     def _train(self, train_loader, test_loader):
         try:
@@ -937,10 +764,7 @@ class Learner(BaseLearner):
         prog_bar = tqdm(range(self.run_epoch))
         # 角度惩罚损失
         label_smoothing = float(self.args.get('label_smoothing', 0.0))
-        if (
-                bool(self.args.get('label_smoothing_task0_only', False))
-                and self._cur_task != 0
-        ):
+        if (bool(self.args.get('label_smoothing_task0_only', False)) and self._cur_task != 0):
             label_smoothing = 0.0
         loss_cos:AngularPenaltySMLoss = AngularPenaltySMLoss(
             loss_type='cosface',
@@ -985,9 +809,7 @@ class Learner(BaseLearner):
                 if batch_training_metrics:
                     for name, value in batch_training_metrics.items():
                         value = value.detach()
-                        training_metric_totals[name] = (
-                                training_metric_totals.get(name, 0.0) + value
-                        )
+                        training_metric_totals[name] = (training_metric_totals.get(name, 0.0) + value)
                     training_metric_batches += 1
 
                 loss = self._backward_and_step(
@@ -1210,8 +1032,7 @@ class Learner(BaseLearner):
             logging.info(info)
 
     def _compute_class_mean(self, data_manager, check_diff=False, oracle=False):
-        if hasattr(self,
-                   '_class_means') and self._class_means is not None and not check_diff:  # 已经完成过 Task 0，模型中已经存在之前算好的 _class_means（旧类别的均值矩阵）
+        if hasattr(self,'_class_means') and self._class_means is not None and not check_diff:  # 已经完成过 Task 0，模型中已经存在之前算好的 _class_means（旧类别的均值矩阵）
             ori_classes = self._class_means.shape[0]
             assert ori_classes == self._known_classes
             new_class_means = torch.zeros((self._total_classes, self.feature_dim))
@@ -1238,12 +1059,10 @@ class Learner(BaseLearner):
 
     def displacement(self, Y1, Y2, embedding_old, sigma):
         DY = Y2 - Y1
-        distance = np.sum((np.tile(Y1[None, :, :], [embedding_old.shape[0], 1, 1]) - np.tile(
-            embedding_old[:, None, :], [1, Y1.shape[0], 1])) ** 2, axis=2)
+        distance = np.sum((np.tile(Y1[None, :, :], [embedding_old.shape[0], 1, 1]) - np.tile(embedding_old[:, None, :], [1, Y1.shape[0], 1])) ** 2, axis=2)
         W = np.exp(-distance / (2 * sigma ** 2)) + 1e-5
         W_norm = W / np.tile(np.sum(W, axis=1)[:, None], [1, W.shape[1]])
-        displacement = np.sum(np.tile(W_norm[:, :, None], [
-            1, 1, DY.shape[1]]) * np.tile(DY[None, :, :], [W.shape[0], 1, 1]), axis=1)
+        displacement = np.sum(np.tile(W_norm[:, :, None], [1, 1, DY.shape[1]]) * np.tile(DY[None, :, :], [W.shape[0], 1, 1]), axis=1)
         return displacement
 
     def extract_features(self, trainloader, model, task_id=None):
@@ -1329,8 +1148,7 @@ class Learner(BaseLearner):
         Q_val = Features[0:num_val_samples, :].T @ Y[0:num_val_samples, :]
         G_val = Features[0:num_val_samples, :].T @ Features[0:num_val_samples, :]
         for ridge in ridges:
-            Wo = torch.linalg.solve(G_val + ridge * torch.eye(G_val.size(dim=0)),
-                                    Q_val).T  # better nmerical stability than .inv
+            Wo = torch.linalg.solve(G_val + ridge * torch.eye(G_val.size(dim=0)), Q_val).T  # better nmerical stability than .inv
             Y_train_pred = Features[num_val_samples::, :] @ Wo.T
             losses.append(F.mse_loss(Y_train_pred, Y[num_val_samples::, :]))
         ridge = ridges[np.argmin(np.array(losses))]

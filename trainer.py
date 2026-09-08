@@ -143,10 +143,7 @@ def _log_experiment_task(
         value = getattr(model, attribute, None)
         if value is not None:
             metrics[name] = float(value) * 100.0
-    for attribute, name in (
-        ('_w0_ncm_loss_new', 'w0/ncm_loss_new'),
-        ('_w0_plasticity_demand', 'w0/plasticity_demand'),
-    ):
+    for attribute, name in (('_w0_ncm_loss_new', 'w0/ncm_loss_new'),('_w0_plasticity_demand', 'w0/plasticity_demand'),):
         value = getattr(model, attribute, None)
         if value is not None:
             metrics[name] = float(value)
@@ -156,10 +153,7 @@ def _log_experiment_task(
         for name, value in functional_merge.items():
             metrics['dual_mask/functional_merge/{}'.format(name)] = float(value)
 
-    for attribute, name in (
-        ('_feature_drift_curve', 'w0/feature_drift'),
-        ('_weight_drift_curve', 'w0/weight_drift_mean'),
-    ):
+    for attribute, name in (('_feature_drift_curve', 'w0/feature_drift'),('_weight_drift_curve', 'w0/weight_drift_mean'),):
         value = _last_metric(model, attribute)
         if value is not None:
             metrics[name] = value
@@ -180,14 +174,14 @@ def _log_experiment_task(
                 metrics['dual_mask/layer_{}/protected_importance_mean'.format(layer_idx)] = float((module.general_mask.detach().float() * module.w0_importance.detach().float()).mean().item())
 
                 for attribute, name in (
-                        ('last_conflict_entropy', 'conflict_entropy'),
-                        ('last_conflict_top10_energy', 'conflict_top10_energy'),
-                        ('last_conflict_energy50_ratio', 'conflict_energy50_ratio'),
-                        ('last_conflict_gate_suppression', 'conflict_gate_suppression'),
-                        ('last_safe_suppression', 'safe_suppression'),
-                        ('last_effective_conflict_ratio', 'effective_conflict_ratio'),
-                        ('last_effective_conflict_strength', 'effective_conflict_strength'),
-                        ('last_private_conflict_mask_overlap', 'private_conflict_mask_overlap'),
+                    ('last_conflict_entropy', 'conflict_entropy'),
+                    ('last_conflict_top10_energy', 'conflict_top10_energy'),
+                    ('last_conflict_energy50_ratio', 'conflict_energy50_ratio'),
+                    ('last_conflict_gate_suppression', 'conflict_gate_suppression'),
+                    ('last_safe_suppression', 'safe_suppression'),
+                    ('last_effective_conflict_ratio', 'effective_conflict_ratio'),
+                    ('last_effective_conflict_strength', 'effective_conflict_strength'),
+                    ('last_private_conflict_mask_overlap', 'private_conflict_mask_overlap'),
                     ('last_private_conflict_energy_overlap', 'private_conflict_energy_overlap'),
                     ('last_private_conflict_gate_suppression', 'private_conflict_gate_suppression'),
                 ):
@@ -198,13 +192,7 @@ def _log_experiment_task(
     _write_experiment_metrics(tracker, metrics, task_id)
 
 
-def _log_experiment_summary(
-    tracker,
-    cnn_curve,
-    w0_curve,
-    task_prediction_curve,
-    elapsed_seconds,
-):
+def _log_experiment_summary(tracker,cnn_curve,w0_curve,task_prediction_curve,elapsed_seconds,):
     if tracker is None:
         return
 
@@ -259,7 +247,7 @@ def _train(args, experiment_tracker=None):
     # rank=64_seq_lora
     logdir = 'logs/{}/{}_tasks/{}/{}'.format(args['dataset'], args['total_sessions'], prefix_head, prefix_lora)
     args['logdir'] = logdir # logs/ImageNet_R/20_tasks/standard_head/rank=64_seq_lora
-    print(logdir)
+    # print(logdir)
     if not os.path.exists(logdir):
         os.makedirs(logdir)
     logfilename = os.path.join(logdir, '{}_slora:{}_plora:{}_rank:{}_{}_{}_{}-{}'.format(args['seed'], args["use_slora"], args["use_plora"], args['rank'], args.get("lora_type", "lora"), args['model_name'], args['optim'], args['lrate']))
@@ -277,14 +265,7 @@ def _train(args, experiment_tracker=None):
     _set_random(args)
     _set_device(args)
     print_args(args)
-    data_manager = DataManager(
-        args['dataset'],
-        args['shuffle'],
-        args['seed'],
-        args['init_cls'],
-        args['increment'],
-        args
-    )
+    data_manager = DataManager(args['dataset'],args['shuffle'],args['seed'],args['init_cls'],args['increment'],args)
     model = factory.get_model(args['model_name'], args)
 
 
@@ -335,27 +316,15 @@ def _train(args, experiment_tracker=None):
         if task_id > 0:
             diagonal = np.diag(model.acc_matrix)
             # Forgetting: 历史旧 Task 的历史最高准确率 - 当前测试准确率 的平均值
-            forgetting = np.mean((np.max(model.acc_matrix, axis=1) -
-                                model.acc_matrix[:, task_id])[:task_id])
+            forgetting = np.mean((np.max(model.acc_matrix, axis=1) - model.acc_matrix[:, task_id])[:task_id])
             # BWT / 后向知识迁移: 当前测试准确率 - 刚学完该 Task 时的对角线准确率的平均值
             backward = np.mean((model.acc_matrix[:, task_id] - diagonal)[:task_id])
 
             result_str = "Forgetting: {:.4f}\tBackward: {:.4f}".format(forgetting, backward)
             logging.info(result_str)
 
-        _log_experiment_task(
-            experiment_tracker,
-            model,
-            task_id,
-            cnn_accy,
-            cnn_accy_with_task,
-            cnn_accy_task,
-            w0_accuracy,
-            train_seconds,
-            eval_seconds,
-            forgetting,
-            backward,
-        )
+        _log_experiment_task(experiment_tracker,model,task_id,cnn_accy,cnn_accy_with_task,cnn_accy_task,
+                             w0_accuracy,train_seconds,eval_seconds,forgetting,backward,)
 
     logging.info('Accuracy Matrix: \n {}'.format(model.acc_matrix.T.round(2)))
     logging.info('Average Accuracy: {}'.format(np.mean(cnn_curve['top1'])))
@@ -366,18 +335,8 @@ def _train(args, experiment_tracker=None):
         logging.info('W_pre-only NCM Last Accuracy: {}'.format(w0_curve[-1]))
 
     logging.info('Task Prediction Accuracy average (%): {:.2f}'.format(task_pred_avg))
-    logging.info(
-        'Final Task Prediction Accuracy (%): {:.2f}'.format(
-            cnn_curve_task['top1'][-1] * 100.0
-        )
-    )
-    _log_experiment_summary(
-        experiment_tracker,
-        cnn_curve['top1'],
-        w0_curve,
-        cnn_curve_task['top1'],
-        time.time() - run_start_time,
-    )
+    logging.info('Final Task Prediction Accuracy (%): {:.2f}'.format(cnn_curve_task['top1'][-1] * 100.0))
+    _log_experiment_summary(experiment_tracker,cnn_curve['top1'],w0_curve,cnn_curve_task['top1'],time.time() - run_start_time,)
 
 def _set_device(args):
     device_type = args['device']
