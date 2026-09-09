@@ -5,6 +5,7 @@ from torch.utils.data import DataLoader
 
 import copy
 import logging
+import random
 import numpy as np
 from tqdm import tqdm
 
@@ -823,6 +824,36 @@ class Learner(BaseLearner):
         ret['top1'] = grouped['total']
         return ret
 
+    def eval_task(self):
+        result = super().eval_task()
+        before = getattr(self, "_ca_before_metrics", None)
+        if before is not None:
+            after = result[0]['grouped']
+            logging.info(
+                "CA diagnostic Task %s (test-only): before_total=%.2f, before_old=%.2f, before_new=%.2f, "
+                "after_total=%.2f, after_old=%.2f, after_new=%.2f, delta_total=%+.2f, delta_old=%+.2f, delta_new=%+.2f",
+                self._cur_task, before['total'], before['old'], before['new'],
+                after['total'], after['old'], after['new'],
+                after['total'] - before['total'], after['old'] - before['old'], after['new'] - before['new'],
+            )
+            self._ca_before_metrics = None
+        return result
+
+    def _measure_ca_accuracy(self):
+        # Test-only observation; restore RNG so the extra loader pass cannot alter CA samples.
+        python_state, numpy_state = random.getstate(), np.random.get_state()
+        modes = [(module, module.training) for module in self._network.modules()]
+        devices = [device.index for device in self._multiple_gpus if device.type == 'cuda']
+        try:
+            with torch.random.fork_rng(devices=devices):
+                prediction, _, targets, _, _ = self._eval_cnn(self.test_loader)
+                return self.accuracy(prediction, targets, accuracy_matrix=False)
+        finally:
+            random.setstate(python_state)
+            np.random.set_state(numpy_state)
+            for module, training in modes:
+                module.training = training
+
     def _eval_cnn(self, loader):
         self._network.eval()
         y_pred, y_true = [], []
@@ -872,6 +903,8 @@ class Learner(BaseLearner):
 
     def _stage2_compact_classifier(self, task_size, ca_epochs=5):
         """Align classifier heads using Gaussian pseudo-features."""
+        if self.args.get("dual_mask_ca_diagnostics", False):
+            self._ca_before_metrics = self._measure_ca_accuracy()
         ca_epochs = int(self.args.get("ca_epochs", 5))
         for p in self._network.classifier_pool[:self._cur_task + 1].parameters():
             p.requires_grad = True
