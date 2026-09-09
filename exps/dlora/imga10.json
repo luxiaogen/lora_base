@@ -49,7 +49,9 @@
     "dual_mask_competence_adaptive": true,
     "dual_mask_plasticity_adaptive": true,
     "dual_mask_protect_strength_mode": "competence",
-    "dual_mask_conflict_energy_adaptive": false,
+    "dual_mask_conflict_energy_adaptive": true,
+    "dual_mask_conflict_energy_ratio_floor": true,
+    "dual_mask_conflict_merge_mode": "suppress",
 
     "dual_mask_competence_holdout_mod": 5,
     "dual_mask_competence_metric": "accuracy",
@@ -57,7 +59,10 @@
     "dual_mask_competence_all_seen": false,
     "dual_mask_conflict_old_overlap_adaptive": true,
     "dual_mask_private_conflict_mode": "global",
-    "dual_mask_task0_gate_mode": "protect_only",
+    "dual_mask_task0_gate_mode": "unmasked",
+    "dual_mask_anchor_reg_enabled": true,
+    "dual_mask_anchor_reg_weight": 10.0,
+    "dual_mask_anchor_reg_task0_only": true,
 
     "dual_mask_track_w0_metrics": true,
     "dual_mask_metric_batches": 4,
