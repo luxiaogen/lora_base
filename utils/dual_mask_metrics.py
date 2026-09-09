@@ -52,43 +52,32 @@ def _prototype_holdout_mask(
             calibration[positions[::holdout_mod]] = True
     return calibration
 
+"""
+    return :    ncm_loss          = W_pre 在当前任务上的原型分类损失
+                plasticity_demand = 归一化后的任务学习需求 D_t
+"""
 def split_prototype_ncm_diagnostics(
-    features: torch.Tensor,
-    targets: torch.Tensor,
-    indices: torch.Tensor,
-    holdout_mod: int = 5,
-    scale: float = 1.0,
-):
+    features: torch.Tensor,targets: torch.Tensor,indices: torch.Tensor,holdout_mod: int = 5,scale: float = 1.0,):
     """Measure new-task NCM loss without gradients or old-class candidates."""
-    calibration = _prototype_holdout_mask(targets, indices, holdout_mod)
-    prototype_mask = ~calibration
+    calibration = _prototype_holdout_mask(targets, indices, holdout_mod) # 每类约 20%，用于测试
+    prototype_mask = ~calibration # 每类约 80%，用于建立原型
     if not calibration.any() or not prototype_mask.any():
-        return 0.0, 0.0
-
-    prototypes, class_ids = build_prototypes(
-        features[prototype_mask],
-        targets[prototype_mask],
-    )
+        return 0.0, 0.0 # True  → holdout 样本，用于计算 NCM loss   False → 用于建立类别原型
+    ## 建立 W_pre 类别原型
+    prototypes, class_ids = build_prototypes(features[prototype_mask],targets[prototype_mask],)
     with torch.no_grad():
-        logits = (
-            float(scale)
-            * F.normalize(features[calibration], dim=1)
-            @ F.normalize(prototypes, dim=1).T
-        )
-        local_targets = torch.searchsorted(
-            class_ids.to(targets.device),
-            targets[calibration],
-        ).to(logits.device)
+        ## 用剩余 20% 进行 NCM 分类
+        ### logits[i,k] = scale × cosine(feature_i, prototype_k)
+        logits = (float(scale) * F.normalize(features[calibration], dim=1) @ F.normalize(prototypes, dim=1).T)
+        local_targets = torch.searchsorted(class_ids.to(targets.device),targets[calibration],).to(logits.device)
+
         ncm_loss = float(F.cross_entropy(logits, local_targets).item())
 
     num_classes = int(class_ids.numel())
     if num_classes <= 1:
         plasticity_demand = 0.0
     else:
-        plasticity_demand = min(
-            max(ncm_loss / math.log(num_classes), 0.0),
-            1.0,
-        )
+        plasticity_demand = min(max(ncm_loss / math.log(num_classes), 0.0),1.0,)
     return ncm_loss, plasticity_demand
 
 def functional_merge_diagnostics(
@@ -207,11 +196,8 @@ def select_functional_merge_candidate(candidates, tolerance: float):
 
 def split_prototype_competence(
     features: torch.Tensor, # 训练集所有特征
-    targets: torch.Tensor,
-    indices: torch.Tensor,
-    holdout_mod: int = 5,
-    old_prototypes: Optional[torch.Tensor] = None,
-    old_class_ids: Optional[torch.Tensor] = None,
+    targets: torch.Tensor, indices: torch.Tensor, holdout_mod: int = 5,
+    old_prototypes: Optional[torch.Tensor] = None, old_class_ids: Optional[torch.Tensor] = None,
     metric: str = "accuracy",
 ): # 检查:W_pre 提取出的特征是否已经按类别自然聚集
     """Estimate W_pre competence from current samples and optional old prototypes."""
@@ -220,9 +206,7 @@ def split_prototype_competence(
     prototype_mask = ~calibration  # 取反
     if calibration.any() and prototype_mask.any():
         # 使用约 80% 样本建立类别原型  949*0.8=759   -- 749    #
-        train_prototypes, train_class_ids = build_prototypes(
-            features[prototype_mask], targets[prototype_mask]
-        ) 
+        train_prototypes, train_class_ids = build_prototypes(features[prototype_mask], targets[prototype_mask])
         if old_prototypes is not None and old_class_ids is not None:
             train_prototypes = torch.cat([old_prototypes.to(features), train_prototypes], dim=0)
             train_class_ids = torch.cat([old_class_ids.to(targets), train_class_ids], dim=0)

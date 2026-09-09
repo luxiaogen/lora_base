@@ -253,14 +253,11 @@ def _train(args, experiment_tracker=None):
     logfilename = os.path.join(logdir, '{}_slora:{}_plora:{}_rank:{}_{}_{}_{}-{}'.format(args['seed'], args["use_slora"], args["use_plora"], args['rank'], args.get("lora_type", "lora"), args['model_name'], args['optim'], args['lrate']))
     #logfilename = os.path.join(logdir, '{}_slora:{}_plora:{}_rank:{}_{}_{}_{}-{}'.format(args['seed'], args["use_slora"], args["use_plora"], args['rank'], args["lora_type"], args['model_name'], args['optim'], args['lrate']))
     logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s [%(filename)s] => %(message)s',
-        force=True,
+        level=logging.INFO,format='%(asctime)s [%(filename)s] => %(message)s',force=True,
         handlers=[ # （双路输出处理器,把日志同时分发给两个目标
             logging.FileHandler(filename=logfilename + '.log'),
             logging.StreamHandler(sys.stdout)
-        ]
-    ) # logs/CUB/10_tasks/ca/idea3_wpre_adaptive_/1993_slora:True_plora:True_rank:32_lora_dual_mask_branch_sgd-0.005
+        ]) # logs/CUB/10_tasks/ca/idea3_wpre_adaptive_/1993_slora:True_plora:True_rank:32_lora_dual_mask_branch_sgd-0.005
     print(logfilename)
     _set_random(args)
     _set_device(args)

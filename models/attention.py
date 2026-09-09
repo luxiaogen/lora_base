@@ -26,7 +26,7 @@ class FrozenA_TrainableB(nn.Module):
         with torch.no_grad(): # 参数赋值不是推理/前向传播
             self.A.weight.copy_(A_init.to(self.A.weight.device, dtype=self.A.weight.dtype))
             self.B.weight.copy_(B_init.to(self.B.weight.device, dtype=self.B.weight.dtype))
-        # A B都训练
+        # A冻结 B训练
         for p in self.A.parameters():
             p.requires_grad_(False)
         for p in self.B.parameters():
@@ -73,9 +73,9 @@ def _normalize_score(score: torch.Tensor) -> torch.Tensor:
     denom = score.max().clamp_min(1e-12)
     return score / denom
 
-
+# 从 score 中选出分数最高的 ratio 比例坐标，并返回 0/1 mask
 def _top_ratio_mask(score: torch.Tensor, ratio: float) -> torch.Tensor:
-    ratio = min(max(float(ratio), 0.0), 1.0)  # 0.5
+    ratio = min(max(float(ratio), 0.0), 1.0)  # 0.5 / 0.1  | ratio = 0.5 → 选择分数最高的 50%
     flat = score.flatten()  # 2304*768
     if flat.max() <= flat.min():
         return torch.zeros_like(score)
@@ -83,8 +83,8 @@ def _top_ratio_mask(score: torch.Tensor, ratio: float) -> torch.Tensor:
         return torch.zeros_like(score)
     if ratio >= 1.0:
         return torch.ones_like(score)
-    k = max(1, int(flat.numel() * ratio))  # 2304*768*0.5
-    threshold = torch.topk(flat, k, largest=True).values.min()  # tensor(0.0032) | 选这50%中要保护的区域的最小值
+    k = max(1, int(flat.numel() * ratio))  # k = int(1,769,472 × 0.5)= 884,736
+    threshold = torch.topk(flat, k, largest=True).values.min()  # 最大的 k 个分数里面，最小的那个就是第 k 大分数，也就是选择阈值 | 选这50%中要保护的区域的最小值
     return (score >= threshold).to(score.dtype)  # 大于这个阈值的就是要保护的区域
 
 
@@ -142,7 +142,7 @@ def _energy_coverage_mask(
     k = int(torch.searchsorted(cumulative, coverage * total).item()) + 1
     selected[valid_indices[indices[:k]]] = 1.0
     return selected.reshape_as(score).to(dtype=score.dtype, device=score.device)
-
+# 根据冲突分数生成二值 conflict_mask,同时满足: 选中坐标数量 ≥ ratio 指定的最低比例 && 选中坐标分数之和 ≥ coverage 指定的能量比例
 def _energy_coverage_with_ratio_floor_mask(
         score: torch.Tensor,
         ratio: float,
@@ -152,8 +152,8 @@ def _energy_coverage_with_ratio_floor_mask(
     """Select enough coordinates for both the ratio floor and score coverage."""
     ratio = min(max(float(ratio), 0.0), 1.0)
     coverage = min(max(float(coverage), 0.0), 1.0)
-    selected = torch.zeros_like(score).flatten()
-    if ratio <= 0.0:
+    selected = torch.zeros_like(score).flatten() # 2304*768=1,769,472
+    if ratio <= 0.0: # selected[i] = 1 → 第 i 个参数属于冲突区     selected[i] = 0 → 不属于冲突区
         return selected.reshape_as(score)
 
     if valid_mask is None:
@@ -170,14 +170,14 @@ def _energy_coverage_with_ratio_floor_mask(
         return selected.reshape_as(score)
 
     values, _ = torch.sort(valid_scores, descending=True)
-    ratio_k = valid_count if ratio >= 1.0 else max(1, int(valid_count * ratio))
+    ratio_k = valid_count if ratio >= 1.0 else max(1, int(valid_count * ratio)) # 计算 Top-ratio 最低数量  (固定比例 e.g.10%)
     if coverage <= 0.0:
         coverage_k = 0
     elif coverage >= 1.0:
         coverage_k = valid_count
-    else:
+    else: # 扩大范围,直到覆盖50%冲突分数
         cumulative = torch.cumsum(values, dim=0)
-        coverage_k = int(torch.searchsorted(cumulative, coverage * total).item()) + 1
+        coverage_k = int(torch.searchsorted(cumulative, coverage * total).item()) + 1 # 覆盖率选中的坐标数量
     k = max(ratio_k, coverage_k)
     threshold = values[k - 1]
     selected[valid] = (valid_scores >= threshold).to(selected.dtype)
@@ -298,6 +298,9 @@ class Attention_LoRA(nn.Module):
         self.dual_mask_competence_adaptive = False
 
         self.dual_mask_plasticity_adaptive = False
+
+        self.dual_mask_plasticity_discount_weight = 1.0
+
         self.dual_mask_protect_strength_mode = "legacy_linear"
 
         self.pretrained_competence = 0.0
@@ -324,9 +327,9 @@ class Attention_LoRA(nn.Module):
         self.args = args
         self.use_slora: bool = args["use_slora"]
         self.use_plora: bool = args["use_plora"]
-        msg = f'Use slora:{self.use_slora} and Use plora:{self.use_plora}'
-        print(msg)
-        logging.info(msg)
+        # msg = f'Use slora:{self.use_slora} and Use plora:{self.use_plora}'
+        # print(msg)
+        # logging.info(msg)
 
         # slora_gamma: S_lora 分支的缩放系数  0.5
         self.slora_gamma = float(args.get("slora_gamma", 1.0))
@@ -628,13 +631,8 @@ class Attention_LoRA(nn.Module):
         a_rand = self._init_A_weight(self.dim, p_rank, device, dtype)
         b_zero = _zero_B_init(self.dim * 3, p_rank, device, dtype)
         self.P_lora[t] = FrozenA_TrainableB(
-            self.dim,
-            self.dim * 3,
-            p_rank,
-            a_rand,
-            b_zero,
-            device=device,
-            dtype=dtype,
+            self.dim,self.dim * 3,p_rank,a_rand,b_zero,
+            device=device,dtype=dtype,
         )
 
         self.rebuild_dual_masks()  # Dual masks rebuilt: W0 protect density 0.5000, plastic density 0.5000
@@ -724,7 +722,7 @@ class Attention_LoRA(nn.Module):
 
         mode = self.dual_mask_importance  # "dual_mask_importance": "svd"
         if mode == "soft_svd":
-            svd_score = self._soft_svd_importance(weight) # 硬截断rank=32  覆盖率大概54%
+            svd_score = self._soft_svd_importance(weight)
         else:
             svd_score = self._svd_importance(weight) # 硬截断rank=32  覆盖率大概54%
         return svd_score
@@ -746,10 +744,8 @@ class Attention_LoRA(nn.Module):
             ## score 最高的 50% 位置 -> protect = 1 | 1 表示这个位置是 W0 重要位置，不希望 LoRA 改
             ## score 剩下的 50% 位置 -> protect = 0 | 0 表示这个位置可以改
             coverage_mode = str(self.args.get("dual_mask_coverage_mode", "energy")).strip().lower()
-            use_adaptive_coverage = (
-                self.dual_mask_competence_adaptive
-                and coverage_mode == "energy"
-            )
+            use_adaptive_coverage = (self.dual_mask_competence_adaptive and coverage_mode == "energy")
+
             if use_adaptive_coverage:
                 # 使用能量覆盖，而不是固定 top ratio
                 ## M_g = general_mask = Task 0 时 W_pre 的重要保护区
@@ -783,25 +779,25 @@ class Attention_LoRA(nn.Module):
                 "svd_rank %s, achieved_svd_energy %.4f",
                 self.layer_idx,
                 mask_coverage,
-                self.general_mask.float().mean().item(),
+                self.general_mask.float().mean().item(), # density(M) = 选中坐标数量 / 全部坐标数量
                 self.isolated_mask.float().mean().item(),
                 self.effective_protect_strength,
-                (self.w0_importance * self.general_mask).float().mean().item(),
-                self.last_svd_rank,
-                self.last_svd_energy_coverage,
+                (self.w0_importance * self.general_mask).float().mean().item(), # 保护区域保留下来的重要性，在整个 QKV 矩阵上的平均值
+                self.last_svd_rank, # 表示最终用于构造 W0 importance map 的实际 SVD rank，也就是保留的奇异方向数量 k
+                self.last_svd_energy_coverage, # 表示选出的前 k 个奇异方向，实际覆盖了多少谱能量
             )
-
+    # 负责为冲突门控返回两个参数 """Return the fixed conflict range and optional old-overlap strength."""
     def _conflict_parameters(self):
-        """Return the fixed conflict range and optional old-overlap strength."""
+        # --set dual_mask_conflict_ratio=0.1
         base_ratio = min(max(self.dual_mask_conflict_ratio, 0.0), 1.0)
 
         if self._functional_merge_strength_override is not None:
             return base_ratio, self._functional_merge_strength_override
-
+        # 基础抑制强度
         base_strength = min(max(self.dual_mask_conflict_strength, 0.0), 1.0)
-        if self.dual_mask_conflict_old_overlap_adaptive:
+        if self.dual_mask_conflict_old_overlap_adaptive: # 是否使用R_old
             base_strength = min(base_strength * (1.0 + self.pretrained_old_overlap_risk),1.0,)
-        return base_ratio, base_strength
+        return base_ratio, base_strength # 多大范围被划为冲突区 \ 冲突区中的 LoRA 更新被抑制多强
 
     def _joint_conflict(
             self,
@@ -1032,7 +1028,7 @@ class Attention_LoRA(nn.Module):
         if self.dual_mask_conflict_reg_enabled:
             return protection + conflict
         return protection
-
+    # 如果只施加冲突门，LoRA 增量的整体范数被削弱了多少
     @staticmethod
     def _delta_stats(raw_delta: torch.Tensor, safe_delta: torch.Tensor):
         raw = raw_delta.detach().float()
@@ -1082,7 +1078,7 @@ class Attention_LoRA(nn.Module):
         if total <= 0.0:
             zero = flat_score.new_zeros(())
             return zero, zero
-
+        # 把冲突分数变成概率分布
         probability = flat_score / total
         positive = probability > 0.0
         entropy = -(probability[positive] * probability[positive].log()).sum()
@@ -1091,7 +1087,7 @@ class Attention_LoRA(nn.Module):
         else:
             entropy = flat_score.new_zeros(())
         top_energy = (flat_score[conflict_mask.detach().bool().flatten()].sum() / total)
-        return entropy, top_energy
+        return entropy, top_energy # entropy = 0.35,top10_energy = 0.72 --> 表示冲突比较集中，Top-10% 坐标已经覆盖 72% 的冲突分数
 
     @staticmethod
     def _conflict_gate_suppression(
@@ -1118,7 +1114,7 @@ class Attention_LoRA(nn.Module):
         cumulative = torch.cumsum(values, dim=0)
         k = int(torch.searchsorted(cumulative, 0.5 * total).item()) + 1
         return flat_score.new_tensor(k / flat_score.numel())
-
+    # 合并阶段的诊断与日志函数
     def _log_merge_stats(
             self,
             task: int,
@@ -1141,9 +1137,9 @@ class Attention_LoRA(nn.Module):
         protect_mask = self.general_mask.detach().float()
 
         fixed_conflict_mask = _top_ratio_mask(conflict_score,self.dual_mask_conflict_ratio if conflict_ratio is None else conflict_ratio,)
-
+        # entropy = 0.91,top10_energy = 0.24 表示冲突非常分散，固定 Top-10% 只能覆盖 24%，这时 Energy-50% 自适应范围就会扩大
         conflict_entropy, conflict_top10_energy = self._conflict_distribution_stats(conflict_score,fixed_conflict_mask,)
-
+        # 0.0536  -- 只需要冲突分数最高的 5.36% 参数，就可以覆盖全部冲突分数的 50%
         conflict_energy50_ratio = self._conflict_energy50_ratio(conflict_score)
 
         if conflict_ratio is None:
@@ -1151,9 +1147,9 @@ class Attention_LoRA(nn.Module):
         if conflict_strength is None:
             conflict_strength = self.dual_mask_conflict_strength
         conflict_strength = min(max(conflict_strength, 0.0), 1.0)
-
+        # 总分支的冲突门削弱程度  把raw_total = S_raw + P_raw作为整体，估算只施加冲突门后，整体增量范数下降多少
         conflict_gate_suppression = self._conflict_gate_suppression(raw_total,conflict_mask,conflict_strength,)
-
+        # 初始化 P 分支统计量
         private_mask_overlap = raw_total.new_zeros(())
         private_energy_overlap = raw_total.new_zeros(())
         private_gate_suppression = 0.0
@@ -1213,27 +1209,27 @@ class Attention_LoRA(nn.Module):
         )
         logging.info(
             "Task %s layer %s dual-mask merge: total_raw_norm=%.6f, "
-            "total_safe_norm=%.6f, suppressed=%.2f%%, raw_abs_mean=%.3e, "
-            "safe_abs_mean=%.3e, max_abs=%.3e, protect_density=%.4f, "
-            "plastic_density=%.4f, conflict_density=%.4f, "
-            "conflict_entropy=%.4f, conflict_top10_energy=%.4f, "
-            "conflict_energy50_ratio=%.4f, "
-            "conflict_gate_suppressed=%.2f%%, "
-            "effective_conflict_ratio=%.4f, "
-            "effective_conflict_strength=%.4f, "
+            "total_safe_norm=%.6f, suppressed=%.2f%%, raw_abs_mean=%.3e, " # suppressed 所有门控共同作用后，总增量范数下降多少
+            "safe_abs_mean=%.3e, max_abs=%.3e, protect_density=%.4f, " # protect_mask=1 的坐标比例
+            "plastic_density=%.4f, conflict_density=%.4f, " # plastic_mask=1 的坐标比例
+            "conflict_entropy=%.4f, conflict_top10_energy=%.4f, " # 冲突分数的整体分散程度  固定 Top-ratio 区域覆盖的冲突分数比例
+            "conflict_energy50_ratio=%.4f, " # 覆盖 50% 冲突分数最少需要的坐标比例
+            "conflict_gate_suppressed=%.2f%%, " #  # 只模拟冲突门时，总增量范数下降多少
+            "effective_conflict_ratio=%.4f, " # 当前实际冲突 mask 的坐标比例
+            "effective_conflict_strength=%.4f, " # 本次 merge 实际使用的冲突抑制强度 β
             "private_conflict_mode=%s, "
-            "private_conflict_mask_overlap=%.4f, "
-            "private_conflict_energy_overlap=%.4f, "
-            "private_conflict_gate_suppressed=%.2f%%, "
+            "private_conflict_mask_overlap=%.4f, " # 全局 P 冲突坐标中有多少位于 plastic 区
+            "private_conflict_energy_overlap=%.4f, " # 全局 P 冲突分数中有多少位于 plastic 区
+            "private_conflict_gate_suppressed=%.2f%%, " # 冲突门对 P-plastic 增量造成的额外范数下降
             "Q_safe_norm=%.6f, K_safe_norm=%.6f, V_safe_norm=%.6f",
             int(task),
             int(self.layer_idx),
-            total_stats["raw_norm"],
-            total_stats["safe_norm"],
-            total_stats["suppressed_ratio"] * 100.0,
-            total_stats["raw_abs_mean"],
-            total_stats["safe_abs_mean"],
-            total_stats["max_abs"],
+            total_stats["raw_norm"], # S、P 原始增量相加后的整体范数
+            total_stats["safe_norm"], # S、P 分别经过门控，再相加后的整体范数
+            total_stats["suppressed_ratio"] * 100.0, # 所有门控合起来造成的整体范数下降比例
+            total_stats["raw_abs_mean"], # 原始总增量每个坐标绝对值的平均值
+            total_stats["safe_abs_mean"], # 安全总增量每个坐标绝对值的平均值
+            total_stats["max_abs"], # 原始总增量中最大的坐标绝对值
             protect_mask.mean().item(),
             (1.0 - protect_mask).mean().item(),
             conflict_mask.float().mean().item(),
@@ -1310,7 +1306,7 @@ class Attention_LoRA(nn.Module):
         t = int(task)
         device = next(self.parameters()).device
         dtype = self.qkv.weight.dtype
-
+        # s=0.5 p=0.75
         def raw_delta(name: str, unit, gamma: float, isolated: bool):
             delta = gamma * (unit.B_weight.detach() @ unit.A_weight.detach())
             return {
@@ -1325,7 +1321,7 @@ class Attention_LoRA(nn.Module):
             item["safe_delta"] = safe_delta
 
         branch_deltas = []
-        if not self.use_slora and not self.use_plora:
+        if not self.use_slora and not self.use_plora: # isolated=False：走共享分支的保护路径
             branch_deltas.append(raw_delta("S", self.S_lora[t], 1.0, isolated=False))
         else:
             if self.use_slora or t == 0:
@@ -1333,8 +1329,8 @@ class Attention_LoRA(nn.Module):
             if t > 0 and self.use_plora and self.P_lora[t] is not None:
                 branch_deltas.append(raw_delta("P",self.P_lora[t],float(self.plora_gamma),isolated=True,))
 
-        if branch_deltas:
-            conflict_ratio, conflict_strength = self._conflict_parameters()
+        if branch_deltas: # 如果lora产生了更新
+            conflict_ratio, conflict_strength = self._conflict_parameters() # 0.1 0.5(task0)
 
             self.last_functional_merge_strength = float(conflict_strength)
 

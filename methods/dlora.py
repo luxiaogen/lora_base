@@ -139,9 +139,9 @@ class Learner(BaseLearner):
         return {"selective_anchor_w0_features": w0_features}
 
     def _extra_training_loss(self,output=None,inputs=None,targets=None,epoch=None,batch_context=None,):
-        reg_weight = float(self.args.get("dual_mask_reg_weight", 0.0)) # 0.01
+        reg_weight = float(self.args.get("dual_mask_reg_weight", 0.1)) # 0.01
 
-        anchor_enabled = bool(self.args.get("dual_mask_anchor_reg_enabled", False))
+        anchor_enabled = bool(self.args.get("dual_mask_anchor_reg_enabled", True))
         anchor_weight = float(self.args.get("dual_mask_anchor_reg_weight", 0.0))
 
         anchor_task0_only = bool(self.args.get("dual_mask_anchor_reg_task0_only", False))
@@ -244,7 +244,7 @@ class Learner(BaseLearner):
         loss.backward()
         optimizer.step()
         return loss
-
+    # 临时把所有 LoRA Attention 层切回原始预训练权重 W_pre，提取一份不受增量学习影响的参考特征，使用完后再恢复当前模型
     def _pretrained_anchor_context(self):
         """Temporarily switch every LoRA attention layer to immutable W_pre."""
         stack = ExitStack()
@@ -357,12 +357,12 @@ class Learner(BaseLearner):
         # 训练集中的特征
         indices, features, targets = self._collect_anchor_features(loader)
 
-        ## Ct 是否使用的是所有已见类的原型，还是仅使用当前任务的原型
+        ## Kt 是否使用的是所有已见类的原型，还是仅使用当前任务的原型 --> 保护控制器选择  C_control = C_new × (1 - D_t)
         use_all_seen_prototypes = bool(self.args.get("dual_mask_competence_all_seen", False))
-
+        ## accuracy : C = 正确分类的 holdout 样本数 / 总 holdout 样本数
         competence_metric = str(self.args.get("dual_mask_competence_metric", "accuracy")).lower()
-
-        use_old_overlap_conflict = bool(self.args.get("dual_mask_conflict_old_overlap_adaptive", False))
+        ## 是否启动 R_old来计算最终的冲突抑制强度
+        use_old_overlap_conflict = bool(self.args.get("dual_mask_conflict_old_overlap_adaptive", True))
 
         
 
@@ -376,41 +376,38 @@ class Learner(BaseLearner):
 
 
 
-        # 使用当前任务训练样本构建类别原型，并做确定性 holdout
+        # 使用当前任务训练样本构建类别原型，并做确定性 holdout  w0_competence_new--K_new
         w0_competence_new, prototypes, class_ids = split_prototype_competence(
             features, # 80% → 建立类别原型
             targets, # 20% → 测试 W0 NCM 准确率
             indices,
-            holdout_mod=int(self.args.get("dual_mask_competence_holdout_mod", 5)),
+            holdout_mod=int(self.args.get("dual_mask_competence_holdout_mod", 5)), # holdout_mod=5  → 约 20% 测试，80% 建原型
             metric=competence_metric,
         )
 
-
-        plasticity_adaptive = bool(self.args.get("dual_mask_plasticity_adaptive", False))
+        # 用于根据当前任务的学习难度 D_t，动态降低保护强度、扩大可塑空间
+        plasticity_adaptive = bool(self.args.get("dual_mask_plasticity_adaptive", True))
         self._w0_ncm_loss_new = None
         self._w0_plasticity_demand = None
         if plasticity_adaptive:
             (self._w0_ncm_loss_new,self._w0_plasticity_demand,) = split_prototype_ncm_diagnostics(
-                features,
-                targets,
-                indices,
+                features,targets,indices,
                 holdout_mod=int(self.args.get("dual_mask_competence_holdout_mod", 5)),
-                scale=self.scale,
-            )
+                scale=self.scale, # D_t: 当前 W_pre 的 NCM 损失，相对于随机分类损失有多大 | D_t = W_pre 当前任务损失 / 随机猜测损失
+            ) # D_t 小 → 保留较高 C_control → 保护更多 | D_t 大 → 降低 C_control     → 释放更多可塑空间
 
+        ## 责把任务级别的 C_new、C_all、D_t、R_old 转换成真正传给 12 层 Attention 的控制参数
         w0_competence_all_seen = None
         old_overlap_risk = None
         if need_all_seen_competence:
             w0_competence_all_seen, _, _ = split_prototype_competence(
-                features,
-                targets,
-                indices,
+                features,targets,indices,
                 holdout_mod=int(self.args.get("dual_mask_competence_holdout_mod", 5)),
                 old_prototypes=old_prototypes,
                 old_class_ids=old_class_ids,
                 metric=competence_metric,
-            )
-            old_overlap_risk = max(0.0, w0_competence_new - w0_competence_all_seen,)
+            ) # 计算 C_new、C_all、D_t
+            old_overlap_risk = max(0.0, w0_competence_new - w0_competence_all_seen,) # 衡量当前新类加入旧类候选后，分类能力下降多少
         w0_competence = (
             w0_competence_new
             if use_old_overlap_conflict
@@ -419,9 +416,9 @@ class Learner(BaseLearner):
 
         self._w0_competence = w0_competence
 
-        self._w0_competence_new = w0_competence_new
-        self._w0_competence_all_seen = w0_competence_all_seen
-        self._w0_old_overlap_risk = old_overlap_risk
+        self._w0_competence_new = w0_competence_new # K_new
+        self._w0_competence_all_seen = w0_competence_all_seen # K_all
+        self._w0_old_overlap_risk = old_overlap_risk # R_old
 
         for prototype, class_id in zip(prototypes, class_ids):
             self._w0_class_means[int(class_id.item())] = prototype.cpu()
@@ -530,9 +527,9 @@ class Learner(BaseLearner):
             "Task %s W_pre drift: feature_cosine=%.6f, weight_relative_mean=%.6f, "
             "weight_relative_max=%.6f",
             self._cur_task,
-            feature_drift,
-            mean_weight_drift,
-            max_weight_drift,
+            feature_drift, # 特征提取器提取特征偏移
+            mean_weight_drift, # 权重偏移
+            max_weight_drift, #
         )
 
     def after_task(self):
@@ -622,7 +619,7 @@ class Learner(BaseLearner):
 
         kk = 0  # Transformer 层号计数器（0 到 11 层）
         for module in self._iter_lora_modules():
-            print(f'********** LoRA weights initialization for layer {kk} **********')
+            # print(f'********** LoRA weights initialization for layer {kk} **********')
             module._init_lora_weight(task=self._cur_task, layer_idx=kk)  # 初始化 LoRA 的 A B 矩阵权重
             module.set_task_and_stage(task=self._cur_task, layer_idx=kk)  # 设置lora可不可训练
             kk += 1
@@ -692,18 +689,14 @@ class Learner(BaseLearner):
         for name, param in self._network.named_parameters():
             if param.requires_grad:
                 enabled.add(name)
-        logging.info("Parameters to be updated (%d):\n  %s", len(enabled), "\n  ".join(sorted(enabled)), )
+        # logging.info("Parameters to be updated (%d):\n  %s", len(enabled), "\n  ".join(sorted(enabled)), )
         prog_bar = tqdm(range(self.run_epoch))
         # 角度惩罚损失
         label_smoothing = float(self.args.get('label_smoothing', 0.0))
         if (bool(self.args.get('label_smoothing_task0_only', False)) and self._cur_task != 0):
             label_smoothing = 0.0
         loss_cos:AngularPenaltySMLoss = AngularPenaltySMLoss(
-            loss_type='cosface',
-            s=self.scale,
-            m=self.margin,
-            label_smoothing=label_smoothing,
-        )
+            loss_type='cosface',s=self.scale,m=self.margin,label_smoothing=label_smoothing,)
 
         for _, epoch in enumerate(prog_bar):
             self._network.train()
@@ -738,7 +731,7 @@ class Learner(BaseLearner):
                 )
 
                 batch_training_metrics = getattr(self,"_last_training_loss_metrics",{},)
-                if batch_training_metrics:
+                if batch_training_metrics: # 只负责汇总、显示额外损失的统计值
                     for name, value in batch_training_metrics.items():
                         value = value.detach()
                         training_metric_totals[name] = (training_metric_totals.get(name, 0.0) + value)
@@ -887,8 +880,7 @@ class Learner(BaseLearner):
         crct_num = self._total_classes
         param_list = [p for p in self._network.classifier_pool.parameters() if p.requires_grad]
         classifier_lr = self.args["ca_lrate"]
-        network_params = [{'params': param_list, 'lr': classifier_lr,
-                           'weight_decay': 0.0005}]
+        network_params = [{'params': param_list, 'lr': classifier_lr,'weight_decay': 0.0005}]
         optimizer = optim.SGD(network_params, lr=classifier_lr, momentum=0.9, weight_decay=0.0005)
         scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer=optimizer, T_max=run_epochs)
 
@@ -957,8 +949,7 @@ class Learner(BaseLearner):
                 losses += loss.item()
 
             scheduler.step()
-            info = (
-                'CA Task {} => Loss {:.3f} '
+            info = ('CA Task {} => Loss {:.3f} '
                 '(classifier alignment; final accuracy is logged after CA)'
             ).format(self._cur_task, losses / self._total_classes)
             logging.info(info)
