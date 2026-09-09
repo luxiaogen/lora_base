@@ -313,6 +313,7 @@ class Attention_LoRA(nn.Module):
         self.effective_energy_coverage = 0.0
         self.effective_protect_strength = _BALANCED_STATIC_STRENGTH
         self.current_private_rank = self.rank
+        self.dual_mask_private_rank = 0  # 0: 原有策略；正整数: Task1 起固定 P rank。
         self.pretrained_anchor_mode = False
         # 掩码可视化配置。
         self.dual_mask_vis = False
@@ -371,6 +372,7 @@ class Attention_LoRA(nn.Module):
         # 保护区的强度是否根据W0_competence自适应
         self.dual_mask_competence_adaptive = bool(args.get("dual_mask_competence_adaptive", False))
         self.dual_mask_plasticity_adaptive = bool(args.get("dual_mask_plasticity_adaptive", False))
+        self.dual_mask_private_rank = int(args.get("dual_mask_private_rank", 0))
 
         self.dual_mask_protect_strength_mode = str(args.get("dual_mask_protect_strength_mode", "legacy_linear")).lower()
         # 固定保存初始预训练权重；自适应模式只改变覆盖率、强度和 private rank。
@@ -627,6 +629,10 @@ class Attention_LoRA(nn.Module):
                 self.S_lora[t].B.weight.zero_()  # B初始化为0
 
         # 保留原始初始化顺序，避免改变同一 seed 后续任务的随机数轨迹
+        # Task0 的 P 虽不参与前向，仍会消耗随机数，因此不覆盖它的初始化 rank。
+        controller_rank = self.current_private_rank
+        if t > 0 and self.dual_mask_private_rank > 0:
+            self.current_private_rank = self.dual_mask_private_rank
         p_rank = self.current_private_rank
         a_rand = self._init_A_weight(self.dim, p_rank, device, dtype)
         b_zero = _zero_B_init(self.dim * 3, p_rank, device, dtype)
@@ -636,6 +642,12 @@ class Attention_LoRA(nn.Module):
         )
 
         self.rebuild_dual_masks()  # Dual masks rebuilt: W0 protect density 0.5000, plastic density 0.5000
+        logging.info(
+            "Task %s LoRA allocation: S_rank=%s, P_rank=%s, controller_P_rank=%s, fixed_P_rank=%s, S_params=%s, P_params=%s, P_active=%s",
+            t, rs, p_rank, controller_rank, self.dual_mask_private_rank,
+            sum(p.numel() for p in self.S_lora[t].parameters()),
+            sum(p.numel() for p in self.P_lora[t].parameters()), t > 0 and self.use_plora,
+        )
 
     def _init_lora_weight(self, task, layer_idx:int=0):
 
