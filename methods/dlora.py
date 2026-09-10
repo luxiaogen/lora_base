@@ -683,6 +683,55 @@ class Learner(BaseLearner):
             for module in lora_modules:
                 module.after_task(task=self._cur_task)
 
+    def _classification_mode(self):
+        mode = self.args.get('classification_training_mode', 'task_local')
+        if mode not in {'task_local', 'all_seen', 'all_seen_replay'}:
+            raise ValueError('classification_training_mode must be task_local, all_seen, or all_seen_replay')
+        return 'task_local' if self._cur_task == 0 else mode
+
+    @torch.no_grad()
+    def _prepare_training_replay(self):
+        if self._classification_mode() != 'all_seen_replay':
+            return None
+        # A task-local bank of TRAIN statistics, not stored images or test features.
+        # Separate RNG leaves data augmentation, LoRA initialization and CA RNG untouched.
+        generator = torch.Generator(device=self._device)
+        generator.manual_seed(int(self.args['seed']) + 100003 * (self._cur_task + 1))
+        samples_per_class = 256
+        bank = []
+        for class_id in range(self._known_classes):
+            mean = self._class_means[class_id].detach().to(self._device).float()
+            cov = self._class_covs[class_id].detach().to(self._device).float()
+            chol = torch.linalg.cholesky(cov)  # Stored covariance already includes 1e-3 I.
+            noise = torch.randn(samples_per_class, mean.numel(), device=self._device, generator=generator)
+            bank.append(mean + noise @ chol.T)
+        features = torch.cat(bank)
+        labels = torch.arange(self._known_classes, device=self._device).repeat_interleave(samples_per_class)
+        logging.info('Training replay: %d old classes, %d pseudo-features/class, unscaled means, frozen old heads',
+                     self._known_classes, samples_per_class)
+        return features, labels, generator
+
+    def _classification_training_loss(self, output, targets, loss_cos, replay):
+        if self._classification_mode() == 'task_local':
+            return loss_cos(output['logits'], targets), {}
+        # fc_only preserves gradients into real features, even through frozen old heads.
+        logits = self._network(output['features'], fc_only=True)
+        global_targets = targets + self._known_classes
+        real_loss = loss_cos(logits, global_targets)
+        metrics = {
+            'classification_real': real_loss.detach(),
+            'train_global_acc': (logits.argmax(dim=1) == global_targets).float().mean().detach() * 100,
+        }
+        if replay is None:
+            return real_loss, metrics
+        features, labels, generator = replay
+        indices = torch.randint(len(labels), (len(targets),), device=labels.device, generator=generator)
+        replay_logits = self._network(features[indices], fc_only=True)
+        replay_loss = loss_cos(replay_logits, labels[indices])
+        metrics['classification_replay'] = replay_loss.detach()
+        # Equal-sized real/replay batches, unit weight; do not halve real-feature gradients.
+        return real_loss + replay_loss, metrics
+
     def train_function(self, train_loader, test_loader, optimizer, scheduler):
         logging.info('Trainable params: {}'.format(count_parameters(self._network, True)))
         # Double check
@@ -698,6 +747,9 @@ class Learner(BaseLearner):
             label_smoothing = 0.0
         loss_cos:AngularPenaltySMLoss = AngularPenaltySMLoss(
             loss_type='cosface',s=self.scale,m=self.margin,label_smoothing=label_smoothing,)
+        logging.info('Classification training: requested=%s effective=%s task=%d; Train_accy is task-local',
+                     self.args.get('classification_training_mode', 'task_local'), self._classification_mode(), self._cur_task)
+        replay = self._prepare_training_replay()
 
         for _, epoch in enumerate(prog_bar):
             self._network.train()
@@ -721,7 +773,7 @@ class Learner(BaseLearner):
 
                 output = self._network(inputs)
                 logits = output['logits']
-                task_loss = loss_cos(logits, targets)
+                task_loss, classification_metrics = self._classification_training_loss(output, targets, loss_cos, replay)
 
                 extra_loss = self._extra_training_loss(
                     output=output,
@@ -731,7 +783,8 @@ class Learner(BaseLearner):
                     batch_context=batch_context,
                 )
 
-                batch_training_metrics = getattr(self,"_last_training_loss_metrics",{},)
+                batch_training_metrics = dict(getattr(self,"_last_training_loss_metrics",{},))
+                batch_training_metrics.update(classification_metrics)
                 if batch_training_metrics: # 只负责汇总、显示额外损失的统计值
                     for name, value in batch_training_metrics.items():
                         value = value.detach()
@@ -836,6 +889,9 @@ class Learner(BaseLearner):
                 after['total'], after['old'], after['new'],
                 after['total'] - before['total'], after['old'] - before['old'], after['new'] - before['new'],
             )
+            logging.info('CA task prediction Task %d (test-only): before=%.2f, after=%.2f, delta=%+.2f',
+                         self._cur_task, before['task_prediction'], result[3] * 100,
+                         result[3] * 100 - before['task_prediction'])
             self._ca_before_metrics = None
         return result
 
@@ -846,8 +902,10 @@ class Learner(BaseLearner):
         devices = [device.index for device in self._multiple_gpus if device.type == 'cuda']
         try:
             with torch.random.fork_rng(devices=devices):
-                prediction, _, targets, _, _ = self._eval_cnn(self.test_loader)
-                return self.accuracy(prediction, targets, accuracy_matrix=False)
+                prediction, _, targets, task_prediction, task_targets = self._eval_cnn(self.test_loader)
+                metrics = self.accuracy(prediction, targets, accuracy_matrix=False)
+                metrics['task_prediction'] = (task_prediction == task_targets).sum().item() * 100 / len(task_targets)
+                return metrics
         finally:
             random.setstate(python_state)
             np.random.set_state(numpy_state)

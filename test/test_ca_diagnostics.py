@@ -74,6 +74,7 @@ class CADiagnosticsTests(unittest.TestCase):
         self.assertEqual(metrics['total'], 100.0)
         self.assertEqual(metrics['old'], 100.0)
         self.assertEqual(metrics['new'], 100.0)
+        self.assertEqual(metrics['task_prediction'], 100.0)
         self.assertEqual(modes, [m.training for m in learner._network.modules()])
         self.assertFalse(learner.acc_matrix.any())
         for name, value in params.items():
@@ -94,8 +95,8 @@ class CADiagnosticsTests(unittest.TestCase):
 
     def test_post_ca_reuses_regular_evaluation_and_logs_delta(self):
         learner = self.make_learner()
-        learner._ca_before_metrics = {'total': 70., 'old': 60., 'new': 80.}
-        result = ({'grouped': {'total': 75., 'old': 62., 'new': 88.}}, None, None, None)
+        learner._ca_before_metrics = {'total': 70., 'old': 60., 'new': 80., 'task_prediction': 75.}
+        result = ({'grouped': {'total': 75., 'old': 62., 'new': 88.}}, None, None, 0.82)
         with patch.object(BaseLearner, 'eval_task', return_value=result) as evaluate:
             with self.assertLogs(level='INFO') as logs:
                 self.assertIs(learner.eval_task(), result)
@@ -103,6 +104,7 @@ class CADiagnosticsTests(unittest.TestCase):
         self.assertIn('delta_total=+5.00', '\n'.join(logs.output))
         self.assertIn('delta_old=+2.00', '\n'.join(logs.output))
         self.assertIn('delta_new=+8.00', '\n'.join(logs.output))
+        self.assertIn('before=75.00, after=82.00, delta=+7.00', '\n'.join(logs.output))
         self.assertIsNone(learner._ca_before_metrics)
 
 
