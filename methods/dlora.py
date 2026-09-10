@@ -836,8 +836,42 @@ class Learner(BaseLearner):
                 after['total'], after['old'], after['new'],
                 after['total'] - before['total'], after['old'] - before['old'], after['new'] - before['new'],
             )
+            before_task = before['task_prediction']
+            after_task = self._last_task_prediction_diagnostics
+            logging.info(
+                "CA task prediction Task %s (test-only): before_accuracy=%.2f, "
+                "after_accuracy=%.2f, delta=%+.2f",
+                self._cur_task, before_task['accuracy'], after_task['accuracy'],
+                after_task['accuracy'] - before_task['accuracy'],
+            )
+            logging.info(
+                "CA task confusion Task %s before (rows=true, cols=pred, row_pct): %s",
+                self._cur_task, before_task['confusion'].tolist(),
+            )
+            logging.info(
+                "CA task confusion Task %s after (rows=true, cols=pred, row_pct): %s",
+                self._cur_task, after_task['confusion'].tolist(),
+            )
             self._ca_before_metrics = None
         return result
+
+    def _task_prediction_diagnostics(self, y_pred_task, y_true_task):
+        predicted = tensor2numpy(y_pred_task).astype(np.int64).reshape(-1)
+        targets = tensor2numpy(y_true_task).astype(np.int64).reshape(-1)
+        num_tasks = self._cur_task + 1
+        confusion = np.zeros((num_tasks, num_tasks), dtype=np.float64)
+        np.add.at(confusion, (targets, predicted), 1)
+        row_totals = confusion.sum(axis=1, keepdims=True)
+        confusion = np.divide(
+            confusion * 100.,
+            row_totals,
+            out=np.zeros_like(confusion),
+            where=row_totals != 0,
+        )
+        return {
+            'accuracy': np.around((predicted == targets).mean() * 100., decimals=2),
+            'confusion': np.around(confusion, decimals=2),
+        }
 
     def _measure_ca_accuracy(self):
         # Test-only observation; restore RNG so the extra loader pass cannot alter CA samples.
@@ -846,8 +880,10 @@ class Learner(BaseLearner):
         devices = [device.index for device in self._multiple_gpus if device.type == 'cuda']
         try:
             with torch.random.fork_rng(devices=devices):
-                prediction, _, targets, _, _ = self._eval_cnn(self.test_loader)
-                return self.accuracy(prediction, targets, accuracy_matrix=False)
+                prediction, _, targets, predicted_task, true_task = self._eval_cnn(self.test_loader)
+                metrics = self.accuracy(prediction, targets, accuracy_matrix=False)
+                metrics['task_prediction'] = self._task_prediction_diagnostics(predicted_task, true_task)
+                return metrics
         finally:
             random.setstate(python_state)
             np.random.set_state(numpy_state)
@@ -885,8 +921,11 @@ class Learner(BaseLearner):
             y_pred_with_task.append(predicts_with_task.cpu().numpy())
             y_true.append(targets.cpu().numpy())
         # 转成 []
-        return np.concatenate(y_pred), np.concatenate(y_pred_with_task), np.concatenate(y_true), torch.cat(
-            y_pred_task), torch.cat(y_true_task)  # [N, topk]
+        predicted_task = torch.cat(y_pred_task)
+        true_task = torch.cat(y_true_task)
+        if self.args.get("dual_mask_ca_diagnostics", False):
+            self._last_task_prediction_diagnostics = self._task_prediction_diagnostics(predicted_task, true_task)
+        return np.concatenate(y_pred), np.concatenate(y_pred_with_task), np.concatenate(y_true), predicted_task, true_task
 
     def _compute_accuracy(self, model, loader):
         model.eval()
