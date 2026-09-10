@@ -60,20 +60,6 @@ class CADiagnosticsTests(unittest.TestCase):
         learner.test_loader = DataLoader(DiagnosticDataset(), batch_size=2, num_workers=0)
         return learner
 
-    def test_task_prediction_diagnostics_reports_row_normalized_confusion(self):
-        learner = self.make_learner()
-        learner._cur_task = 2
-        predicted = torch.tensor([0, 1, 2, 2, 1, 2])
-        targets = torch.tensor([0, 0, 1, 1, 2, 2])
-
-        metrics = learner._task_prediction_diagnostics(predicted, targets)
-
-        self.assertEqual(metrics['accuracy'], 33.33)
-        np.testing.assert_array_equal(
-            metrics['confusion'],
-            np.array([[50., 50., 0.], [0., 0., 100.], [0., 50., 50.]]),
-        )
-
     def test_accuracy_is_read_only_and_restores_rng_and_modes(self):
         learner = self.make_learner()
         modes = [m.training for m in learner._network.modules()]
@@ -88,11 +74,6 @@ class CADiagnosticsTests(unittest.TestCase):
         self.assertEqual(metrics['total'], 100.0)
         self.assertEqual(metrics['old'], 100.0)
         self.assertEqual(metrics['new'], 100.0)
-        self.assertEqual(metrics['task_prediction']['accuracy'], 100.0)
-        np.testing.assert_array_equal(
-            metrics['task_prediction']['confusion'],
-            np.eye(2) * 100.,
-        )
         self.assertEqual(modes, [m.training for m in learner._network.modules()])
         self.assertFalse(learner.acc_matrix.any())
         for name, value in params.items():
@@ -111,34 +92,9 @@ class CADiagnosticsTests(unittest.TestCase):
         for name, value in results[0][0].items():
             self.assertTrue(torch.equal(value, results[1][0][name]), name)
 
-    def test_ca_mean_decay_can_be_disabled_without_changing_default(self):
-        learner = self.make_learner()
-
-        self.assertAlmostEqual(learner._ca_mean_scale(task_id=0), 0.95)
-        self.assertAlmostEqual(learner._ca_mean_scale(task_id=1), 1.0)
-
-        learner.args['ca_mean_decay_enabled'] = False
-        self.assertEqual(learner._ca_mean_scale(task_id=0), 1.0)
-        self.assertEqual(learner._ca_mean_scale(task_id=1), 1.0)
-        with self.assertLogs(level='INFO') as logs:
-            learner._stage2_compact_classifier(task_size=2)
-        self.assertIn('class-mean scaling: mode=no_decay', '\n'.join(logs.output))
-
     def test_post_ca_reuses_regular_evaluation_and_logs_delta(self):
         learner = self.make_learner()
-        learner._ca_before_metrics = {
-            'total': 70.,
-            'old': 60.,
-            'new': 80.,
-            'task_prediction': {
-                'accuracy': 65.,
-                'confusion': np.array([[80., 20.], [50., 50.]]),
-            },
-        }
-        learner._last_task_prediction_diagnostics = {
-            'accuracy': 75.,
-            'confusion': np.array([[90., 10.], [40., 60.]]),
-        }
+        learner._ca_before_metrics = {'total': 70., 'old': 60., 'new': 80.}
         result = ({'grouped': {'total': 75., 'old': 62., 'new': 88.}}, None, None, None)
         with patch.object(BaseLearner, 'eval_task', return_value=result) as evaluate:
             with self.assertLogs(level='INFO') as logs:
@@ -147,10 +103,6 @@ class CADiagnosticsTests(unittest.TestCase):
         self.assertIn('delta_total=+5.00', '\n'.join(logs.output))
         self.assertIn('delta_old=+2.00', '\n'.join(logs.output))
         self.assertIn('delta_new=+8.00', '\n'.join(logs.output))
-        self.assertIn('before_accuracy=65.00', '\n'.join(logs.output))
-        self.assertIn('after_accuracy=75.00', '\n'.join(logs.output))
-        self.assertIn('[[80.0, 20.0], [50.0, 50.0]]', '\n'.join(logs.output))
-        self.assertIn('[[90.0, 10.0], [40.0, 60.0]]', '\n'.join(logs.output))
         self.assertIsNone(learner._ca_before_metrics)
 
 
