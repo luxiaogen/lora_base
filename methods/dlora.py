@@ -114,6 +114,7 @@ class Learner(BaseLearner):
         self._weight_drift_curve = []
 
         self._functional_merge_calibration = None
+        self._statistics_margin_baselines = {}
 
         for layer_idx, module in enumerate(self._iter_lora_modules()):
             module.layer_idx = layer_idx
@@ -598,6 +599,8 @@ class Learner(BaseLearner):
         if self._cur_task > 0 and self.args['ca'] is True:
             self._stage2_compact_classifier( # CA 分类器对齐
                 self.task_sizes[-1],ca_epochs=int(self.args.get("ca_epochs", 5)),)
+        if self.args.get("dual_mask_statistics_drift_diagnostics", False):
+            self._run_statistics_drift_diagnostics(data_manager)
 
     def _train(self, train_loader, test_loader):
         try:
@@ -884,6 +887,179 @@ class Learner(BaseLearner):
                 metrics = self.accuracy(prediction, targets, accuracy_matrix=False)
                 metrics['task_prediction'] = self._task_prediction_diagnostics(predicted_task, true_task)
                 return metrics
+        finally:
+            random.setstate(python_state)
+            np.random.set_state(numpy_state)
+            for module, training in modes:
+                module.training = training
+
+    def _task_margin_metrics(self, logits, targets):
+        boundaries = np.cumsum([0] + self.task_sizes[:self._cur_task + 1])
+        task_scores = np.stack(
+            [logits[:, boundaries[t]:boundaries[t + 1]].max(axis=1) for t in range(self._cur_task + 1)],
+            axis=1,
+        )
+        true_tasks = np.searchsorted(boundaries[1:], targets, side="right")
+        predicted_tasks = task_scores.argmax(axis=1)
+        if task_scores.shape[1] == 1:
+            margins = np.full(len(targets), np.nan)
+        else:
+            true_scores = task_scores[np.arange(len(targets)), true_tasks]
+            other_scores = task_scores.copy()
+            other_scores[np.arange(len(targets)), true_tasks] = -np.inf
+            margins = true_scores - other_scores.max(axis=1)
+
+        metrics = []
+        for task_id in range(self._cur_task + 1):
+            selected = true_tasks == task_id
+            if not selected.any():
+                continue
+            metrics.append({
+                "task_id": task_id,
+                "current_margin": float(np.mean(margins[selected])),
+                "misroute_rate": float(np.mean(predicted_tasks[selected] != task_id) * 100.),
+            })
+        return metrics
+
+    def _update_statistics_margin_baselines(self, task_metrics):
+        if not hasattr(self, "_statistics_margin_baselines"):
+            self._statistics_margin_baselines = {}
+        for metrics in task_metrics:
+            task_id = metrics["task_id"]
+            margin = metrics["current_margin"]
+            if task_id not in self._statistics_margin_baselines and np.isfinite(margin):
+                self._statistics_margin_baselines[task_id] = margin
+                logging.info(
+                    "Statistics drift margin baseline Task %d (test-only): task=%d, margin=%.6f, misroute_rate=%.4f",
+                    self._cur_task, task_id, margin, metrics["misroute_rate"],
+                )
+
+    @staticmethod
+    def _spearman_correlation(left, right):
+        left = np.asarray(left, dtype=float)
+        right = np.asarray(right, dtype=float)
+        valid = np.isfinite(left) & np.isfinite(right)
+        if valid.sum() < 2:
+            return float("nan")
+
+        def rank(values):
+            order = np.argsort(values, kind="mergesort")
+            ranks = np.empty(len(values), dtype=float)
+            start = 0
+            while start < len(values):
+                stop = start + 1
+                while stop < len(values) and values[order[stop]] == values[order[start]]:
+                    stop += 1
+                ranks[order[start:stop]] = (start + stop - 1) / 2.
+                start = stop
+            return ranks
+
+        left_rank = rank(left[valid])
+        right_rank = rank(right[valid])
+        if left_rank.std() == 0 or right_rank.std() == 0:
+            return float("nan")
+        return float(np.corrcoef(left_rank, right_rank)[0, 1])
+
+    def _summarize_statistics_drift(self, old_vectors, old_targets, test_logits, test_targets):
+        epsilon = 1e-12
+        class_mean_drift = {}
+        class_covariance_drift = {}
+        for class_id in range(self._known_classes):
+            vectors = old_vectors[old_targets == class_id]
+            current_mean = vectors.mean(axis=0)
+            saved_mean = tensor2numpy(self._class_means[class_id])
+            denominator = max(np.linalg.norm(current_mean) * np.linalg.norm(saved_mean), epsilon)
+            class_mean_drift[class_id] = 1. - float(np.dot(current_mean, saved_mean) / denominator)
+
+            current_covariance = np.cov(vectors, rowvar=False) + np.eye(vectors.shape[1]) * 1e-3
+            saved_covariance = tensor2numpy(self._class_covs[class_id])
+            covariance_norm = max(np.linalg.norm(saved_covariance), epsilon)
+            class_covariance_drift[class_id] = float(
+                np.linalg.norm(current_covariance - saved_covariance) / covariance_norm
+            )
+
+        margin_by_task = {
+            metrics["task_id"]: metrics
+            for metrics in self._task_margin_metrics(test_logits, test_targets)
+        }
+        boundaries = np.cumsum([0] + self.task_sizes[:self._cur_task + 1])
+        tasks = []
+        for task_id in range(self._cur_task):
+            class_ids = range(boundaries[task_id], boundaries[task_id + 1])
+            margin_metrics = margin_by_task[task_id]
+            current_margin = margin_metrics["current_margin"]
+            baseline_margin = self._statistics_margin_baselines.get(task_id, float("nan"))
+            tasks.append({
+                "task_id": task_id,
+                "mean_cosine_drift": float(np.mean([class_mean_drift[c] for c in class_ids])),
+                "covariance_relative_drift": float(np.mean([class_covariance_drift[c] for c in class_ids])),
+                "current_margin": current_margin,
+                "margin_drop": baseline_margin - current_margin,
+                "misroute_rate": margin_metrics["misroute_rate"],
+            })
+
+        mean_drift = [task["mean_cosine_drift"] for task in tasks]
+        covariance_drift = [task["covariance_relative_drift"] for task in tasks]
+        margin_drop = [task["margin_drop"] for task in tasks]
+        misroute_rate = [task["misroute_rate"] for task in tasks]
+        correlations = {
+            "mean_vs_margin_drop": self._spearman_correlation(mean_drift, margin_drop),
+            "mean_vs_misroute": self._spearman_correlation(mean_drift, misroute_rate),
+            "covariance_vs_margin_drop": self._spearman_correlation(covariance_drift, margin_drop),
+            "covariance_vs_misroute": self._spearman_correlation(covariance_drift, misroute_rate),
+        }
+        return {"tasks": tasks, "correlations": correlations}
+
+    def _run_statistics_drift_diagnostics(self, data_manager):
+        python_state, numpy_state = random.getstate(), np.random.get_state()
+        modes = [(module, module.training) for module in self._network.modules()]
+        devices = [device.index for device in self._multiple_gpus if device.type == "cuda"]
+        try:
+            with torch.random.fork_rng(devices=devices):
+                self._network.eval()
+                logits, targets = [], []
+                with torch.no_grad():
+                    for _, inputs, batch_targets in self.test_loader:
+                        outputs = self._network.interface(inputs.to(self._device))
+                        logits.append(tensor2numpy(outputs[:, :self._total_classes]))
+                        targets.append(tensor2numpy(batch_targets))
+                test_logits = np.concatenate(logits)
+                test_targets = np.concatenate(targets)
+                task_metrics = self._task_margin_metrics(test_logits, test_targets)
+                self._update_statistics_margin_baselines(task_metrics)
+
+                if self._cur_task != self.total_sessions - 1 or self._known_classes == 0:
+                    return
+                old_dataset = data_manager.get_dataset(
+                    np.arange(self._known_classes), source="train", mode="test",
+                )
+                old_loader = DataLoader(
+                    old_dataset, batch_size=self.batch_size, shuffle=False,
+                    num_workers=self.num_workers, pin_memory=True,
+                )
+                old_vectors, old_targets = self._extract_vectors(old_loader)
+                summary = self._summarize_statistics_drift(
+                    old_vectors, old_targets, test_logits, test_targets,
+                )
+                self._last_statistics_drift_diagnostics = summary
+                for metrics in summary["tasks"]:
+                    logging.info(
+                        "Statistics drift Task %d (train-statistics/test-routing only): old_task=%d, "
+                        "mean_cosine_drift=%.6f, covariance_relative_drift=%.6f, current_margin=%.6f, "
+                        "margin_drop=%.6f, misroute_rate=%.4f",
+                        self._cur_task, metrics["task_id"], metrics["mean_cosine_drift"],
+                        metrics["covariance_relative_drift"], metrics["current_margin"],
+                        metrics["margin_drop"], metrics["misroute_rate"],
+                    )
+                correlation = summary["correlations"]
+                logging.info(
+                    "Statistics drift correlations Task %d (old_tasks=%d, Spearman): "
+                    "mean_vs_margin_drop=%.6f, mean_vs_misroute=%.6f, "
+                    "covariance_vs_margin_drop=%.6f, covariance_vs_misroute=%.6f",
+                    self._cur_task, len(summary["tasks"]), correlation["mean_vs_margin_drop"],
+                    correlation["mean_vs_misroute"], correlation["covariance_vs_margin_drop"],
+                    correlation["covariance_vs_misroute"],
+                )
         finally:
             random.setstate(python_state)
             np.random.set_state(numpy_state)
