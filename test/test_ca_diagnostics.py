@@ -111,6 +111,19 @@ class CADiagnosticsTests(unittest.TestCase):
         for name, value in results[0][0].items():
             self.assertTrue(torch.equal(value, results[1][0][name]), name)
 
+    def test_ca_mean_decay_can_be_disabled_without_changing_default(self):
+        learner = self.make_learner()
+
+        self.assertAlmostEqual(learner._ca_mean_scale(task_id=0), 0.95)
+        self.assertAlmostEqual(learner._ca_mean_scale(task_id=1), 1.0)
+
+        learner.args['ca_mean_decay_enabled'] = False
+        self.assertEqual(learner._ca_mean_scale(task_id=0), 1.0)
+        self.assertEqual(learner._ca_mean_scale(task_id=1), 1.0)
+        with self.assertLogs(level='INFO') as logs:
+            learner._stage2_compact_classifier(task_size=2)
+        self.assertIn('class-mean scaling: mode=no_decay', '\n'.join(logs.output))
+
     def test_post_ca_reuses_regular_evaluation_and_logs_delta(self):
         learner = self.make_learner()
         learner._ca_before_metrics = {

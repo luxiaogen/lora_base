@@ -1,0 +1,61 @@
+{
+  "name": "imgr10_ca_mean_decay_seed1993",
+  "log_dir": "logs/shell_logs/imgr10_ca_mean_decay_seed1993",
+  "datasets": [
+    {
+      "name": "imgr10",
+      "config": "exps/dlora/imgr10.json"
+    }
+  ],
+  "seeds": [1993],
+  "common_overrides": {
+    "init_epoch": 20,
+    "epochs": 20,
+    "rank": 64,
+    "ca": true,
+    "ca_epochs": 5,
+    "dual_mask_ca_diagnostics": true,
+    "dual_mask_competence_adaptive": true,
+    "dual_mask_plasticity_adaptive": true,
+    "dual_mask_protect_strength_mode": "competence",
+    "dual_mask_task0_gate_mode": "unmasked",
+    "dual_mask_anchor_reg_enabled": true,
+    "dual_mask_anchor_reg_weight": 10.0,
+    "dual_mask_anchor_reg_task0_only": true,
+    "dual_mask_conflict_energy_adaptive": true,
+    "dual_mask_conflict_energy_ratio_floor": true,
+    "dual_mask_conflict_ratio": 0.1,
+    "dual_mask_conflict_strength": 0.5,
+    "dual_mask_conflict_old_overlap_adaptive": true,
+    "dual_mask_private_conflict_mode": "global",
+    "dual_mask_conflict_merge_mode": "suppress",
+    "dual_mask_conflict_reg_enabled": false,
+    "dual_mask_reg_weight": 0.01,
+    "dual_mask_selective_anchor_enabled": false,
+    "dual_mask_functional_merge_calibration": false,
+    "dual_mask_safe_residual_enabled": false,
+    "dual_mask_track_w0_metrics": true,
+    "dual_mask_vis": false,
+    "dual_mask_private_rank": 0,
+    "experiment_tracker": "wandb",
+    "wandb_project": "LoDA_ICML2026",
+    "wandb_mode": "online",
+    "wandb_group": "imgr10_ca_mean_decay_seed1993"
+  },
+  "variants": [
+    {
+      "name": "current_decay",
+      "description": "Current CA class-mean decay schedule",
+      "overrides": {
+        "ca_mean_decay_enabled": true
+      }
+    },
+    {
+      "name": "no_decay",
+      "description": "CA class means are not scaled",
+      "overrides": {
+        "ca_mean_decay_enabled": false
+      }
+    }
+  ]
+}

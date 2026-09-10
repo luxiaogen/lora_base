@@ -940,6 +940,11 @@ class Learner(BaseLearner):
 
         return np.around(tensor2numpy(correct) * 100 / total, decimals=2)
 
+    def _ca_mean_scale(self, task_id):
+        if not self.args.get("ca_mean_decay_enabled", True):
+            return 1.0
+        return 0.9 + (task_id + 1) / (self._cur_task + 1) * 0.1
+
     def _stage2_compact_classifier(self, task_size, ca_epochs=5):
         """Align classifier heads using Gaussian pseudo-features."""
         if self.args.get("dual_mask_ca_diagnostics", False):
@@ -961,6 +966,8 @@ class Learner(BaseLearner):
         self._network.to(self._device)
 
         self._network.eval()
+        mean_scale_mode = "current_decay" if self.args.get("ca_mean_decay_enabled", True) else "no_decay"
+        logging.info("CA Task %d class-mean scaling: mode=%s", self._cur_task, mean_scale_mode)
         for epoch in range(run_epochs):
             losses = 0.
 
@@ -970,8 +977,8 @@ class Learner(BaseLearner):
 
             for c_id in range(crct_num):
                 t_id = c_id // task_size
-                decay = (t_id + 1) / (self._cur_task + 1) * 0.1
-                cls_mean = self._class_means[c_id].to(self._device) * (0.9 + decay)
+                mean_scale = self._ca_mean_scale(t_id)
+                cls_mean = self._class_means[c_id].to(self._device) * mean_scale
                 cls_cov = self._class_covs[c_id].to(self._device)
 
                 m = MultivariateNormal(cls_mean.float(), cls_cov.float())
