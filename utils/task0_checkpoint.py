@@ -31,6 +31,7 @@ def dataset_signature(data_manager):
 def _protocol(args):
     ignored = {'config', 'overrides', 'prefix', 'logdir', 'experiment_tracker',
                'classification_training_mode', 'dual_mask_task_bias_calibration',
+               'dual_mask_previous_function_enabled', 'dual_mask_boundary_calibration',
                'task0_checkpoint_save', 'task0_checkpoint_resume', 'max_tasks'}
     return {key: str(value) for key, value in args.items() if key not in ignored and not key.startswith('wandb_')}
 

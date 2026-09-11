@@ -5,6 +5,7 @@ from torch.utils.data import DataLoader
 
 import copy
 import logging
+import math
 import random
 import numpy as np
 from tqdm import tqdm
@@ -37,6 +38,81 @@ def fit_task_logit_bias(logits, targets, task_sizes, scale):
 
     optimizer.step(closure)
     return (bias - bias.mean()).detach()
+
+
+def task_score_margins(logits, targets, task_sizes):
+    class_tasks = torch.arange(len(task_sizes), device=logits.device).repeat_interleave(
+        torch.tensor(task_sizes, device=logits.device)
+    )
+    task_scores = []
+    start = 0
+    for size in task_sizes:
+        task_scores.append(logits[:, start:start + size].max(dim=1).values)
+        start += size
+    task_scores = torch.stack(task_scores, dim=1)
+    target_tasks = class_tasks[targets]
+    correct = task_scores.gather(1, target_tasks[:, None]).squeeze(1)
+    task_mask = F.one_hot(target_tasks, num_classes=len(task_sizes)).bool()
+    other = task_scores.masked_fill(task_mask, float("-inf")).max(dim=1).values
+    return correct - other, task_scores, target_tasks
+
+
+def fit_boundary_task_logit_bias(logits, targets, task_sizes, scale, conflict_ratio):
+    ratio = float(conflict_ratio)
+    if not 0.0 < ratio <= 1.0:
+        raise ValueError("conflict_ratio must be in (0, 1]")
+    margins, task_scores, target_tasks = task_score_margins(logits, targets, task_sizes)
+    selected = torch.zeros(len(targets), dtype=torch.bool, device=logits.device)
+    for task_id in range(len(task_sizes)):
+        indices = (target_tasks == task_id).nonzero().flatten()
+        count = max(1, math.ceil(len(indices) * ratio))
+        local = margins[indices].topk(count, largest=False).indices
+        selected[indices[local]] = True
+
+    bias = torch.nn.Parameter(torch.zeros(len(task_sizes), device=logits.device))
+    optimizer = optim.LBFGS([bias], max_iter=50, line_search_fn="strong_wolfe")
+    old = target_tasks < len(task_sizes) - 1
+
+    def closure():
+        optimizer.zero_grad()
+        centered_bias = bias - bias.mean()
+        adjusted_scores = task_scores + centered_bias
+        boundary_loss = F.cross_entropy(adjusted_scores[selected] * scale, target_tasks[selected])
+        adjusted_correct = adjusted_scores.gather(1, target_tasks[:, None]).squeeze(1)
+        task_mask = F.one_hot(target_tasks, num_classes=len(task_sizes)).bool()
+        adjusted_other = adjusted_scores.masked_fill(task_mask, float("-inf")).max(dim=1).values
+        adjusted_margin = adjusted_correct - adjusted_other
+        old_safe = F.relu((margins[old].detach() - adjusted_margin[old]) * scale).square().mean()
+        loss = boundary_loss + old_safe
+        loss.backward()
+        return loss
+
+    optimizer.step(closure)
+    fitted = (bias - bias.mean()).detach()
+    return fitted, {
+        "selected_count": int(selected.sum().item()),
+        "selected_ratio": selected.float().mean().detach(),
+        "selected_mask": selected.detach(),
+    }
+
+
+def selective_previous_function_loss(student_logits, teacher_logits, ratio, scale):
+    ratio = float(ratio)
+    if not 0.0 < ratio <= 1.0:
+        raise ValueError("ratio must be in (0, 1]")
+    teacher_prob = F.softmax(teacher_logits.detach() * scale, dim=1)
+    per_sample = F.kl_div(
+        F.log_softmax(student_logits * scale, dim=1),
+        teacher_prob,
+        reduction="none",
+    ).sum(dim=1)
+    count = max(1, math.ceil(len(per_sample) * ratio))
+    selected = per_sample.detach().topk(count).indices
+    return per_sample[selected].mean(), {
+        "selected_count": count,
+        "selected_ratio": per_sample.new_tensor(count / len(per_sample)).detach(),
+        "mean_kl": per_sample.detach().mean(),
+    }
 
 
 class Learner(BaseLearner):
@@ -132,6 +208,8 @@ class Learner(BaseLearner):
         self._weight_drift_curve = []
 
         self._functional_merge_calibration = None
+        self._previous_teacher = None
+        self._boundary_calibration_metrics = None
 
         for layer_idx, module in enumerate(self._iter_lora_modules()):
             module.layer_idx = layer_idx
@@ -142,20 +220,27 @@ class Learner(BaseLearner):
                 yield module
 
     def _extra_training_context(self, inputs, targets, epoch):
+        context = {}
+        previous_enabled = bool(self.args.get("dual_mask_previous_function_enabled", False))
+        if previous_enabled and self._cur_task > 0 and self._previous_teacher is not None:
+            with torch.no_grad():
+                teacher_features = self._previous_teacher(inputs)["features"]
+                context["previous_old_logits"] = self._previous_teacher(
+                    teacher_features, fc_only=True
+                ).detach()
+
         enabled = bool(self.args.get("dual_mask_selective_anchor_enabled", False))
         weight = float(self.args.get("dual_mask_selective_anchor_weight", 0.0))
         start_epoch = int(self.args.get("dual_mask_selective_anchor_start_epoch", 0))
-        if (not enabled or weight <= 0.0 or self._cur_task != 0 or int(epoch) < start_epoch):
-            return {}
-
-        was_training = self._network.training
-        self._network.eval()
-        try:
-            with self._pretrained_anchor_context(), torch.no_grad():
-                w0_features = self._network(inputs)["features"].detach()
-        finally:
-            self._network.train(was_training)
-        return {"selective_anchor_w0_features": w0_features}
+        if enabled and weight > 0.0 and self._cur_task == 0 and int(epoch) >= start_epoch:
+            was_training = self._network.training
+            self._network.eval()
+            try:
+                with self._pretrained_anchor_context(), torch.no_grad():
+                    context["selective_anchor_w0_features"] = self._network(inputs)["features"].detach()
+            finally:
+                self._network.train(was_training)
+        return context
 
     def _extra_training_loss(self,output=None,inputs=None,targets=None,epoch=None,batch_context=None,):
         reg_weight = float(self.args.get("dual_mask_reg_weight", 0.1)) # 0.01
@@ -187,9 +272,20 @@ class Learner(BaseLearner):
             and selective_anchor_ramp > 0.0
         )
 
+        previous_function_enabled = bool(self.args.get("dual_mask_previous_function_enabled", False))
+        previous_function_weight = float(self.args.get("dual_mask_previous_function_weight", 1.0))
+        previous_function_applies = (
+            previous_function_enabled
+            and previous_function_weight > 0.0
+            and self._cur_task > 0
+            and batch_context is not None
+            and "previous_old_logits" in batch_context
+        )
+
         self._last_training_loss_metrics = {}
         if (reg_weight <= 0.0
-                and not anchor_applies and not safe_residual_applies and not selective_anchor_applies):
+                and not anchor_applies and not safe_residual_applies
+                and not selective_anchor_applies and not previous_function_applies):
             return None
 
         modules = [
@@ -248,6 +344,24 @@ class Learner(BaseLearner):
                 "selective_anchor_selected_ratio": (selective_metrics["selected_ratio"]),
                 "selective_anchor_violation_ratio": (selective_metrics["violation_ratio"]),
                 "selective_anchor_ramp": current_features.new_tensor(selective_anchor_ramp),
+            })
+
+        if previous_function_applies:
+            current_features = output["features"]
+            student_logits = self._network(current_features, fc_only=True)[:, :self._known_classes]
+            previous_function, previous_metrics = selective_previous_function_loss(
+                student_logits,
+                batch_context["previous_old_logits"],
+                ratio=float(self.args.get("dual_mask_conflict_ratio", 0.1)),
+                scale=self.scale,
+            )
+            weighted_previous_function = previous_function_weight * previous_function
+            weighted_losses.append(weighted_previous_function)
+            self._last_training_loss_metrics.update({
+                "previous_function": previous_function.detach(),
+                "previous_function_weighted": weighted_previous_function.detach(),
+                "previous_function_selected_ratio": previous_metrics["selected_ratio"],
+                "previous_function_mean_kl": previous_metrics["mean_kl"],
             })
 
 
@@ -559,11 +673,24 @@ class Learner(BaseLearner):
 
         self._cur_task += 1
 
+        previous_enabled = bool(self.args.get("dual_mask_previous_function_enabled", False))
+        if previous_enabled and self._cur_task > 0:
+            self._previous_teacher = copy.deepcopy(self._network).to(self._device).freeze()
+            logging.info(
+                "Previous-function teacher prepared for Task %d from completed Task %d",
+                self._cur_task,
+                self._cur_task - 1,
+            )
+        else:
+            self._previous_teacher = None
 
         self._total_classes = self._known_classes + data_manager.get_task_size(self._cur_task)
         self.task_sizes.append(data_manager.get_task_size(self._cur_task))  # 当前这个 Task 新增的类别数量
         self._network.update_fc(self._total_classes)
-        self._network.use_task_logit_bias = bool(self.args.get("dual_mask_task_bias_calibration", False))
+        self._network.use_task_logit_bias = bool(
+            self.args.get("dual_mask_task_bias_calibration", False)
+            or self.args.get("dual_mask_boundary_calibration", False)
+        )
 
         logging.info('Learning on {}-{}'.format(self._known_classes, self._total_classes))
 
@@ -608,6 +735,7 @@ class Learner(BaseLearner):
             self._prepare_w0_prototypes(self.w0_loader)
 
         self._train(self.train_loader, self.test_loader)
+        self._previous_teacher = None
 
         if track_w0:
             self._measure_pretrained_drift(self.w0_loader)
@@ -617,7 +745,9 @@ class Learner(BaseLearner):
         if self._cur_task > 0 and self.args['ca'] is True:
             self._stage2_compact_classifier( # CA 分类器对齐
                 self.task_sizes[-1],ca_epochs=int(self.args.get("ca_epochs", 5)),)
-            if self.args.get("dual_mask_task_bias_calibration", False):
+            if self.args.get("dual_mask_boundary_calibration", False):
+                self._stage3_boundary_calibration(self.task_sizes[-1])
+            elif self.args.get("dual_mask_task_bias_calibration", False):
                 self._stage3_task_bias_calibration(self.task_sizes[-1])
 
     def _train(self, train_loader, test_loader):
@@ -927,18 +1057,20 @@ class Learner(BaseLearner):
             self._ca_before_metrics = None
         if bias_before is not None:
             after = result[0]['grouped']
+            calibration_name = getattr(self, '_task_bias_diagnostic_label', 'Task bias')
             logging.info(
-                "Task bias diagnostic Task %s (test-only): before_total=%.2f, before_old=%.2f, before_new=%.2f, "
+                "%s diagnostic Task %s (test-only): before_total=%.2f, before_old=%.2f, before_new=%.2f, "
                 "after_total=%.2f, after_old=%.2f, after_new=%.2f, delta_total=%+.2f, delta_old=%+.2f, delta_new=%+.2f",
-                self._cur_task, bias_before['total'], bias_before['old'], bias_before['new'],
+                calibration_name, self._cur_task, bias_before['total'], bias_before['old'], bias_before['new'],
                 after['total'], after['old'], after['new'],
                 after['total'] - bias_before['total'], after['old'] - bias_before['old'],
                 after['new'] - bias_before['new'],
             )
-            logging.info('Task bias task prediction Task %d (test-only): before=%.2f, after=%.2f, delta=%+.2f',
-                         self._cur_task, bias_before['task_prediction'], result[3] * 100,
+            logging.info('%s task prediction Task %d (test-only): before=%.2f, after=%.2f, delta=%+.2f',
+                         calibration_name, self._cur_task, bias_before['task_prediction'], result[3] * 100,
                          result[3] * 100 - bias_before['task_prediction'])
             self._task_bias_before_metrics = None
+            self._task_bias_diagnostic_label = None
         return result
 
     def _measure_ca_accuracy(self):
@@ -1094,6 +1226,7 @@ class Learner(BaseLearner):
     def _stage3_task_bias_calibration(self, task_size):
         if self.args.get("dual_mask_ca_diagnostics", False):
             self._task_bias_before_metrics = self._measure_ca_accuracy()
+            self._task_bias_diagnostic_label = "Task bias"
         devices = [device.index for device in self._multiple_gpus if device.type == "cuda"]
         with torch.random.fork_rng(devices=devices):
             torch.manual_seed(int(self.args["seed"]) + 200003 * (self._cur_task + 1))
@@ -1123,6 +1256,75 @@ class Learner(BaseLearner):
         after = (class_tasks[(logits + bias[class_tasks]).argmax(1)] == target_tasks).float().mean() * 100
         logging.info("Task bias calibration Task %d: bias=%s, pseudo_task_acc=%.2f->%.2f",
                      self._cur_task, [round(value, 5) for value in bias.tolist()], before, after)
+
+    def _stage3_boundary_calibration(self, task_size):
+        if self.args.get("dual_mask_ca_diagnostics", False):
+            self._task_bias_before_metrics = self._measure_ca_accuracy()
+            self._task_bias_diagnostic_label = "Boundary calibration"
+        devices = [device.index for device in self._multiple_gpus if device.type == "cuda"]
+        with torch.random.fork_rng(devices=devices):
+            torch.manual_seed(int(self.args["seed"]) + 200003 * (self._cur_task + 1))
+            sampled_data, sampled_label = [], []
+            class_tasks = torch.arange(len(self.task_sizes), device=self._device).repeat_interleave(
+                torch.tensor(self.task_sizes, device=self._device)
+            )
+            for class_id in range(self._total_classes):
+                task_id = int(class_tasks[class_id].item())
+                decay = (task_id + 1) / (self._cur_task + 1) * 0.1
+                mean = self._class_means[class_id].to(self._device) * (0.9 + decay)
+                covariance = self._class_covs[class_id].to(self._device)
+                distribution = MultivariateNormal(mean.float(), covariance.float())
+                sampled_data.append(distribution.sample((256,)))
+                sampled_label.extend([class_id] * 256)
+
+            features = torch.cat(sampled_data).float().to(self._device)
+            targets = torch.tensor(sampled_label, device=self._device)
+            with torch.no_grad():
+                logits = self._network(features, fc_only=True)[:, :self._total_classes]
+            bias, fit_metrics = fit_boundary_task_logit_bias(
+                logits,
+                targets,
+                self.task_sizes,
+                self.args["scale"],
+                self.args.get("dual_mask_conflict_ratio", 0.1),
+            )
+
+        self._network.task_logit_bias.zero_()
+        self._network.task_logit_bias[:len(bias)].copy_(bias)
+        before_margin, task_scores, target_tasks = task_score_margins(
+            logits, targets, self.task_sizes
+        )
+        adjusted_logits = logits + bias[class_tasks]
+        after_margin, adjusted_scores, _ = task_score_margins(
+            adjusted_logits, targets, self.task_sizes
+        )
+        selected = fit_metrics["selected_mask"]
+        old = target_tasks < len(self.task_sizes) - 1
+        before = (task_scores.argmax(1) == target_tasks).float().mean() * 100
+        after = (adjusted_scores.argmax(1) == target_tasks).float().mean() * 100
+        selected_before = (task_scores[selected].argmax(1) == target_tasks[selected]).float().mean() * 100
+        selected_after = (adjusted_scores[selected].argmax(1) == target_tasks[selected]).float().mean() * 100
+        old_margin_delta = (after_margin[old] - before_margin[old]).mean()
+        self._boundary_calibration_metrics = {
+            "selected_ratio": float(fit_metrics["selected_ratio"]),
+            "pseudo_task_before": float(before),
+            "pseudo_task_after": float(after),
+            "selected_task_before": float(selected_before),
+            "selected_task_after": float(selected_after),
+            "old_margin_delta": float(old_margin_delta),
+        }
+        logging.info(
+            "Boundary calibration Task %d: selected=%.2f%%, bias=%s, "
+            "pseudo_task_acc=%.2f->%.2f, selected_task_acc=%.2f->%.2f, old_margin_delta=%+.5f",
+            self._cur_task,
+            100 * self._boundary_calibration_metrics["selected_ratio"],
+            [round(value, 5) for value in bias.tolist()],
+            before,
+            after,
+            selected_before,
+            selected_after,
+            old_margin_delta,
+        )
 
     def _compute_class_mean(self, data_manager, check_diff=False, oracle=False):
         if hasattr(self,'_class_means') and self._class_means is not None and not check_diff:  # 已经完成过 Task 0，模型中已经存在之前算好的 _class_means（旧类别的均值矩阵）

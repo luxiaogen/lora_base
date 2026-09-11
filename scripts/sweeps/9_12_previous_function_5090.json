@@ -1,0 +1,44 @@
+{
+  "name": "imgr10_previous_function_5090_full",
+  "log_dir": "logs/shell_logs/imgr10_previous_function_5090_full",
+  "datasets": [
+    {
+      "name": "imgr10",
+      "config": "exps/dlora/imgr10.json",
+      "overrides": {
+        "rank": 64,
+        "total_sessions": 10,
+        "init_cls": 20,
+        "increment": 20
+      }
+    }
+  ],
+  "seeds": [1993, 1996, 1997],
+  "common_overrides": {
+    "init_epoch": 20,
+    "epochs": 20,
+    "ca": true,
+    "ca_epochs": 5,
+    "classification_training_mode": "task_local",
+    "dual_mask_conflict_ratio": 0.1,
+    "dual_mask_previous_function_weight": 1.0,
+    "dual_mask_boundary_calibration": false,
+    "dual_mask_task_bias_calibration": false
+  },
+  "variants": [
+    {
+      "name": "baseline",
+      "description": "Previous-task functional preservation disabled",
+      "overrides": {
+        "dual_mask_previous_function_enabled": false
+      }
+    },
+    {
+      "name": "candidate",
+      "description": "Top-10 percent previous-task functional preservation enabled",
+      "overrides": {
+        "dual_mask_previous_function_enabled": true
+      }
+    }
+  ]
+}

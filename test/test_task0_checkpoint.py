@@ -102,6 +102,19 @@ class Task0CheckpointTests(unittest.TestCase):
                 self.fail(str(error))
         self.assertTrue(restored.args['dual_mask_task_bias_calibration'])
 
+    def test_post_task0_candidates_can_resume_the_same_checkpoint(self):
+        model = self.make_model()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'task0.pt'
+            save_task0_checkpoint(path, model, {}, 'same-data')
+            for switch in ('dual_mask_previous_function_enabled', 'dual_mask_boundary_calibration'):
+                args = dict(model.args, **{switch: True})
+                try:
+                    restored, _ = load_task0_checkpoint(path, args, 'same-data')
+                except ValueError as error:
+                    self.fail('{}: {}'.format(switch, error))
+                self.assertTrue(restored.args[switch])
+
     def test_restored_next_training_updates_match_including_optimizer_reset(self):
         model = self.make_model()
         model._network.numtask = 2

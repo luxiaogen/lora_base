@@ -153,6 +153,11 @@ def _log_experiment_task(
         for name, value in functional_merge.items():
             metrics['dual_mask/functional_merge/{}'.format(name)] = float(value)
 
+    boundary_calibration = getattr(model, '_boundary_calibration_metrics', None)
+    if boundary_calibration is not None:
+        for name, value in boundary_calibration.items():
+            metrics['calibration/boundary/{}'.format(name)] = float(value)
+
     for attribute, name in (('_feature_drift_curve', 'w0/feature_drift'),('_weight_drift_curve', 'w0/weight_drift_mean'),):
         value = _last_metric(model, attribute)
         if value is not None:
