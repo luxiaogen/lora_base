@@ -21,6 +21,24 @@ from models.losses import AngularPenaltySMLoss
 from contextlib import ExitStack
 
 
+def fit_task_logit_bias(logits, targets, task_sizes, scale):
+    class_tasks = torch.arange(len(task_sizes), device=logits.device).repeat_interleave(
+        torch.tensor(task_sizes, device=logits.device)
+    )
+    bias = torch.nn.Parameter(torch.zeros(len(task_sizes), device=logits.device))
+    optimizer = optim.LBFGS([bias], max_iter=50, line_search_fn="strong_wolfe")
+
+    def closure():
+        optimizer.zero_grad()
+        centered_bias = bias - bias.mean()
+        loss = F.cross_entropy((logits + centered_bias[class_tasks]) * scale, targets)
+        loss.backward()
+        return loss
+
+    optimizer.step(closure)
+    return (bias - bias.mean()).detach()
+
+
 class Learner(BaseLearner):
     @staticmethod
     def _selective_functional_anchor_loss(current_features,w0_features,targets,prototypes,min_margin,tolerance,):
@@ -545,6 +563,7 @@ class Learner(BaseLearner):
         self._total_classes = self._known_classes + data_manager.get_task_size(self._cur_task)
         self.task_sizes.append(data_manager.get_task_size(self._cur_task))  # 当前这个 Task 新增的类别数量
         self._network.update_fc(self._total_classes)
+        self._network.use_task_logit_bias = bool(self.args.get("dual_mask_task_bias_calibration", False))
 
         logging.info('Learning on {}-{}'.format(self._known_classes, self._total_classes))
 
@@ -598,6 +617,8 @@ class Learner(BaseLearner):
         if self._cur_task > 0 and self.args['ca'] is True:
             self._stage2_compact_classifier( # CA 分类器对齐
                 self.task_sizes[-1],ca_epochs=int(self.args.get("ca_epochs", 5)),)
+            if self.args.get("dual_mask_task_bias_calibration", False):
+                self._stage3_task_bias_calibration(self.task_sizes[-1])
 
     def _train(self, train_loader, test_loader):
         try:
@@ -889,8 +910,10 @@ class Learner(BaseLearner):
     def eval_task(self):
         result = super().eval_task()
         before = getattr(self, "_ca_before_metrics", None)
+        bias_before = getattr(self, "_task_bias_before_metrics", None)
         if before is not None:
-            after = result[0]['grouped']
+            after = bias_before if bias_before is not None else result[0]['grouped']
+            task_prediction = bias_before['task_prediction'] if bias_before is not None else result[3] * 100
             logging.info(
                 "CA diagnostic Task %s (test-only): before_total=%.2f, before_old=%.2f, before_new=%.2f, "
                 "after_total=%.2f, after_old=%.2f, after_new=%.2f, delta_total=%+.2f, delta_old=%+.2f, delta_new=%+.2f",
@@ -899,9 +922,23 @@ class Learner(BaseLearner):
                 after['total'] - before['total'], after['old'] - before['old'], after['new'] - before['new'],
             )
             logging.info('CA task prediction Task %d (test-only): before=%.2f, after=%.2f, delta=%+.2f',
-                         self._cur_task, before['task_prediction'], result[3] * 100,
-                         result[3] * 100 - before['task_prediction'])
+                         self._cur_task, before['task_prediction'], task_prediction,
+                         task_prediction - before['task_prediction'])
             self._ca_before_metrics = None
+        if bias_before is not None:
+            after = result[0]['grouped']
+            logging.info(
+                "Task bias diagnostic Task %s (test-only): before_total=%.2f, before_old=%.2f, before_new=%.2f, "
+                "after_total=%.2f, after_old=%.2f, after_new=%.2f, delta_total=%+.2f, delta_old=%+.2f, delta_new=%+.2f",
+                self._cur_task, bias_before['total'], bias_before['old'], bias_before['new'],
+                after['total'], after['old'], after['new'],
+                after['total'] - bias_before['total'], after['old'] - bias_before['old'],
+                after['new'] - bias_before['new'],
+            )
+            logging.info('Task bias task prediction Task %d (test-only): before=%.2f, after=%.2f, delta=%+.2f',
+                         self._cur_task, bias_before['task_prediction'], result[3] * 100,
+                         result[3] * 100 - bias_before['task_prediction'])
+            self._task_bias_before_metrics = None
         return result
 
     def _measure_ca_accuracy(self):
@@ -1053,6 +1090,39 @@ class Learner(BaseLearner):
                 '(classifier alignment; final accuracy is logged after CA)'
             ).format(self._cur_task, losses / self._total_classes)
             logging.info(info)
+
+    def _stage3_task_bias_calibration(self, task_size):
+        if self.args.get("dual_mask_ca_diagnostics", False):
+            self._task_bias_before_metrics = self._measure_ca_accuracy()
+        devices = [device.index for device in self._multiple_gpus if device.type == "cuda"]
+        with torch.random.fork_rng(devices=devices):
+            torch.manual_seed(int(self.args["seed"]) + 200003 * (self._cur_task + 1))
+            sampled_data, sampled_label = [], []
+            for class_id in range(self._total_classes):
+                task_id = class_id // task_size
+                decay = (task_id + 1) / (self._cur_task + 1) * 0.1
+                mean = self._class_means[class_id].to(self._device) * (0.9 + decay)
+                covariance = self._class_covs[class_id].to(self._device)
+                distribution = MultivariateNormal(mean.float(), covariance.float())
+                sampled_data.append(distribution.sample((256,)))
+                sampled_label.extend([class_id] * 256)
+
+            features = torch.cat(sampled_data).float().to(self._device)
+            targets = torch.tensor(sampled_label, device=self._device)
+            with torch.no_grad():
+                logits = self._network(features, fc_only=True)[:, :self._total_classes]
+            bias = fit_task_logit_bias(logits, targets, self.task_sizes, self.args["scale"])
+
+        self._network.task_logit_bias.zero_()
+        self._network.task_logit_bias[:len(bias)].copy_(bias)
+        class_tasks = torch.arange(len(self.task_sizes), device=self._device).repeat_interleave(
+            torch.tensor(self.task_sizes, device=self._device)
+        )
+        target_tasks = class_tasks[targets]
+        before = (class_tasks[logits.argmax(1)] == target_tasks).float().mean() * 100
+        after = (class_tasks[(logits + bias[class_tasks]).argmax(1)] == target_tasks).float().mean() * 100
+        logging.info("Task bias calibration Task %d: bias=%s, pseudo_task_acc=%.2f->%.2f",
+                     self._cur_task, [round(value, 5) for value in bias.tolist()], before, after)
 
     def _compute_class_mean(self, data_manager, check_diff=False, oracle=False):
         if hasattr(self,'_class_means') and self._class_means is not None and not check_diff:  # 已经完成过 Task 0，模型中已经存在之前算好的 _class_means（旧类别的均值矩阵）

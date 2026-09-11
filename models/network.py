@@ -92,6 +92,8 @@ class MANet(nn.Module):
                 
         self.numtask = 0
         self.use_RP=False
+        self.register_buffer("task_logit_bias", torch.zeros(args["total_sessions"]))
+        self.use_task_logit_bias = False
         self.W_rand = None
         self.weight = None
 
@@ -159,8 +161,11 @@ class MANet(nn.Module):
 
         logits = []
 
-        for head in self.classifier_pool[:self.numtask]:
-            logits.append(1*(F.linear(F.normalize(image_features, p=2, dim=1),F.normalize(head.weight, p=2, dim=1))))
+        for task_id, head in enumerate(self.classifier_pool[:self.numtask]):
+            task_logits = F.linear(F.normalize(image_features, p=2, dim=1), F.normalize(head.weight, p=2, dim=1))
+            if self.use_task_logit_bias:
+                task_logits = task_logits + self.task_logit_bias[task_id]
+            logits.append(task_logits)
 
         logits = torch.cat(logits,1)
         return logits

@@ -107,6 +107,24 @@ class CADiagnosticsTests(unittest.TestCase):
         self.assertIn('before=75.00, after=82.00, delta=+7.00', '\n'.join(logs.output))
         self.assertIsNone(learner._ca_before_metrics)
 
+    def test_bias_diagnostic_separates_ca_and_bias_changes(self):
+        learner = self.make_learner()
+        learner._ca_before_metrics = {'total': 70., 'old': 60., 'new': 80., 'task_prediction': 75.}
+        learner._task_bias_before_metrics = {
+            'total': 74., 'old': 63., 'new': 85., 'task_prediction': 80.
+        }
+        result = ({'grouped': {'total': 76., 'old': 66., 'new': 86.}}, None, None, 0.84)
+        with patch.object(BaseLearner, 'eval_task', return_value=result):
+            with self.assertLogs(level='INFO') as logs:
+                learner.eval_task()
+        output = '\n'.join(logs.output)
+        self.assertIn('CA diagnostic Task 1', output)
+        self.assertIn('delta_total=+4.00', output)
+        self.assertIn('Task bias diagnostic Task 1', output)
+        self.assertIn('delta_total=+2.00', output)
+        self.assertIn('before=80.00, after=84.00, delta=+4.00', output)
+        self.assertIsNone(learner._task_bias_before_metrics)
+
 
 if __name__ == '__main__':
     unittest.main()

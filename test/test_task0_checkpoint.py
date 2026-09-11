@@ -90,6 +90,18 @@ class Task0CheckpointTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     load_task0_checkpoint(path, args, signature)
 
+    def test_task_bias_candidate_can_resume_the_same_task0_checkpoint(self):
+        model = self.make_model()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'task0.pt'
+            save_task0_checkpoint(path, model, {}, 'same-data')
+            args = dict(model.args, dual_mask_task_bias_calibration=True)
+            try:
+                restored, _ = load_task0_checkpoint(path, args, 'same-data')
+            except ValueError as error:
+                self.fail(str(error))
+        self.assertTrue(restored.args['dual_mask_task_bias_calibration'])
+
     def test_restored_next_training_updates_match_including_optimizer_reset(self):
         model = self.make_model()
         model._network.numtask = 2
