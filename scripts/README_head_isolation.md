@@ -17,24 +17,40 @@
 
 先在各机器激活原训练环境，从仓库根目录启动。脚本不切换目录、不修改数据集，也不切换 fused SDPA。
 
+使用现有 `lrun 脚本 总日志` 启动方式时，每台机器调用自己的入口文件：
+
+```fish
+mkdir -p logs
+# 3090 上执行
+lrun scripts/9_11_head_isolation_3090.sh ./logs/9_11_head_isolation_3090.log
+
+# 5090 上执行
+lrun scripts/9_11_head_isolation_5090.sh ./logs/9_11_head_isolation_5090.log
+```
+
+两个入口都调用 `9_11_head_isolation_pair.sh`，只选择实验模式。
+数据路径统一读取各服务器 `exps/dlora/imgr10.json` 中的 `data_path`，脚本不覆盖它，无需再传目录。
+可用 `bash scripts/9_11_head_isolation_3090.sh --dry-run` 检查将要执行的命令（5090 同理）。
+`lrun` 是服务器已有的自定义命令，本仓库不定义它；直接前台运行仍可使用下面的 Bash 命令。
+
 ```bash
 # CPU 梯度、检查点、训练循环测试；不加载图像数据。
 bash scripts/9_11_head_isolation_pair.sh --smoke
 
-# 3090：本机基线 vs 仅新样本 detached 校准。替换为本机数据路径。
-bash scripts/9_11_head_isolation_pair.sh 3090 /path/to/imagenet-r
+# 3090：本机基线 vs 仅新样本 detached 校准。
+bash scripts/9_11_head_isolation_pair.sh 3090
 
 # 5090：本机基线 vs detached 校准 + 旧伪特征。
-bash scripts/9_11_head_isolation_pair.sh 5090 /mnt/disk1/lys/imagenet-r
+bash scripts/9_11_head_isolation_pair.sh 5090
 ```
 
 默认只跑 seed1993；两台机器**各自生成**一个 Task0 checkpoint，然后基线和候选都从该文件恢复，训练 Task1–2。保持原 10-task 类划分与每任务 20 epochs，不把 total_sessions 改成 3。每台机器共 3 次进程启动、5 个任务的训练量。
 
-可先打印完整命令，不训练：`bash scripts/9_11_head_isolation_pair.sh --dry-run 3090 /path/to/imagenet-r`。
+可先打印完整命令，不训练：`bash scripts/9_11_head_isolation_pair.sh --dry-run 3090`。
 可选环境变量：`DEVICE`（默认 0）、`WANDB_MODE`（默认 online）、`PYTHON_BIN`（默认 python）、`SEEDS`（默认 1993，空格分隔）。Fish 多 seed 示例：
 
 ```fish
-env SEEDS="1993 1996 1997" bash scripts/9_11_head_isolation_pair.sh 3090 /path/to/imagenet-r
+env SEEDS="1993 1996 1997" bash scripts/9_11_head_isolation_pair.sh 3090
 ```
 
 不要直接把两个 GPU 上的候选分数相减；先计算各机器相对本机基线的变化。要严格比较有无 replay，之后需在同一 GPU 上补相应对照。

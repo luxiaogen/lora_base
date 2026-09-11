@@ -2,9 +2,10 @@
 set -euo pipefail
 
 # Run from repository root. No cd. One script, two machine-specific comparisons.
-# bash scripts/9_11_head_isolation_pair.sh 3090 /path/to/imagenet-r
-# bash scripts/9_11_head_isolation_pair.sh 5090 /path/to/imagenet-r
-# --smoke: CPU tests only. --dry-run 3090 /path: print commands, no training.
+# bash scripts/9_11_head_isolation_pair.sh 3090
+# bash scripts/9_11_head_isolation_pair.sh 5090
+# Data path comes from exps/dlora/imgr10.json on each machine.
+# --smoke: CPU tests only. --dry-run 3090: print commands, no training.
 [[ -f main.py ]] || { echo 'Run from the repository root.' >&2; exit 2; }
 PYTHON_BIN=${PYTHON_BIN:-python}
 export PYTHONUNBUFFERED=1
@@ -16,13 +17,12 @@ fi
 dry_run=false
 if [[ ${1:-} == --dry-run ]]; then dry_run=true; shift; fi
 machine=${1:-}
-data_root=${2:-}
 case "$machine" in
     3090) candidate=task_local_head ;;
     5090) candidate=task_local_head_replay ;;
-    *) echo 'Usage: bash scripts/9_11_head_isolation_pair.sh [--dry-run] 3090|5090 /path/to/imagenet-r' >&2; exit 2 ;;
+    *) echo 'Usage: bash scripts/9_11_head_isolation_pair.sh [--dry-run] 3090|5090' >&2; exit 2 ;;
 esac
-[[ -n $data_root ]] || { echo 'Supply the existing ImageNet-R train/test root.' >&2; exit 2; }
+[[ $# == 1 ]] || { echo 'Data path is read from exps/dlora/imgr10.json; do not pass a directory.' >&2; exit 2; }
 read -r -a seeds <<< "${SEEDS:-1993}"
 for seed in "${seeds[@]}"; do
     [[ $seed =~ ^[0-9]+$ ]] || { echo 'SEEDS must contain space-separated integer seeds.' >&2; exit 2; }
@@ -30,6 +30,8 @@ done
 if $dry_run; then
     run_dir="logs/shell_logs/head_isolation_${machine}_DRY_RUN"
 else
+    data_root=$("$PYTHON_BIN" -c 'import json; print(json.load(open("exps/dlora/imgr10.json"))["data_path"])')
+    echo "Dataset from exps/dlora/imgr10.json: $data_root"
     [[ -d $data_root/train && -d $data_root/test ]] || { echo 'Existing train/ and test/ required; will not auto-split data.' >&2; exit 2; }
     PYTHONWARNINGS=ignore "$PYTHON_BIN" -m unittest "${tests[@]}"
     "$PYTHON_BIN" -c 'import torch; print("PyTorch:", torch.__version__, "CUDA:", torch.version.cuda); print("Visible GPU:", torch.cuda.get_device_name(int(__import__("os").environ.get("DEVICE", "0"))))'
@@ -40,7 +42,7 @@ else
 fi
 
 common=(--config exps/dlora/imgr10.json
-    --set "data_path=$data_root" --set "device=\"${DEVICE:-0}\""
+    --set "device=\"${DEVICE:-0}\""
     --set total_sessions=10 --set init_cls=20 --set increment=20
     --set init_epoch=20 --set epochs=20 --set rank=64 --set ca=true --set ca_epochs=5
     --set dual_mask_ca_diagnostics=true --set dual_mask_private_rank=0

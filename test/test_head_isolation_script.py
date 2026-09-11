@@ -8,8 +8,8 @@ import unittest
 class HeadIsolationScriptTests(unittest.TestCase):
     def test_both_variants_have_valid_device_and_same_paired_checkpoint(self):
         for machine, mode in [('3090', 'task_local_head'), ('5090', 'task_local_head_replay')]:
-            result = subprocess.run(['bash', 'scripts/9_11_head_isolation_pair.sh', '--dry-run', machine,
-                                     '/data with spaces/imagenet-r'], check=True, capture_output=True, text=True,
+            result = subprocess.run(['bash', f'scripts/9_11_head_isolation_{machine}.sh', '--dry-run'],
+                                    check=True, capture_output=True, text=True,
                                     env=dict(os.environ, SEEDS='1993'))
             runs = []
             for line in result.stdout.splitlines():
@@ -32,7 +32,7 @@ class HeadIsolationScriptTests(unittest.TestCase):
                 self.assertEqual(args['seed'], [1993])
                 self.assertEqual(args['total_sessions'], 10)
                 self.assertEqual(args['ca_epochs'], 5)
-                self.assertEqual(args['data_path'], '/data with spaces/imagenet-r')
+                self.assertNotIn('data_path', args)  # Keep the server's JSON data_path.
             self.assertEqual(runs[0]['max_tasks'], 1)
             self.assertEqual(runs[1]['max_tasks'], 3)
             self.assertEqual(runs[2]['max_tasks'], 3)
@@ -45,7 +45,7 @@ class HeadIsolationScriptTests(unittest.TestCase):
                              {k: v for k, v in runs[2].items() if k not in allowed})
 
     def test_multiple_seeds_generate_independent_pairs(self):
-        result = subprocess.run(['bash', 'scripts/9_11_head_isolation_pair.sh', '--dry-run', '5090', '/data/imgr'],
+        result = subprocess.run(['bash', 'scripts/9_11_head_isolation_pair.sh', '--dry-run', '5090'],
                                 check=True, capture_output=True, text=True, env=dict(os.environ, SEEDS='1993 1996 1997'))
         self.assertEqual(result.stdout.count('Starting '), 9)
         for seed in (1993, 1996, 1997):
