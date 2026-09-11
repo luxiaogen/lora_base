@@ -8,7 +8,8 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from methods.dlora import Learner
 from models.losses import AngularPenaltySMLoss
-from models.network import MANet
+from models.network import MANet, ViT
+from models.attention import Attention_LoRA
 
 
 class TinyEncoder(nn.Module):
@@ -21,6 +22,77 @@ class TinyEncoder(nn.Module):
 
 
 class CrossTaskTrainingTests(unittest.TestCase):
+    def make_vit_learner(self, task=1):
+        learner = self.make_learner(task=task)
+        learner._network.image_encoder = ViT(img_size=8, patch_size=4, embed_dim=4, depth=1,
+                                             num_heads=1, n_tasks=2, rank=2, num_classes=0)
+        learner._network.image_encoder.requires_grad_(False)
+        for module in learner._network.image_encoder.modules():
+            if isinstance(module, Attention_LoRA):
+                module._init_params(dict(use_slora=True, use_plora=True, lora_A_init='kaiming',
+                                         dual_mask_task0_gate_mode='unmasked', dual_mask_private_conflict_mode='global'))
+                module.before_task(task)
+                module.set_task_and_stage(task, 0)
+        return learner
+
+    def test_real_vit_lora_gradient_is_local_only_with_trainable_new_head(self):
+        torch.manual_seed(19)
+        base = self.make_vit_learner()
+        images, targets = torch.randn(4, 3, 8, 8), torch.tensor([0, 1, 0, 1])
+        output = base._network(images)
+        self.criterion()(output['logits'], targets).backward()
+        for mode in ('task_local_head', 'task_local_head_replay'):
+            candidate = copy.deepcopy(base)
+            candidate._network.zero_grad(set_to_none=True)
+            candidate.args['classification_training_mode'] = mode
+            output = candidate._network(images)
+            loss, _ = candidate._classification_training_loss(output, targets, self.criterion(), candidate._prepare_training_replay())
+            loss.backward()
+            reference = dict(base._network.named_parameters())
+            lora_norm = 0.
+            for name, parameter in candidate._network.named_parameters():
+                if 'lora' in name and parameter.requires_grad:
+                    self.assertIsNotNone(parameter.grad, name)
+                    self.assertTrue(torch.allclose(parameter.grad, reference[name].grad, atol=1e-7), name)
+                    lora_norm += parameter.grad.norm().item()
+            self.assertGreater(lora_norm, 0.)
+            self.assertIsNone(candidate._network.classifier_pool[0].weight.grad)
+            head_delta = candidate._network.classifier_pool[1].weight.grad - base._network.classifier_pool[1].weight.grad
+            self.assertGreater(head_delta.norm().item(), 0.)
+
+    def test_head_isolation_preserves_encoder_gradient_and_changes_current_head(self):
+        for mode in ('task_local_head', 'task_local_head_replay'):
+            base = self.make_learner('task_local')
+            isolated = copy.deepcopy(base)
+            isolated.args['classification_training_mode'] = mode
+            targets = torch.tensor([0, 1, 0, 1])
+            for learner in (base, isolated):
+                output = learner._network(torch.eye(4))
+                loss, metrics = learner._classification_training_loss(
+                    output, targets, self.criterion(), learner._prepare_training_replay())
+                loss.backward()
+            self.assertTrue(torch.allclose(base._network.image_encoder.proj.weight.grad,
+                                           isolated._network.image_encoder.proj.weight.grad))
+            self.assertGreater(isolated._network.image_encoder.proj.weight.grad.norm().item(), 0)
+            self.assertIsNone(isolated._network.classifier_pool[0].weight.grad)
+            head_delta = isolated._network.classifier_pool[1].weight.grad - base._network.classifier_pool[1].weight.grad
+            self.assertGreater(head_delta.norm().item(), 0)
+            self.assertIn('classification_local', metrics)
+            self.assertIn('classification_head', metrics)
+
+    def test_extra_head_loss_has_zero_feature_gradient(self):
+        for mode in ('task_local_head', 'task_local_head_replay'):
+            learner = self.make_learner(mode)
+            output = learner._network(torch.eye(4))
+            targets = torch.tensor([0, 1, 0, 1])
+            loss, _ = learner._classification_training_loss(
+                output, targets, self.criterion(), learner._prepare_training_replay())
+            extra = loss - self.criterion()(output['logits'], targets)
+            feature_grad, head_grad = torch.autograd.grad(
+                extra, (output['features'], learner._network.classifier_pool[1].weight))
+            self.assertTrue(torch.allclose(feature_grad, torch.zeros_like(feature_grad), atol=1e-7))
+            self.assertGreater(head_grad.norm().item(), 0)
+
     def make_learner(self, mode='task_local', task=1):
         learner = Learner.__new__(Learner)
         learner.args = {'classification_training_mode': mode, 'seed': 1993}
@@ -43,7 +115,8 @@ class CrossTaskTrainingTests(unittest.TestCase):
         return AngularPenaltySMLoss(s=5.0, m=0.1)
 
     def test_default_and_task0_exactly_keep_local_loss_and_rng(self):
-        for mode, task in [('task_local', 1), ('all_seen', 0), ('all_seen_replay', 0)]:
+        for mode, task in [('task_local', 1), ('all_seen', 0), ('all_seen_replay', 0),
+                           ('task_local_head', 0), ('task_local_head_replay', 0)]:
             learner = self.make_learner(mode, task)
             if mode == 'task_local':
                 learner.args.pop('classification_training_mode')
@@ -107,7 +180,7 @@ class CrossTaskTrainingTests(unittest.TestCase):
                                       replay_learner._network.image_encoder.proj.weight.grad))
 
     def test_real_training_loop_smoke_all_modes(self):
-        for mode in ('task_local', 'all_seen', 'all_seen_replay'):
+        for mode in ('task_local', 'all_seen', 'all_seen_replay', 'task_local_head', 'task_local_head_replay'):
             learner = self.make_learner(mode)
             data = TensorDataset(torch.arange(4), torch.eye(4), torch.tensor([2, 3, 2, 3]))
             loader = DataLoader(data, batch_size=2)
@@ -133,7 +206,7 @@ class CrossTaskTrainingTests(unittest.TestCase):
         data = TensorDataset(torch.arange(4), torch.eye(4), torch.tensor([0, 1, 0, 1]))
         loader = DataLoader(data, batch_size=2)
         results = []
-        for mode in ('legacy', 'task_local', 'all_seen', 'all_seen_replay'):
+        for mode in ('legacy', 'task_local', 'all_seen', 'all_seen_replay', 'task_local_head', 'task_local_head_replay'):
             learner = copy.deepcopy(initial)
             learner.args['classification_training_mode'] = 'task_local' if mode == 'legacy' else mode
             optimizer = torch.optim.SGD([p for p in learner._network.parameters() if p.requires_grad], lr=0.01)

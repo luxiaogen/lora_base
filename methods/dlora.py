@@ -685,13 +685,13 @@ class Learner(BaseLearner):
 
     def _classification_mode(self):
         mode = self.args.get('classification_training_mode', 'task_local')
-        if mode not in {'task_local', 'all_seen', 'all_seen_replay'}:
-            raise ValueError('classification_training_mode must be task_local, all_seen, or all_seen_replay')
+        if mode not in {'task_local', 'all_seen', 'all_seen_replay', 'task_local_head', 'task_local_head_replay'}:
+            raise ValueError('Unknown classification_training_mode: ' + str(mode))
         return 'task_local' if self._cur_task == 0 else mode
 
     @torch.no_grad()
     def _prepare_training_replay(self):
-        if self._classification_mode() != 'all_seen_replay':
+        if self._classification_mode() not in {'all_seen_replay', 'task_local_head_replay'}:
             return None
         # A task-local bank of TRAIN statistics, not stored images or test features.
         # Separate RNG leaves data augmentation, LoRA initialization and CA RNG untouched.
@@ -712,25 +712,34 @@ class Learner(BaseLearner):
         return features, labels, generator
 
     def _classification_training_loss(self, output, targets, loss_cos, replay):
-        if self._classification_mode() == 'task_local':
+        mode = self._classification_mode()
+        if mode == 'task_local':
             return loss_cos(output['logits'], targets), {}
-        # fc_only preserves gradients into real features, even through frozen old heads.
-        logits = self._network(output['features'], fc_only=True)
+        head_only = mode in {'task_local_head', 'task_local_head_replay'}
+        features = output['features'].detach() if head_only else output['features']
+        # Only the new head-calibration modes detach; legacy all_seen keeps its gradients.
+        logits = self._network(features, fc_only=True)
         global_targets = targets + self._known_classes
         real_loss = loss_cos(logits, global_targets)
         metrics = {
             'classification_real': real_loss.detach(),
             'train_global_acc': (logits.argmax(dim=1) == global_targets).float().mean().detach() * 100,
         }
-        if replay is None:
-            return real_loss, metrics
-        features, labels, generator = replay
-        indices = torch.randint(len(labels), (len(targets),), device=labels.device, generator=generator)
-        replay_logits = self._network(features[indices], fc_only=True)
-        replay_loss = loss_cos(replay_logits, labels[indices])
-        metrics['classification_replay'] = replay_loss.detach()
-        # Equal-sized real/replay batches, unit weight; do not halve real-feature gradients.
-        return real_loss + replay_loss, metrics
+        calibration_loss = real_loss
+        if replay is not None:
+            features, labels, generator = replay
+            indices = torch.randint(len(labels), (len(targets),), device=labels.device, generator=generator)
+            replay_logits = self._network(features[indices], fc_only=True)
+            replay_loss = loss_cos(replay_logits, labels[indices])
+            metrics['classification_replay'] = replay_loss.detach()
+            calibration_loss = calibration_loss + replay_loss
+        if head_only:
+            local_loss = loss_cos(output['logits'], targets)
+            metrics['classification_local'] = local_loss.detach()
+            metrics['classification_head'] = calibration_loss.detach()
+            return local_loss + calibration_loss, metrics
+        # Legacy all_seen/replay retains unit weights and its original real-feature gradient.
+        return calibration_loss, metrics
 
     def train_function(self, train_loader, test_loader, optimizer, scheduler):
         logging.info('Trainable params: {}'.format(count_parameters(self._network, True)))
