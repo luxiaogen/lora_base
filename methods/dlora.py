@@ -186,6 +186,7 @@ class Learner(BaseLearner):
             for module in modules:
                 task = self._cur_task
                 if self.args.get("use_slora", True):
+                    # Retain baseline branch averaging: inactive S is initialized at zero and frozen.
                     conflict_losses.append(module._joint_conflict_regularization(module.S_lora[task],isolated=False,))
                 if (task > 0 and self.args.get("use_plora", True) and hasattr(module, "P_lora") and module.P_lora[task] is not None):
                     conflict_losses.append(module._joint_conflict_regularization(module.P_lora[task],isolated=True,))
@@ -607,6 +608,8 @@ class Learner(BaseLearner):
         current_classifier = "classifier_pool" + "." + str(current_task) + "."
 
         self._network.to(self._device)
+        if self.args.get("dual_mask_s_task0_only", False) and not (self.args["use_slora"] and self.args["use_plora"]):
+            raise ValueError("dual_mask_s_task0_only requires use_slora=true and use_plora=true")
         for name, param in self._network.named_parameters():
             param.requires_grad_(False)  # 1. 先把主干 (ViT Backbone) 所有参数全部冻结
             if name.startswith(current_classifier):
@@ -625,6 +628,12 @@ class Learner(BaseLearner):
             module.set_task_and_stage(task=self._cur_task, layer_idx=kk)  # 设置lora可不可训练
             kk += 1
 
+        for layer, module in enumerate(self._iter_lora_modules()):
+            s_unit, p_unit = module.S_lora[self._cur_task], module.P_lora[self._cur_task]
+            s_params = sum(p.numel() for p in s_unit.parameters() if p.requires_grad)
+            p_params = sum(p.numel() for p in p_unit.parameters() if p.requires_grad)
+            logging.info("Task %s layer %s branch training: S_active=%s, S_trainable=%s, P_trainable=%s, P_rank=%s",
+                         self._cur_task, layer, module._shared_branch_active(self._cur_task), s_params, p_params, p_unit.r)
 
         ############################## set learning rates ##################################
         flora_params, other_params = [], []  # flora_params:收集的是名称带 lora 的参数（即各个 Transformer 层中 LoRA 的 B 矩阵）

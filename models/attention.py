@@ -607,6 +607,9 @@ class Attention_LoRA(nn.Module):
             logging.info("Unknown lora_A_init=%s; using orthogonal A init.", self.lora_A_init)
         return _random_fixed_A_init(dim, rank, device, dtype)
 
+    def _shared_branch_active(self, task: int):
+        return task == 0 or (self.use_slora and not self.args.get("dual_mask_s_task0_only", False))
+
     def before_task(self, task: int):
 
         t = int(task)
@@ -683,7 +686,7 @@ class Attention_LoRA(nn.Module):
             self.S_lora[task].B.weight.requires_grad_(True)
             return
 
-        if self.use_slora:
+        if self._shared_branch_active(task):
             self.S_lora[task].B.weight.requires_grad_(True)
         if self.use_plora and self.P_lora[task] is not None:
             self.P_lora[task].B.weight.requires_grad_(True)
@@ -1000,7 +1003,7 @@ class Attention_LoRA(nn.Module):
                 current_delta = current_delta + self._safe_delta(raw_delta,isolated=False,)
         else:
             unit_s = self.S_lora[task]
-            if unit_s is not None and (self.use_slora or task == 0):
+            if unit_s is not None and self._shared_branch_active(task):
                 raw_delta_s = self.slora_gamma * (unit_s.B_weight @ unit_s.A_weight)
                 current_delta = current_delta + self._safe_delta(raw_delta_s,isolated=False,)
 
@@ -1289,7 +1292,7 @@ class Attention_LoRA(nn.Module):
         plora_gamma = float(self.plora_gamma)
         out = zero_output
 
-        if unit_s is not None and (self.use_slora or t_idx == 0):
+        if unit_s is not None and self._shared_branch_active(t_idx):
             out = out + slora_gamma * self._masked_unit_forward(x, unit_s, isolated=False, residual_scale=slora_gamma)
 
         if t_idx > 0 and self.use_plora and unit_p is not None:
@@ -1336,7 +1339,7 @@ class Attention_LoRA(nn.Module):
         if not self.use_slora and not self.use_plora: # isolated=False：走共享分支的保护路径
             branch_deltas.append(raw_delta("S", self.S_lora[t], 1.0, isolated=False))
         else:
-            if self.use_slora or t == 0:
+            if self._shared_branch_active(t):
                 branch_deltas.append(raw_delta("S",self.S_lora[t],float(self.slora_gamma),isolated=False,))
             if t > 0 and self.use_plora and self.P_lora[t] is not None:
                 branch_deltas.append(raw_delta("P",self.P_lora[t],float(self.plora_gamma),isolated=True,))
