@@ -20,6 +20,7 @@ from torch.distributions.multivariate_normal import MultivariateNormal
 from utils.toolkit import count_parameters
 from models.losses import AngularPenaltySMLoss
 from contextlib import ExitStack
+from utils.task_routing import predict_with_task_evidence
 
 
 def fit_task_logit_bias(logits, targets, task_sizes, scale):
@@ -184,6 +185,9 @@ class Learner(BaseLearner):
         self.topk = 1  # origin is 5
         self.class_num = self._network.class_num
         self.task_sizes = []
+        self.classification_inference_mode = str(
+            args.get("classification_inference_mode", "global")
+        ).lower()
 
         # class prototypes
         self._class_means = None
@@ -1071,7 +1075,45 @@ class Learner(BaseLearner):
                          result[3] * 100 - bias_before['task_prediction'])
             self._task_bias_before_metrics = None
             self._task_bias_diagnostic_label = None
+        if self.args.get("classification_inference_diagnostics", False):
+            self._log_inference_mode_diagnostics()
         return result
+
+    def _log_inference_mode_diagnostics(self):
+        modes = ("global", "centered_max", "top1_top2")
+        predictions = {mode: [] for mode in modes}
+        predicted_tasks = {mode: [] for mode in modes}
+        targets_all = []
+        task_targets = []
+        self._network.eval()
+        for _, (_, inputs, targets) in enumerate(self.test_loader):
+            inputs = inputs.to(self._device)
+            with torch.no_grad():
+                outputs = self._network.interface(inputs)
+            targets_all.append(targets.numpy())
+            task_targets.append(targets // self.class_num)
+            for mode in modes:
+                classes, tasks = predict_with_task_evidence(outputs, self.task_sizes, mode)
+                predictions[mode].append(classes.cpu().numpy())
+                predicted_tasks[mode].append(tasks.cpu())
+
+        targets_array = np.concatenate(targets_all)
+        task_targets = torch.cat(task_targets)
+        for mode in modes:
+            prediction = np.concatenate(predictions[mode])
+            task_prediction = torch.cat(predicted_tasks[mode])
+            metrics = self.accuracy(prediction, targets_array, accuracy_matrix=False)
+            task_accuracy = (task_prediction == task_targets).float().mean().item() * 100
+            logging.info(
+                "Inference mode diagnostic Task %d (test-only): mode=%s, "
+                "total=%.2f, old=%.2f, new=%.2f, task_prediction=%.2f",
+                self._cur_task,
+                mode,
+                metrics["total"],
+                metrics["old"],
+                metrics["new"],
+                task_accuracy,
+            )
 
     def _measure_ca_accuracy(self):
         # Test-only observation; restore RNG so the extra loader pass cannot alter CA samples.
@@ -1090,7 +1132,7 @@ class Learner(BaseLearner):
             for module, training in modes:
                 module.training = training
 
-    def _eval_cnn(self, loader):
+    def _eval_cnn(self, loader, inference_mode=None):
         self._network.eval()
         y_pred, y_true = [], []
         y_pred_with_task = []
@@ -1105,9 +1147,12 @@ class Learner(BaseLearner):
                 y_true_task.append(task_id)
                 # 前向推理，不给真实 task id  | 全局 logits
                 outputs = self._network.interface(inputs)  # [bs,C*num_task]
-            # topk1 [bs]
-            predicts = torch.topk(outputs, k=self.topk, dim=1, largest=True, sorted=True)[1].view(-1)  # [bs, topk]
-            y_pred_task.append((predicts // self.class_num).cpu())
+            predicts, predicted_tasks = predict_with_task_evidence(
+                outputs,
+                self.task_sizes,
+                inference_mode or self.classification_inference_mode,
+            )
+            y_pred_task.append(predicted_tasks.cpu())
             # CNN top1 with task
             outputs_with_task = torch.zeros_like(outputs)[:, :self.class_num]  # 创建一个只装 20 类 logits 的矩阵
             for idx, i in enumerate(targets // self.class_num):  # 用真实标签算真实 task id
@@ -1131,7 +1176,9 @@ class Learner(BaseLearner):
             inputs = inputs.to(self._device)
             with torch.no_grad():
                 outputs = model.interface(inputs)
-            predicts = torch.max(outputs, dim=1)[1]
+            predicts, _ = predict_with_task_evidence(
+                outputs, self.task_sizes, self.classification_inference_mode
+            )
             correct += (predicts.cpu() == targets).sum()
             total += len(targets)
 
