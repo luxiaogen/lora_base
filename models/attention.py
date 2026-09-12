@@ -1288,11 +1288,12 @@ class Attention_LoRA(nn.Module):
         slora_gamma = float(self.slora_gamma)
         plora_gamma = float(self.plora_gamma)
         out = zero_output
+        diagnostic_mode = getattr(self, "_diagnostic_branch_mode", "both")
 
-        if unit_s is not None and (self.use_slora or t_idx == 0):
+        if unit_s is not None and (self.use_slora or t_idx == 0) and diagnostic_mode != "p_only":
             out = out + slora_gamma * self._masked_unit_forward(x, unit_s, isolated=False, residual_scale=slora_gamma)
 
-        if t_idx > 0 and self.use_plora and unit_p is not None:
+        if t_idx > 0 and self.use_plora and unit_p is not None and diagnostic_mode != "s_only":
             ## P_lora 只能在 W0 非重要区域更新
             out = out + plora_gamma * self._masked_unit_forward(x, unit_p, isolated=True, residual_scale=plora_gamma)
 

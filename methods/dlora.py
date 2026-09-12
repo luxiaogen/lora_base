@@ -673,6 +673,8 @@ class Learner(BaseLearner):
             self._network = self._network.module
 
         lora_modules = list(self._iter_lora_modules())
+        if self._cur_task > 0 and self.args.get("dual_mask_branch_contribution_diagnostic", False):
+            self._measure_branch_contribution(test_loader, lora_modules)
         if bool(self.args.get("dual_mask_functional_merge_calibration", False)):
             calibration_loader = getattr(self, "w0_loader", train_loader)
             self._calibrate_functional_merge(calibration_loader)
@@ -853,6 +855,42 @@ class Learner(BaseLearner):
             np.random.set_state(numpy_state)
             for module, training in modes:
                 module.training = training
+
+    def _measure_branch_contribution(self, loader, lora_modules):
+        # Test-only diagnostic before merge/CA; never used to choose a merge or update weights.
+        python_state, numpy_state = random.getstate(), np.random.get_state()
+        modes = [(module, module.training) for module in self._network.modules()]
+        previous = [getattr(module, "_diagnostic_branch_mode", None) for module in lora_modules]
+        devices = [device.index for device in self._multiple_gpus if device.type == 'cuda']
+        results = {}
+        try:
+            with torch.random.fork_rng(devices=devices):
+                for branch_mode in ("both", "s_only", "p_only"):
+                    for module in lora_modules:
+                        module._diagnostic_branch_mode = branch_mode
+                    prediction, _, targets, predicted_task, true_task = self._eval_cnn(loader)
+                    accuracy = self.accuracy(prediction, targets, accuracy_matrix=False)
+                    results[branch_mode] = {
+                        "total": float(accuracy["total"]),
+                        "old": float(accuracy["old"]),
+                        "new": float(accuracy["new"]),
+                        "task_prediction": float((predicted_task == true_task).float().mean().item() * 100.0),
+                    }
+        finally:
+            for module, value in zip(lora_modules, previous):
+                if value is None:
+                    module.__dict__.pop("_diagnostic_branch_mode", None)
+                else:
+                    module._diagnostic_branch_mode = value
+            random.setstate(python_state)
+            np.random.set_state(numpy_state)
+            for module, training in modes:
+                module.training = training
+        self._last_branch_contribution = results
+        for branch_mode, scores in results.items():
+            logging.info("Task %s pre-merge branch contribution (test-only) %s: total=%.2f, old=%.2f, new=%.2f, task_prediction=%.2f",
+                         self._cur_task, branch_mode, scores["total"], scores["old"], scores["new"], scores["task_prediction"])
+        return results
 
     def _eval_cnn(self, loader):
         self._network.eval()

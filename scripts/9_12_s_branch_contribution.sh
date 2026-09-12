@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Run from repository root: lrun scripts/9_12_s_branch_contribution.sh ./logs/9_12_s_branch_contribution.log
+[[ -f main.py ]] || { echo 'Run from the repository root.' >&2; exit 2; }
+PYTHON_BIN=${PYTHON_BIN:-python}
+export PYTHONUNBUFFERED=1
+
+if [[ ${1:-} == --check ]]; then
+    PYTHONWARNINGS=ignore "$PYTHON_BIN" -m unittest test.test_branch_contribution test.test_private_rank
+    exit 0
+fi
+dry_run=false
+if [[ ${1:-} == --dry-run ]]; then dry_run=true; shift; fi
+[[ $# == 0 ]] || { echo 'Usage: bash scripts/9_12_s_branch_contribution.sh [--check|--dry-run]' >&2; exit 2; }
+
+if ! $dry_run; then
+    data_root=$("$PYTHON_BIN" -c 'import json; print(json.load(open("exps/dlora/imgr10.json"))["data_path"])')
+    echo "Dataset from exps/dlora/imgr10.json: $data_root"
+    [[ -d $data_root/train && -d $data_root/test ]] || { echo 'Existing train/ and test/ required; will not auto-split data.' >&2; exit 2; }
+    PYTHONWARNINGS=ignore "$PYTHON_BIN" -m unittest test.test_branch_contribution test.test_private_rank
+    "$PYTHON_BIN" -c 'import torch; print("PyTorch:", torch.__version__, "CUDA:", torch.version.cuda); print("Visible GPU:", torch.cuda.get_device_name(int(__import__("os").environ.get("DEVICE", "0"))))'
+    echo "Code revision: $(git rev-parse --short HEAD)"
+    git status --short
+    mkdir -p logs/shell_logs
+    run_dir=$(mktemp -d "logs/shell_logs/s_branch_contribution_$(date +%Y%m%d_%H%M%S)_XXXXXX")
+else
+    run_dir=logs/shell_logs/s_branch_contribution_DRY_RUN
+fi
+
+name=imgr10_sp_branch_contribution_seed1993
+cmd=("$PYTHON_BIN" main.py --config exps/dlora/imgr10.json
+    --set 'seed=[1993]' --set "prefix=${name}_$(basename "$run_dir")"
+    --set "device=\"${DEVICE:-0}\"" --set max_tasks=3
+    --set total_sessions=10 --set init_cls=20 --set increment=20
+    --set use_slora=true --set use_plora=true
+    --set slora_gamma=0.5 --set plora_gamma=0.75
+    --set init_epoch=20 --set epochs=20 --set rank=64 --set ca=true --set ca_epochs=5
+    --set dual_mask_ca_diagnostics=true --set dual_mask_private_rank=0
+    --set dual_mask_competence_adaptive=true --set dual_mask_plasticity_adaptive=true
+    --set dual_mask_protect_strength_mode=competence --set dual_mask_task0_gate_mode=unmasked
+    --set dual_mask_anchor_reg_enabled=true --set dual_mask_anchor_reg_weight=10
+    --set dual_mask_anchor_reg_task0_only=true --set dual_mask_conflict_energy_adaptive=true
+    --set dual_mask_conflict_energy_ratio_floor=true --set dual_mask_conflict_ratio=0.1
+    --set dual_mask_conflict_strength=0.5 --set dual_mask_conflict_old_overlap_adaptive=true
+    --set dual_mask_private_conflict_mode=global --set dual_mask_conflict_merge_mode=suppress
+    --set dual_mask_conflict_reg_enabled=false --set dual_mask_reg_weight=0.01
+    --set dual_mask_selective_anchor_enabled=false --set dual_mask_functional_merge_calibration=false
+    --set dual_mask_safe_residual_enabled=false --set dual_mask_track_w0_metrics=true --set dual_mask_vis=false
+    --set dual_mask_branch_contribution_diagnostic=true
+    --set experiment_tracker=wandb --set wandb_project=LoDA_ICML2026
+    --set "wandb_mode=${WANDB_MODE:-online}" --set wandb_group=imgr10_s_branch_contribution
+    --set wandb_tags=imgr10,sp_branch_contribution,ca5,partial_task2,seed1993)
+
+echo '============================================================'
+echo "Starting $name (Task0-2; pre-merge read-only S/P ablation at Task1-2)"
+printf '%q ' "${cmd[@]}"
+printf '\n'
+if ! $dry_run; then
+    "${cmd[@]}" 2>&1 | tee "$run_dir/$name.log"
+    echo "Finished diagnostic. Run log: $run_dir/$name.log"
+fi

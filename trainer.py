@@ -153,6 +153,10 @@ def _log_experiment_task(
         for name, value in functional_merge.items():
             metrics['dual_mask/functional_merge/{}'.format(name)] = float(value)
 
+    for branch_mode, scores in getattr(model, '_last_branch_contribution', {}).items():
+        for name, value in scores.items():
+            metrics['dual_mask/branch_contribution/{}/{}'.format(branch_mode, name)] = float(value)
+
     for attribute, name in (('_feature_drift_curve', 'w0/feature_drift'),('_weight_drift_curve', 'w0/weight_drift_mean'),):
         value = _last_metric(model, attribute)
         if value is not None:
