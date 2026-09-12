@@ -57,7 +57,9 @@ def task_score_margins(logits, targets, task_sizes):
     return correct - other, task_scores, target_tasks
 
 
-def fit_boundary_task_logit_bias(logits, targets, task_sizes, scale, conflict_ratio):
+def fit_boundary_task_logit_bias(
+        logits, targets, task_sizes, scale, conflict_ratio, symmetric_safe=False,
+):
     ratio = float(conflict_ratio)
     if not 0.0 < ratio <= 1.0:
         raise ValueError("conflict_ratio must be in (0, 1]")
@@ -71,19 +73,39 @@ def fit_boundary_task_logit_bias(logits, targets, task_sizes, scale, conflict_ra
 
     bias = torch.nn.Parameter(torch.zeros(len(task_sizes), device=logits.device))
     optimizer = optim.LBFGS([bias], max_iter=50, line_search_fn="strong_wolfe")
-    old = target_tasks < len(task_sizes) - 1
+    safe = torch.ones_like(target_tasks, dtype=torch.bool) if symmetric_safe else (
+        target_tasks < len(task_sizes) - 1
+    )
 
     def closure():
         optimizer.zero_grad()
         centered_bias = bias - bias.mean()
         adjusted_scores = task_scores + centered_bias
-        boundary_loss = F.cross_entropy(adjusted_scores[selected] * scale, target_tasks[selected])
+        if symmetric_safe:
+            boundary_loss = torch.stack([
+                F.cross_entropy(
+                    adjusted_scores[selected & (target_tasks == task_id)] * scale,
+                    target_tasks[selected & (target_tasks == task_id)],
+                )
+                for task_id in range(len(task_sizes))
+            ]).mean()
+        else:
+            boundary_loss = F.cross_entropy(
+                adjusted_scores[selected] * scale, target_tasks[selected]
+            )
         adjusted_correct = adjusted_scores.gather(1, target_tasks[:, None]).squeeze(1)
         task_mask = F.one_hot(target_tasks, num_classes=len(task_sizes)).bool()
         adjusted_other = adjusted_scores.masked_fill(task_mask, float("-inf")).max(dim=1).values
         adjusted_margin = adjusted_correct - adjusted_other
-        old_safe = F.relu((margins[old].detach() - adjusted_margin[old]) * scale).square().mean()
-        loss = boundary_loss + old_safe
+        margin_penalty = F.relu((margins.detach() - adjusted_margin) * scale).square()
+        if symmetric_safe:
+            safe_loss = torch.stack([
+                margin_penalty[target_tasks == task_id].mean()
+                for task_id in range(len(task_sizes))
+            ]).mean()
+        else:
+            safe_loss = margin_penalty[safe].mean()
+        loss = boundary_loss + safe_loss
         loss.backward()
         return loss
 
@@ -93,6 +115,8 @@ def fit_boundary_task_logit_bias(logits, targets, task_sizes, scale, conflict_ra
         "selected_count": int(selected.sum().item()),
         "selected_ratio": selected.float().mean().detach(),
         "selected_mask": selected.detach(),
+        "safe_sample_count": int(safe.sum().item()),
+        "safe_task_count": len(task_sizes) if symmetric_safe else len(task_sizes) - 1,
     }
 
 
@@ -746,7 +770,7 @@ class Learner(BaseLearner):
             self._stage2_compact_classifier( # CA 分类器对齐
                 self.task_sizes[-1],ca_epochs=int(self.args.get("ca_epochs", 5)),)
             if self.args.get("dual_mask_boundary_calibration", False):
-                self._stage3_boundary_calibration(self.task_sizes[-1])
+                self._stage3_boundary_calibration(self.task_sizes[-1], data_manager)
             elif self.args.get("dual_mask_task_bias_calibration", False):
                 self._stage3_task_bias_calibration(self.task_sizes[-1])
 
@@ -1257,18 +1281,20 @@ class Learner(BaseLearner):
         logging.info("Task bias calibration Task %d: bias=%s, pseudo_task_acc=%.2f->%.2f",
                      self._cur_task, [round(value, 5) for value in bias.tolist()], before, after)
 
-    def _stage3_boundary_calibration(self, task_size):
+    def _stage3_boundary_calibration(self, task_size, data_manager=None):
         if self.args.get("dual_mask_ca_diagnostics", False):
             self._task_bias_before_metrics = self._measure_ca_accuracy()
             self._task_bias_diagnostic_label = "Boundary calibration"
         devices = [device.index for device in self._multiple_gpus if device.type == "cuda"]
+        real_current = bool(self.args.get("dual_mask_boundary_real_current", False))
         with torch.random.fork_rng(devices=devices):
             torch.manual_seed(int(self.args["seed"]) + 200003 * (self._cur_task + 1))
             sampled_data, sampled_label = [], []
             class_tasks = torch.arange(len(self.task_sizes), device=self._device).repeat_interleave(
                 torch.tensor(self.task_sizes, device=self._device)
             )
-            for class_id in range(self._total_classes):
+            pseudo_classes = self._known_classes if real_current else self._total_classes
+            for class_id in range(pseudo_classes):
                 task_id = int(class_tasks[class_id].item())
                 decay = (task_id + 1) / (self._cur_task + 1) * 0.1
                 mean = self._class_means[class_id].to(self._device) * (0.9 + decay)
@@ -1279,6 +1305,31 @@ class Learner(BaseLearner):
 
             features = torch.cat(sampled_data).float().to(self._device)
             targets = torch.tensor(sampled_label, device=self._device)
+            old_pseudo_count = len(targets)
+            current_real_count = 0
+            if real_current:
+                if data_manager is None:
+                    raise ValueError("data_manager is required for real-current boundary calibration")
+                current_dataset = data_manager.get_dataset(
+                    np.arange(self._known_classes, self._total_classes),
+                    source="train",
+                    mode="test",
+                )
+                current_loader = DataLoader(
+                    current_dataset,
+                    batch_size=self.batch_size,
+                    shuffle=False,
+                    num_workers=self.num_workers,
+                    pin_memory=True,
+                )
+                current_features, current_targets = self._extract_vectors(current_loader)
+                current_features = torch.tensor(
+                    current_features, dtype=torch.float32, device=self._device
+                ).detach()
+                current_targets = torch.tensor(current_targets, device=self._device)
+                current_real_count = len(current_targets)
+                features = torch.cat((features, current_features))
+                targets = torch.cat((targets, current_targets))
             with torch.no_grad():
                 logits = self._network(features, fc_only=True)[:, :self._total_classes]
             bias, fit_metrics = fit_boundary_task_logit_bias(
@@ -1287,6 +1338,7 @@ class Learner(BaseLearner):
                 self.task_sizes,
                 self.args["scale"],
                 self.args.get("dual_mask_conflict_ratio", 0.1),
+                symmetric_safe=real_current,
             )
 
         self._network.task_logit_bias.zero_()
@@ -1300,11 +1352,13 @@ class Learner(BaseLearner):
         )
         selected = fit_metrics["selected_mask"]
         old = target_tasks < len(self.task_sizes) - 1
+        current = target_tasks == len(self.task_sizes) - 1
         before = (task_scores.argmax(1) == target_tasks).float().mean() * 100
         after = (adjusted_scores.argmax(1) == target_tasks).float().mean() * 100
         selected_before = (task_scores[selected].argmax(1) == target_tasks[selected]).float().mean() * 100
         selected_after = (adjusted_scores[selected].argmax(1) == target_tasks[selected]).float().mean() * 100
         old_margin_delta = (after_margin[old] - before_margin[old]).mean()
+        current_margin_delta = (after_margin[current] - before_margin[current]).mean()
         self._boundary_calibration_metrics = {
             "selected_ratio": float(fit_metrics["selected_ratio"]),
             "pseudo_task_before": float(before),
@@ -1312,10 +1366,17 @@ class Learner(BaseLearner):
             "selected_task_before": float(selected_before),
             "selected_task_after": float(selected_after),
             "old_margin_delta": float(old_margin_delta),
+            "current_margin_delta": float(current_margin_delta),
+            "old_pseudo_count": old_pseudo_count,
+            "current_real_count": current_real_count,
+            "calibration_count": len(targets),
+            "symmetric_safe": real_current,
         }
         logging.info(
             "Boundary calibration Task %d: selected=%.2f%%, bias=%s, "
-            "pseudo_task_acc=%.2f->%.2f, selected_task_acc=%.2f->%.2f, old_margin_delta=%+.5f",
+            "calibration_task_acc=%.2f->%.2f, selected_task_acc=%.2f->%.2f, "
+            "old_margin_delta=%+.5f, current_margin_delta=%+.5f, "
+            "old_pseudo=%d, current_real=%d, symmetric_safe=%s",
             self._cur_task,
             100 * self._boundary_calibration_metrics["selected_ratio"],
             [round(value, 5) for value in bias.tolist()],
@@ -1324,6 +1385,10 @@ class Learner(BaseLearner):
             selected_before,
             selected_after,
             old_margin_delta,
+            current_margin_delta,
+            old_pseudo_count,
+            current_real_count,
+            real_current,
         )
 
     def _compute_class_mean(self, data_manager, check_diff=False, oracle=False):

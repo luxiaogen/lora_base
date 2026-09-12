@@ -107,13 +107,22 @@ class Task0CheckpointTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'task0.pt'
             save_task0_checkpoint(path, model, {}, 'same-data')
-            for switch in ('dual_mask_previous_function_enabled', 'dual_mask_boundary_calibration'):
-                args = dict(model.args, **{switch: True})
+            candidates = (
+                {'dual_mask_previous_function_enabled': True},
+                {'dual_mask_boundary_calibration': True},
+                {
+                    'dual_mask_boundary_calibration': True,
+                    'dual_mask_boundary_real_current': True,
+                },
+            )
+            for switches in candidates:
+                args = dict(model.args, **switches)
                 try:
                     restored, _ = load_task0_checkpoint(path, args, 'same-data')
                 except ValueError as error:
-                    self.fail('{}: {}'.format(switch, error))
-                self.assertTrue(restored.args[switch])
+                    self.fail('{}: {}'.format(switches, error))
+                for switch in switches:
+                    self.assertTrue(restored.args[switch])
 
     def test_restored_next_training_updates_match_including_optimizer_reset(self):
         model = self.make_model()
