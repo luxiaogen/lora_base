@@ -2,7 +2,11 @@ import unittest
 
 import torch
 
-from utils.task_routing import predict_with_task_evidence
+from utils.task_routing import (
+    predict_with_task_evidence,
+    raw_task_score_components,
+    score_distribution_auc,
+)
 
 
 class TaskScoreRoutingTests(unittest.TestCase):
@@ -44,6 +48,27 @@ class TaskScoreRoutingTests(unittest.TestCase):
     def test_unknown_mode_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "classification_inference_mode"):
             predict_with_task_evidence(self.logits, self.task_sizes, "unknown")
+
+    def test_raw_task_scores_separate_correct_and_strongest_wrong_heads(self):
+        targets = torch.tensor([0, 2])
+
+        components = raw_task_score_components(
+            self.logits,
+            targets,
+            self.task_sizes,
+        )
+
+        self.assertEqual(components["target_tasks"].tolist(), [0, 1])
+        self.assertTrue(torch.allclose(components["correct"], torch.tensor([0.80, 0.75])))
+        self.assertTrue(torch.allclose(components["strongest_wrong"], torch.tensor([0.74, 0.60])))
+        self.assertTrue(torch.allclose(components["margin"], torch.tensor([0.06, 0.15])))
+        self.assertEqual(components["all_wrong"].numel(), 4)
+
+    def test_score_distribution_auc_handles_ties(self):
+        positives = torch.tensor([0.5, 0.7])
+        negatives = torch.tensor([0.5, 0.6])
+
+        self.assertAlmostEqual(score_distribution_auc(positives, negatives), 0.625)
 
 
 if __name__ == "__main__":

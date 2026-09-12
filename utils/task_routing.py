@@ -3,6 +3,58 @@
 import torch
 
 
+def raw_task_score_components(logits, targets, task_sizes):
+    """Collect raw per-head maxima using labels only for test-time analysis."""
+    sizes = tuple(int(size) for size in task_sizes)
+    if len(sizes) < 2:
+        raise ValueError("raw task-score diagnostics require at least two tasks")
+    if sum(sizes) != logits.shape[1]:
+        raise ValueError("task_sizes must cover every logit column")
+
+    task_scores = torch.stack([
+        task_logits.max(dim=1).values
+        for task_logits in torch.split(logits, sizes, dim=1)
+    ], dim=1)
+    class_tasks = torch.arange(len(sizes), device=logits.device).repeat_interleave(
+        torch.tensor(sizes, device=logits.device)
+    )
+    target_tasks = class_tasks[targets]
+    task_mask = torch.nn.functional.one_hot(target_tasks, len(sizes)).bool()
+    correct = task_scores.gather(1, target_tasks[:, None]).squeeze(1)
+    strongest_wrong = task_scores.masked_fill(task_mask, float("-inf")).max(dim=1).values
+    return {
+        "task_scores": task_scores,
+        "target_tasks": target_tasks,
+        "predicted_tasks": task_scores.argmax(dim=1),
+        "correct": correct,
+        "strongest_wrong": strongest_wrong,
+        "all_wrong": task_scores.masked_select(~task_mask),
+        "margin": correct - strongest_wrong,
+    }
+
+
+def score_distribution_auc(positive_scores, negative_scores):
+    """Rank-based AUC with average ranks for tied raw scores."""
+    positive_scores = positive_scores.detach().flatten().double().cpu()
+    negative_scores = negative_scores.detach().flatten().double().cpu()
+    scores = torch.cat((positive_scores, negative_scores))
+    labels = torch.cat((
+        torch.ones(len(positive_scores), dtype=torch.bool),
+        torch.zeros(len(negative_scores), dtype=torch.bool),
+    ))
+    order = scores.argsort()
+    sorted_scores = scores[order]
+    _, counts = torch.unique_consecutive(sorted_scores, return_counts=True)
+    ends = counts.cumsum(dim=0).double()
+    starts = ends - counts + 1
+    average_ranks = ((starts + ends) / 2).repeat_interleave(counts)
+    positive_rank_sum = average_ranks[labels[order]].sum()
+    baseline = len(positive_scores) * (len(positive_scores) + 1) / 2
+    return ((positive_rank_sum - baseline) / (
+        len(positive_scores) * len(negative_scores)
+    )).item()
+
+
 def predict_with_task_evidence(logits, task_sizes, mode="global"):
     """Return global class and inferred task IDs without using true task IDs."""
     mode = str(mode).lower()

@@ -20,7 +20,11 @@ from torch.distributions.multivariate_normal import MultivariateNormal
 from utils.toolkit import count_parameters
 from models.losses import AngularPenaltySMLoss
 from contextlib import ExitStack
-from utils.task_routing import predict_with_task_evidence
+from utils.task_routing import (
+    predict_with_task_evidence,
+    raw_task_score_components,
+    score_distribution_auc,
+)
 
 
 def fit_task_logit_bias(logits, targets, task_sizes, scale):
@@ -1077,6 +1081,8 @@ class Learner(BaseLearner):
             self._task_bias_diagnostic_label = None
         if self.args.get("classification_inference_diagnostics", False):
             self._log_inference_mode_diagnostics()
+        if self.args.get("classification_task_score_distribution_diagnostics", False):
+            self._log_raw_task_score_diagnostics()
         return result
 
     def _log_inference_mode_diagnostics(self):
@@ -1113,6 +1119,100 @@ class Learner(BaseLearner):
                 metrics["old"],
                 metrics["new"],
                 task_accuracy,
+            )
+
+    def _log_raw_task_score_diagnostics(self):
+        if len(self.task_sizes) < 2:
+            logging.info(
+                "Raw task score diagnostic Task %d (test-only): unavailable=single_task",
+                self._cur_task,
+            )
+            return
+
+        collected = {
+            key: []
+            for key in (
+                "target_tasks",
+                "predicted_tasks",
+                "correct",
+                "strongest_wrong",
+                "all_wrong",
+                "margin",
+            )
+        }
+        python_state, numpy_state = random.getstate(), np.random.get_state()
+        modes = [(module, module.training) for module in self._network.modules()]
+        devices = [device.index for device in getattr(self, "_multiple_gpus", []) if device.type == "cuda"]
+        try:
+            with torch.random.fork_rng(devices=devices):
+                self._network.eval()
+                for _, (_, inputs, targets) in enumerate(self.test_loader):
+                    inputs = inputs.to(self._device)
+                    targets = targets.to(self._device)
+                    with torch.no_grad():
+                        outputs = self._network.interface(inputs)
+                        components = raw_task_score_components(outputs, targets, self.task_sizes)
+                    for key in collected:
+                        collected[key].append(components[key].cpu())
+        finally:
+            random.setstate(python_state)
+            np.random.set_state(numpy_state)
+            for module, training in modes:
+                module.training = training
+
+        values = {key: torch.cat(parts) for key, parts in collected.items()}
+        correct = values["correct"]
+        wrong = values["strongest_wrong"]
+        margin = values["margin"]
+
+        def distribution(tensor):
+            quantiles = torch.quantile(tensor.float(), torch.tensor([0.1, 0.5, 0.9]))
+            return tensor.float().mean().item(), tensor.float().std(unbiased=False).item(), quantiles
+
+        correct_mean, correct_std, correct_q = distribution(correct)
+        wrong_mean, wrong_std, wrong_q = distribution(wrong)
+        margin_mean, margin_std, margin_q = distribution(margin)
+        task_accuracy = (
+            values["predicted_tasks"] == values["target_tasks"]
+        ).float().mean().item() * 100
+        pairwise_auc = score_distribution_auc(correct, values["all_wrong"])
+        logging.info(
+            "Raw task score diagnostic Task %d (test-only): samples=%d, "
+            "task_prediction=%.2f, pairwise_auc=%.4f, "
+            "correct_mean=%.4f, correct_std=%.4f, correct_q10=%.4f, correct_q50=%.4f, correct_q90=%.4f, "
+            "wrong_max_mean=%.4f, wrong_max_std=%.4f, wrong_max_q10=%.4f, wrong_max_q50=%.4f, wrong_max_q90=%.4f, "
+            "margin_mean=%.4f, margin_std=%.4f, margin_q10=%.4f, margin_q50=%.4f, margin_q90=%.4f",
+            self._cur_task,
+            len(margin),
+            task_accuracy,
+            pairwise_auc,
+            correct_mean, correct_std, *correct_q.tolist(),
+            wrong_mean, wrong_std, *wrong_q.tolist(),
+            margin_mean, margin_std, *margin_q.tolist(),
+        )
+
+        for task_id in range(len(self.task_sizes)):
+            selected = values["target_tasks"] == task_id
+            task_margin = margin[selected]
+            task_correct = correct[selected]
+            task_wrong = wrong[selected]
+            task_accuracy = (
+                values["predicted_tasks"][selected] == values["target_tasks"][selected]
+            ).float().mean().item() * 100
+            logging.info(
+                "Raw task score by true task Task %d (test-only): true_task=%d, samples=%d, "
+                "task_prediction=%.2f, correct_mean=%.4f, correct_q50=%.4f, "
+                "wrong_max_mean=%.4f, wrong_max_q50=%.4f, margin_mean=%.4f, margin_q50=%.4f",
+                self._cur_task,
+                task_id,
+                int(selected.sum().item()),
+                task_accuracy,
+                task_correct.mean().item(),
+                task_correct.median().item(),
+                task_wrong.mean().item(),
+                task_wrong.median().item(),
+                task_margin.mean().item(),
+                task_margin.median().item(),
             )
 
     def _measure_ca_accuracy(self):
