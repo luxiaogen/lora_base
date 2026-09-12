@@ -1129,9 +1129,13 @@ class Learner(BaseLearner):
             )
             return
 
+        ncm_enabled = bool(
+            self.args.get("classification_ncm_task_evidence_diagnostics", False)
+        )
         collected = {
             key: []
             for key in (
+                "task_scores",
                 "target_tasks",
                 "predicted_tasks",
                 "correct",
@@ -1140,6 +1144,13 @@ class Learner(BaseLearner):
                 "margin",
             )
         }
+        ncm_tasks = []
+        if ncm_enabled:
+            prototypes = self._class_means[:sum(self.task_sizes)].to(self._device)
+            prototypes = F.normalize(prototypes, dim=1)
+            class_tasks = torch.arange(
+                len(self.task_sizes), device=self._device
+            ).repeat_interleave(torch.tensor(self.task_sizes, device=self._device))
         python_state, numpy_state = random.getstate(), np.random.get_state()
         modes = [(module, module.training) for module in self._network.modules()]
         devices = [device.index for device in getattr(self, "_multiple_gpus", []) if device.type == "cuda"]
@@ -1152,6 +1163,10 @@ class Learner(BaseLearner):
                     with torch.no_grad():
                         outputs = self._network.interface(inputs)
                         components = raw_task_score_components(outputs, targets, self.task_sizes)
+                        if ncm_enabled:
+                            features = F.normalize(self._network.extract_vector(inputs), dim=1)
+                            ncm_classes = (features @ prototypes.T).argmax(dim=1)
+                            ncm_tasks.append(class_tasks[ncm_classes].cpu())
                     for key in collected:
                         collected[key].append(components[key].cpu())
         finally:
@@ -1214,6 +1229,71 @@ class Learner(BaseLearner):
                 task_margin.mean().item(),
                 task_margin.median().item(),
             )
+
+        if ncm_enabled:
+            self._log_ncm_task_evidence(values, torch.cat(ncm_tasks))
+
+    def _log_ncm_task_evidence(self, values, ncm_tasks):
+        target_tasks = values["target_tasks"]
+        global_correct = values["predicted_tasks"] == target_tasks
+        ncm_correct = ncm_tasks == target_tasks
+        both_correct = global_correct & ncm_correct
+        recoverable = ~global_correct & ncm_correct
+        introduced = global_correct & ~ncm_correct
+        both_wrong = ~global_correct & ~ncm_correct
+        total = len(target_tasks)
+
+        def percentage(mask, denominator=total):
+            return mask.sum().item() * 100 / max(denominator, 1)
+
+        global_accuracy = percentage(global_correct)
+        ncm_accuracy = percentage(ncm_correct)
+        oracle_union = percentage(global_correct | ncm_correct)
+        logging.info(
+            "NCM task evidence Task %d (test-only): samples=%d, global=%.2f, ncm=%.2f, "
+            "both_correct=%d(%.2f%%), recoverable=%d(%.2f%%), introduced=%d(%.2f%%), "
+            "both_wrong=%d(%.2f%%), oracle_union=%.2f",
+            self._cur_task,
+            total,
+            global_accuracy,
+            ncm_accuracy,
+            int(both_correct.sum()), percentage(both_correct),
+            int(recoverable.sum()), percentage(recoverable),
+            int(introduced.sum()), percentage(introduced),
+            int(both_wrong.sum()), percentage(both_wrong),
+            oracle_union,
+        )
+
+        task_top_two = values["task_scores"].topk(2, dim=1).values
+        task_gap = task_top_two[:, 0] - task_top_two[:, 1]
+        ratio = float(self.args.get("dual_mask_conflict_ratio", 0.1))
+        selected_count = max(1, math.ceil(total * ratio))
+        selected = task_gap.topk(selected_count, largest=False).indices
+        selected_global = global_correct[selected]
+        selected_ncm = ncm_correct[selected]
+        selected_recoverable = ~selected_global & selected_ncm
+        selected_introduced = selected_global & ~selected_ncm
+        switched_correct = global_correct.clone()
+        switched_correct[selected] = selected_ncm
+        global_errors = int((~global_correct).sum().item())
+        error_coverage = int((~selected_global).sum().item()) * 100 / max(global_errors, 1)
+        switch_accuracy = percentage(switched_correct)
+        logging.info(
+            "Ambiguous NCM switch Task %d (test-only): ratio=%.4f, samples=%d, "
+            "gap_max=%.4f, global_error_coverage=%.2f, global_subset=%.2f, ncm_subset=%.2f, "
+            "recoverable=%d, introduced=%d, switch_accuracy=%.2f, switch_delta=%+.2f",
+            self._cur_task,
+            selected_count / total,
+            selected_count,
+            task_gap[selected].max().item(),
+            error_coverage,
+            percentage(selected_global, selected_count),
+            percentage(selected_ncm, selected_count),
+            int(selected_recoverable.sum()),
+            int(selected_introduced.sum()),
+            switch_accuracy,
+            switch_accuracy - global_accuracy,
+        )
 
     def _measure_ca_accuracy(self):
         # Test-only observation; restore RNG so the extra loader pass cannot alter CA samples.

@@ -35,6 +35,7 @@ common=(--config exps/dlora/imgr10.json
     --set classification_inference_mode=global
     --set classification_inference_diagnostics=false
     --set classification_task_score_distribution_diagnostics=true
+    --set classification_ncm_task_evidence_diagnostics=true
     --set dual_mask_ca_diagnostics=true
     --set dual_mask_private_rank=0 --set dual_mask_competence_adaptive=true
     --set dual_mask_plasticity_adaptive=true --set dual_mask_protect_strength_mode=competence
@@ -51,7 +52,7 @@ common=(--config exps/dlora/imgr10.json
     --set dual_mask_track_w0_metrics=true --set dual_mask_vis=false
     --set experiment_tracker=wandb --set wandb_project=LoDA_ICML2026
     --set "wandb_mode=${WANDB_MODE:-online}" --set wandb_group=imgr10_raw_task_score_diagnostic
-    --set wandb_tags=imgr10,raw_task_score,distribution,test_only,global,ca5,task2_screen)
+    --set wandb_tags=imgr10,raw_task_score,ncm_evidence,test_only,global,ca5,task2_screen)
 
 seed=1993
 name=imgr10_raw_task_score_diagnostic_seed${seed}

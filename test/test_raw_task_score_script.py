@@ -36,6 +36,7 @@ class RawTaskScoreScriptTests(unittest.TestCase):
         self.assertEqual(run["classification_inference_mode"], "global")
         self.assertFalse(run["classification_inference_diagnostics"])
         self.assertTrue(run["classification_task_score_distribution_diagnostics"])
+        self.assertTrue(run["classification_ncm_task_evidence_diagnostics"])
         self.assertNotIn("data_path", run)
 
 
