@@ -263,12 +263,28 @@ def _train(args, experiment_tracker=None):
     _set_device(args)
     print_args(args)
     data_manager = DataManager(args['dataset'],args['shuffle'],args['seed'],args['init_cls'],args['increment'],args)
-    model = factory.get_model(args['model_name'], args)
-
-
     cnn_curve, cnn_curve_with_task, nme_curve, cnn_curve_task = {'top1': []}, {'top1': []}, {'top1': []}, {'top1': []}
     w0_curve = []
-    for task_id in range(data_manager.nb_tasks):
+    save_path, resume_path = args.get('task0_checkpoint_save'), args.get('task0_checkpoint_resume')
+    signature = None
+    if save_path or resume_path:
+        from utils.task0_checkpoint import dataset_signature, save_task0_checkpoint, load_task0_checkpoint
+        if save_path and resume_path:
+            raise ValueError('Choose Task0 checkpoint save OR resume, not both.')
+        if save_path and os.path.exists(save_path):
+            raise FileExistsError(save_path)
+        signature = dataset_signature(data_manager)
+    if resume_path:
+        model, history = load_task0_checkpoint(resume_path, args, signature)
+        cnn_curve, cnn_curve_with_task = history['cnn_curve'], history['cnn_curve_with_task']
+        cnn_curve_task, w0_curve = history['cnn_curve_task'], history['w0_curve']
+        logging.info('Restored Task0 top1 curve: %s', cnn_curve['top1'])
+    else:
+        model = factory.get_model(args['model_name'], args)
+    end_task = int(args.get('max_tasks', data_manager.nb_tasks))
+    if not model._cur_task + 1 < end_task <= data_manager.nb_tasks:
+        raise ValueError('max_tasks must include at least one new task and not exceed the dataset task count.')
+    for task_id in range(model._cur_task + 1, end_task):
         logging.info('All params: {}'.format(count_parameters(model._network)))
         time_start = time.time()
         model.incremental_train(data_manager)
@@ -322,6 +338,14 @@ def _train(args, experiment_tracker=None):
         _log_experiment_task(experiment_tracker,model,task_id,cnn_accy,cnn_accy_with_task,cnn_accy_task,
                              w0_accuracy,train_seconds,eval_seconds,forgetting,backward,)
 
+        if task_id == 0 and save_path:
+            history = dict(cnn_curve=cnn_curve, cnn_curve_with_task=cnn_curve_with_task,
+                           cnn_curve_task=cnn_curve_task, w0_curve=w0_curve)
+            save_task0_checkpoint(save_path, model, history, signature)
+
+    if end_task < data_manager.nb_tasks:
+        logging.info('PARTIAL DIAGNOSTIC: %d/%d tasks; following averages are NOT full-experiment results.',
+                     end_task, data_manager.nb_tasks)
     logging.info('Accuracy Matrix: \n {}'.format(model.acc_matrix.T.round(2)))
     logging.info('Average Accuracy: {}'.format(np.mean(cnn_curve['top1'])))
     logging.info('Last Accuracy: {}'.format(cnn_curve['top1'][-1]))

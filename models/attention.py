@@ -642,6 +642,8 @@ class Attention_LoRA(nn.Module):
         )
 
         self.rebuild_dual_masks()  # Dual masks rebuilt: W0 protect density 0.5000, plastic density 0.5000
+        logging.info("Task %s layer %s LoRA projections: %s (S and P; full QKV storage retained)",
+                     t, self.layer_idx, "QV" if self.args.get("dual_mask_qv_after_task0", False) and t > 0 else "QKV")
         logging.info(
             "Task %s LoRA allocation: S_rank=%s, P_rank=%s, controller_P_rank=%s, fixed_P_rank=%s, S_params=%s, P_params=%s, P_active=%s",
             t, rs, p_rank, controller_rank, self.dual_mask_private_rank,
@@ -859,6 +861,13 @@ class Attention_LoRA(nn.Module):
             return self.dual_mask_task0_gate_mode
         return "full"
 
+    def _projection_delta(self, delta: torch.Tensor) -> torch.Tensor:
+        # Read args dynamically so a resumed Task0 snapshot can switch to QV.
+        if self.cur_task > 0 and self.args.get("dual_mask_qv_after_task0", False):
+            delta = delta.clone()
+            delta[self.dim:2 * self.dim] = 0
+        return delta
+
     def _safe_delta(
             self,
             delta: torch.Tensor,
@@ -867,6 +876,7 @@ class Attention_LoRA(nn.Module):
             conflict_strength: Optional[float] = None,
     ) -> torch.Tensor:
 
+        delta = self._projection_delta(delta)
         gate_mode = self._effective_gate_mode()
         if gate_mode == "unmasked":
             return delta
@@ -915,6 +925,7 @@ class Attention_LoRA(nn.Module):
             compute_conflict: bool = True,
     ):
         """Return the pre-conflict update and its conflict mask."""
+        delta = self._projection_delta(delta)
         gate_mode = self._effective_gate_mode()
         if gate_mode == "unmasked":
             return delta, torch.zeros_like(delta)
