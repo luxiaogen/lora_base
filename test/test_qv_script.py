@@ -6,8 +6,11 @@ import unittest
 
 class QVScriptTests(unittest.TestCase):
     def test_dry_run_pairs_same_checkpoint_and_changes_only_projection_switch(self):
+        env = dict(os.environ, PYTHON_BIN='python', SEED='1996')
+        env.pop('TASK0_CHECKPOINT', None)
+        env.pop('MAX_TASKS', None)
         result = subprocess.run(['bash', 'scripts/9_13_qv_after_task0.sh', '--dry-run'],
-                                env=dict(os.environ, PYTHON_BIN='python', SEED='1996'),
+                                env=env,
                                 text=True, capture_output=True, check=True)
         commands = [shlex.split(line) for line in result.stdout.splitlines() if line.startswith('python main.py ')]
         self.assertEqual(len(commands), 3)
