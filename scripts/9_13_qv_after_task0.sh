@@ -2,6 +2,7 @@
 set -euo pipefail
 
 # From repository root; dataset path comes only from the local imgr10.json.
+# Both runs start independently from Task0 with QKV. Only Task1+ differs.
 # lrun scripts/9_13_qv_after_task0.sh ./logs/9_13_qv_after_task0.log
 [[ -f main.py ]] || { echo 'Run from the repository root.' >&2; exit 2; }
 PYTHON_BIN=${PYTHON_BIN:-python}
@@ -21,16 +22,6 @@ case $max_tasks in
     10) task_tag=full_t10 ;;
     *) echo 'MAX_TASKS must be 3 or 10.' >&2; exit 2 ;;
 esac
-task0_label=""
-if [[ ${TASK0_QK:-false} == true ]]; then
-    task0_label=qk0_
-    task_tag="$task_tag,task0_qk"
-fi
-checkpoint=${TASK0_CHECKPOINT:-}
-if [[ -n $checkpoint && $dry_run == false && ! -f $checkpoint ]]; then
-    echo "Task0 checkpoint not found: $checkpoint" >&2
-    exit 2
-fi
 if $dry_run; then
     run_dir="logs/shell_logs/qv_after_task0_DRY_RUN"
 else
@@ -63,11 +54,8 @@ common=(--config exps/dlora/imgr10.json
     --set dual_mask_selective_anchor_enabled=false --set dual_mask_functional_merge_calibration=false
     --set dual_mask_safe_residual_enabled=false --set dual_mask_track_w0_metrics=true --set dual_mask_vis=false
     --set experiment_tracker=wandb --set wandb_project=LoDA_ICML2026 --set "wandb_mode=${WANDB_MODE:-online}"
-    --set "wandb_group=imgr10_qv_after_task0"
+    --set "wandb_group=imgr10_qv_after_task0_from_scratch"
     --set "wandb_tags=imgr10,qv_after_task0,ca5,$task_tag")
-if [[ -n $task0_label ]]; then
-    common+=(--set dual_mask_task0_qk=true)
-fi
 
 run_stage() {
     local name=$1
@@ -83,19 +71,12 @@ run_stage() {
     fi
 }
 
-if [[ -z $checkpoint ]]; then
-    checkpoint="$run_dir/task0_seed${seed}.pt"
-    run_stage "imgr10_${task0_label}task0_seed${seed}" \
-        --set dual_mask_qv_after_task0=false --set max_tasks=1 --set "task0_checkpoint_save=$checkpoint"
-else
-    echo "Reusing Task0 checkpoint: $checkpoint"
-fi
-run_stage "imgr10_${task0_label}qkv_baseline_seed${seed}" \
-    --set dual_mask_qv_after_task0=false --set "max_tasks=$max_tasks" --set "task0_checkpoint_resume=$checkpoint"
-run_stage "imgr10_${task0_label}qv_after_task0_seed${seed}" \
-    --set dual_mask_qv_after_task0=true --set "max_tasks=$max_tasks" --set "task0_checkpoint_resume=$checkpoint"
+run_stage "imgr10_qkv_full_seed${seed}" \
+    --set dual_mask_qv_after_task0=false --set "max_tasks=$max_tasks"
+run_stage "imgr10_qkv0_qv_after_task0_seed${seed}" \
+    --set dual_mask_qv_after_task0=true --set "max_tasks=$max_tasks"
 if [[ $max_tasks == 10 ]]; then
-    echo "Finished paired full T10 runs. Logs: $run_dir; Task0 checkpoint: $checkpoint"
+    echo "Finished two independent full T10 runs. Logs: $run_dir"
 else
-    echo "Finished paired Task1-2 screening (NOT full T10 results). Logs/checkpoint: $run_dir"
+    echo "Finished two independent Task0-2 screening runs (NOT full T10 results). Logs: $run_dir"
 fi
