@@ -17,6 +17,7 @@ class FrozenA_TrainableB(nn.Module):
         self.dim_in = dim_in
         self.dim_out = dim_out
         self.r = r
+        self.register_buffer("initial_delta", None)
         # ** 表示对字典进行关键字解包（Unpacking）。这一行代码完全等价于nn.Linear(dim_in, r, bias=False, device=device, dtype=dtype)
         factory = dict(device=device if device is not None else A_init.device,
                        dtype=dtype if dtype is not None else A_init.dtype) # {'device': device(type='cuda', index=0), 'dtype': torch.float32}
@@ -39,7 +40,13 @@ class FrozenA_TrainableB(nn.Module):
     def B_weight(self): return self.B.weight
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.initial_delta is not None:
+            return F.linear(x, self.delta_weight())
         return self.B(self.A(x))  # (..., dim)
+
+    def delta_weight(self):
+        delta = self.B_weight @ self.A_weight
+        return delta if self.initial_delta is None else delta - self.initial_delta
 
 
 
@@ -231,6 +238,9 @@ class Attention_LoRA(nn.Module):
         shape = (self.dim * 3, self.dim)
 
         self.P_lora = torch.nn.ModuleList([None for _ in range(self.n_tasks)])
+        for branch in ("S", "P"):
+            self.register_buffer(f"inherit_{branch}_A", None)
+            self.register_buffer(f"inherit_{branch}_B", None)
         # W0 重要性生成保护区 general_mask；其补集 isolated_mask 供 P 分支使用。
         self.register_buffer("w0_importance", torch.zeros(shape), persistent=False)
         # general_mask[i, j] = 1  表示这个 W0 位置重要，要保护 | general_mask[i, j] = 0  表示这个位置相对不重要，可以改   W_pre/W_0 保护区域
@@ -641,6 +651,11 @@ class Attention_LoRA(nn.Module):
             device=device,dtype=dtype,
         )
 
+        if t > 0 and self.args.get("dual_mask_lora_inherit", False):
+            self._inherit_lora(self.S_lora[t], "S")
+            if self.use_plora:
+                self._inherit_lora(self.P_lora[t], "P")
+
         self.rebuild_dual_masks()  # Dual masks rebuilt: W0 protect density 0.5000, plastic density 0.5000
         projection_mode = "QKV"
         if t == 0 and self.args.get("dual_mask_task0_qk", False):
@@ -656,10 +671,27 @@ class Attention_LoRA(nn.Module):
             sum(p.numel() for p in self.P_lora[t].parameters()), t > 0 and self.use_plora,
         )
 
+    @torch.no_grad()
+    def _inherit_lora(self, unit, branch):
+        previous_a = getattr(self, f"inherit_{branch}_A")
+        previous_b = getattr(self, f"inherit_{branch}_B")
+        if previous_a is None:
+            logging.info("Task %s layer %s %s inheritance: first active task, fresh A/B", self.cur_task, self.layer_idx, branch)
+            return
+        # Preserve the controller's rank. New columns keep fresh A and zero B.
+        shared_rank = min(unit.r, previous_a.shape[0])
+        unit.A.weight[:shared_rank].copy_(previous_a[:shared_rank])
+        unit.B.weight[:, :shared_rank].copy_(previous_b[:, :shared_rank])
+        unit.initial_delta = (unit.B_weight @ unit.A_weight).detach().clone()
+        logging.info("Task %s layer %s %s inheritance: previous_rank=%s current_rank=%s copied_rank=%s; delta=BA-BA_start",
+                     self.cur_task, self.layer_idx, branch, previous_a.shape[0], unit.r, shared_rank)
+
     def _init_lora_weight(self, task, layer_idx:int=0):
 
         # Sequential baseline trains both A and B from a fresh initialization.
         if not self.use_plora and not self.use_slora: ## sequential tuning
+            if self.S_lora[task].initial_delta is not None:
+                return
             nn.init.kaiming_uniform_(self.S_lora[task].A.weight, a=math.sqrt(5))
             nn.init.zeros_(self.S_lora[task].B.weight)
 
@@ -980,7 +1012,7 @@ class Attention_LoRA(nn.Module):
             isolated: bool,
             residual_scale: float = 1.0,
     ) -> torch.Tensor:
-        raw_delta = unit.B_weight @ unit.A_weight
+        raw_delta = unit.delta_weight()
         ## isolated=True: safe_delta_p = BA_p * plastic_mask * conflict_gate
         ## isolated=False: safe_delta_s = BA_s * protect_gate * conflict_gate
         safe_delta = self._safe_delta(raw_delta, isolated=isolated)
@@ -1015,17 +1047,17 @@ class Attention_LoRA(nn.Module):
         if not self.use_slora and not self.use_plora:
             unit = self.S_lora[task]
             if unit is not None:
-                raw_delta = unit.B_weight @ unit.A_weight
+                raw_delta = unit.delta_weight()
                 current_delta = current_delta + self._safe_delta(raw_delta,isolated=False,)
         else:
             unit_s = self.S_lora[task]
             if unit_s is not None and (self.use_slora or task == 0):
-                raw_delta_s = self.slora_gamma * (unit_s.B_weight @ unit_s.A_weight)
+                raw_delta_s = self.slora_gamma * unit_s.delta_weight()
                 current_delta = current_delta + self._safe_delta(raw_delta_s,isolated=False,)
 
             unit_p = self.P_lora[task]
             if task > 0 and self.use_plora and unit_p is not None:
-                raw_delta_p = self.plora_gamma * (unit_p.B_weight @ unit_p.A_weight)
+                raw_delta_p = self.plora_gamma * unit_p.delta_weight()
                 current_delta = current_delta + self._safe_delta(raw_delta_p,isolated=True,)
 
         anchor = self.pretrained_weight.detach().float()
@@ -1034,7 +1066,7 @@ class Attention_LoRA(nn.Module):
         return drift.pow(2).sum() / anchor.pow(2).sum().clamp_min(1e-12)
 
     def _joint_conflict_regularization(self, unit, isolated: bool) -> torch.Tensor:
-        delta = unit.B_weight @ unit.A_weight # ΔW = 0 × A = 0
+        delta = unit.delta_weight()
 
         gate_mode = self._effective_gate_mode()
         if gate_mode == "unmasked":
@@ -1339,7 +1371,7 @@ class Attention_LoRA(nn.Module):
         dtype = self.qkv.weight.dtype
         # s=0.5 p=0.75
         def raw_delta(name: str, unit, gamma: float, isolated: bool):
-            delta = gamma * (unit.B_weight.detach() @ unit.A_weight.detach())
+            delta = gamma * unit.delta_weight().detach()
             return {
                 "name": name,
                 "isolated": isolated,
@@ -1377,6 +1409,12 @@ class Attention_LoRA(nn.Module):
                 self.qkv.weight.add_(delta.to(device, dtype))
 
             # safe_delta 已经永久写入 qkv.weight；旧 A/B 后续不再参与前向。
+            if self.args.get("dual_mask_lora_inherit", False):
+                for item in branch_deltas:
+                    branch = item["name"]
+                    unit = self.S_lora[t] if branch == "S" else self.P_lora[t]
+                    setattr(self, f"inherit_{branch}_A", unit.A_weight.detach().clone())
+                    setattr(self, f"inherit_{branch}_B", unit.B_weight.detach().clone())
             self.S_lora[t] = None
             self.P_lora[t] = None
             self._functional_merge_strength_override = None
