@@ -642,8 +642,13 @@ class Attention_LoRA(nn.Module):
         )
 
         self.rebuild_dual_masks()  # Dual masks rebuilt: W0 protect density 0.5000, plastic density 0.5000
+        projection_mode = "QKV"
+        if t == 0 and self.args.get("dual_mask_task0_qk", False):
+            projection_mode = "QK"
+        elif t > 0 and self.args.get("dual_mask_qv_after_task0", False):
+            projection_mode = "QV"
         logging.info("Task %s layer %s LoRA projections: %s (S and P; full QKV storage retained)",
-                     t, self.layer_idx, "QV" if self.args.get("dual_mask_qv_after_task0", False) and t > 0 else "QKV")
+                     t, self.layer_idx, projection_mode)
         logging.info(
             "Task %s LoRA allocation: S_rank=%s, P_rank=%s, controller_P_rank=%s, fixed_P_rank=%s, S_params=%s, P_params=%s, P_active=%s",
             t, rs, p_rank, controller_rank, self.dual_mask_private_rank,
@@ -862,8 +867,11 @@ class Attention_LoRA(nn.Module):
         return "full"
 
     def _projection_delta(self, delta: torch.Tensor) -> torch.Tensor:
-        # Read args dynamically so a resumed Task0 snapshot can switch to QV.
-        if self.cur_task > 0 and self.args.get("dual_mask_qv_after_task0", False):
+        # Read args dynamically so a resumed Task0 snapshot can switch projections.
+        if self.cur_task == 0 and self.args.get("dual_mask_task0_qk", False):
+            delta = delta.clone()
+            delta[2 * self.dim:3 * self.dim] = 0
+        elif self.cur_task > 0 and self.args.get("dual_mask_qv_after_task0", False):
             delta = delta.clone()
             delta[self.dim:2 * self.dim] = 0
         return delta

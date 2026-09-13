@@ -9,6 +9,7 @@ class QVScriptTests(unittest.TestCase):
         env = dict(os.environ, PYTHON_BIN='python', SEED='1996')
         env.pop('TASK0_CHECKPOINT', None)
         env.pop('MAX_TASKS', None)
+        env.pop('TASK0_QK', None)
         result = subprocess.run(['bash', 'scripts/9_13_qv_after_task0.sh', '--dry-run'],
                                 env=env,
                                 text=True, capture_output=True, check=True)
@@ -53,7 +54,11 @@ class QVScriptTests(unittest.TestCase):
             self.assertEqual(config['task0_checkpoint_resume'], checkpoint)
             self.assertEqual(config['max_tasks'], '10')
             self.assertEqual(config['ca_epochs'], '5')
-            self.assertEqual(config['wandb_tags'], 'imgr10,qv_after_task0,ca5,full_t10')
+            self.assertEqual(config['dual_mask_task0_qk'], 'true')
+            self.assertEqual(config['wandb_tags'], 'imgr10,qv_after_task0,ca5,full_t10,task0_qk')
+            self.assertIn('qk0_', config['prefix'])
+        self.assertEqual(baseline['dual_mask_qv_after_task0'], 'false')
+        self.assertEqual(candidate['dual_mask_qv_after_task0'], 'true')
         changed = {key for key in baseline.keys() | candidate.keys() if baseline.get(key) != candidate.get(key)}
         self.assertEqual(changed, {'prefix', 'dual_mask_qv_after_task0'})
 
@@ -68,6 +73,7 @@ class QVScriptTests(unittest.TestCase):
                    for command in commands]
         save, baseline, candidate = configs
         self.assertEqual(save['max_tasks'], '1')
+        self.assertEqual(save['dual_mask_task0_qk'], 'true')
         self.assertEqual(baseline['task0_checkpoint_resume'], save['task0_checkpoint_save'])
         self.assertEqual(candidate['task0_checkpoint_resume'], save['task0_checkpoint_save'])
 

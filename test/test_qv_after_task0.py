@@ -62,6 +62,34 @@ class QVAfterTask0Tests(unittest.TestCase):
             self.assertGreater(q.norm().item(), 0)
             self.assertGreater(v.norm().item(), 0)
 
+    def test_task0_qk_has_no_v_gradient_or_merged_update(self):
+        torch.manual_seed(23)
+        module = self.make_module(dual_mask_task0_qk=True, dual_mask_qv_after_task0=True)
+        module.before_task(0)
+        module.set_task_and_stage(0, 0)
+        inputs = torch.randn(2, 3, 4)
+        target = torch.randn(2, 3, 12)
+        original_v = module.qkv.weight[8:12].clone()
+        optimizer = torch.optim.SGD([p for p in module.parameters() if p.requires_grad], lr=.1)
+        optimizer.zero_grad()
+        loss = (module._contrib_from_units(inputs, 0) - target).square().mean()
+        loss.backward()
+        q, k, v = module.S_lora[0].B.weight.grad.chunk(3)
+        self.assertGreater(q.norm().item(), 0)
+        self.assertGreater(k.norm().item(), 0)
+        self.assertEqual(v.count_nonzero().item(), 0)
+        optimizer.step()
+        optimizer.zero_grad()
+        module.anchor_regularization().backward()
+        self.assertEqual(module.S_lora[0].B.weight.grad[8:12].count_nonzero().item(), 0)
+        module.eval()
+        with torch.no_grad():
+            before = module(inputs, 0)
+            module.after_task(0)
+            self.assertTrue(torch.allclose(before, module(inputs, 0), atol=1e-6))
+            self.assertTrue(torch.equal(original_v, module.qkv.weight[8:12]))
+            self.assertFalse(torch.equal(module.qkv.weight[4:8], module.pretrained_weight[4:8]))
+
     def test_projection_constraint_covers_gate_modes_regularization_and_merge(self):
         for gate in ('unmasked', 'protect_only', 'full'):
             for merge in ('suppress', 'none'):
@@ -136,7 +164,9 @@ class QVAfterTask0Tests(unittest.TestCase):
             restored._network.before_task(1)
             delta = restored._network._projection_delta(torch.ones(12, 4))
             self.assertEqual(delta[4:8].count_nonzero().item(), 0)
-            for args, signature in ((dict(model.args, rank=32), 'data'), (model.args, 'other')):
+            for args, signature in ((dict(model.args, rank=32), 'data'),
+                                    (dict(model.args, dual_mask_task0_qk=True), 'data'),
+                                    (model.args, 'other')):
                 with self.assertRaises(ValueError):
                     load_task0_checkpoint(path, args, signature)
 
@@ -150,17 +180,22 @@ class QVAfterTask0Tests(unittest.TestCase):
                     total_sessions=3, rank=2, num_heads=2, init_epoch=2, epochs=2, num_workers=0,
                     dual_mask_svd_rank=2, dual_mask_competence_adaptive=False,
                     dual_mask_reg_weight=.01, dual_mask_conflict_reg_enabled=False,
+                    dual_mask_task0_qk=True,
                     dual_mask_qv_after_task0=True)
         encoder = ViT(img_size=8, patch_size=4, embed_dim=8, depth=1, num_heads=2, rank=2, n_tasks=3)
         with patch('models.network._create_vision_transformer', return_value=encoder):
             learner = Learner(args)
         module = next(learner._iter_lora_modules())
+        original_v = module.qkv.weight[16:24].detach().clone()
         original_step = learner._backward_and_step
         gradient_checks = []
 
         def step(*values):
             loss = original_step(*values)
-            if learner._cur_task > 0:
+            if learner._cur_task == 0:
+                _, _, v = module.S_lora[0].B.weight.grad.chunk(3)
+                self.assertEqual(v.count_nonzero().item(), 0)
+            else:
                 for unit in (module.S_lora[learner._cur_task], module.P_lora[learner._cur_task]):
                     q, k, v = unit.B.weight.grad.chunk(3)
                     self.assertEqual(k.count_nonzero().item(), 0)
@@ -178,6 +213,7 @@ class QVAfterTask0Tests(unittest.TestCase):
             self.assertIsNone(module.S_lora[task])
             self.assertIsNone(module.P_lora[task])
             if task == 0:
+                self.assertTrue(torch.equal(original_v, module.qkv.weight[16:24]))
                 task0_k = module.qkv.weight[8:16].detach().clone()
             else:
                 self.assertTrue(torch.equal(task0_k, module.qkv.weight[8:16]))

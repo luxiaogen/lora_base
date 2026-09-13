@@ -21,6 +21,11 @@ case $max_tasks in
     10) task_tag=full_t10 ;;
     *) echo 'MAX_TASKS must be 3 or 10.' >&2; exit 2 ;;
 esac
+task0_label=""
+if [[ ${TASK0_QK:-false} == true ]]; then
+    task0_label=qk0_
+    task_tag="$task_tag,task0_qk"
+fi
 checkpoint=${TASK0_CHECKPOINT:-}
 if [[ -n $checkpoint && $dry_run == false && ! -f $checkpoint ]]; then
     echo "Task0 checkpoint not found: $checkpoint" >&2
@@ -60,6 +65,9 @@ common=(--config exps/dlora/imgr10.json
     --set experiment_tracker=wandb --set wandb_project=LoDA_ICML2026 --set "wandb_mode=${WANDB_MODE:-online}"
     --set "wandb_group=imgr10_qv_after_task0"
     --set "wandb_tags=imgr10,qv_after_task0,ca5,$task_tag")
+if [[ -n $task0_label ]]; then
+    common+=(--set dual_mask_task0_qk=true)
+fi
 
 run_stage() {
     local name=$1
@@ -77,14 +85,14 @@ run_stage() {
 
 if [[ -z $checkpoint ]]; then
     checkpoint="$run_dir/task0_seed${seed}.pt"
-    run_stage "imgr10_task0_seed${seed}" \
+    run_stage "imgr10_${task0_label}task0_seed${seed}" \
         --set dual_mask_qv_after_task0=false --set max_tasks=1 --set "task0_checkpoint_save=$checkpoint"
 else
     echo "Reusing Task0 checkpoint: $checkpoint"
 fi
-run_stage "imgr10_qkv_baseline_seed${seed}" \
+run_stage "imgr10_${task0_label}qkv_baseline_seed${seed}" \
     --set dual_mask_qv_after_task0=false --set "max_tasks=$max_tasks" --set "task0_checkpoint_resume=$checkpoint"
-run_stage "imgr10_qv_after_task0_seed${seed}" \
+run_stage "imgr10_${task0_label}qv_after_task0_seed${seed}" \
     --set dual_mask_qv_after_task0=true --set "max_tasks=$max_tasks" --set "task0_checkpoint_resume=$checkpoint"
 if [[ $max_tasks == 10 ]]; then
     echo "Finished paired full T10 runs. Logs: $run_dir; Task0 checkpoint: $checkpoint"
