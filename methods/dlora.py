@@ -4,8 +4,10 @@ from torch.nn import functional as F
 from torch.utils.data import DataLoader
 
 import copy
+import json
 import logging
 import random
+import time
 import numpy as np
 from tqdm import tqdm
 
@@ -837,6 +839,23 @@ class Learner(BaseLearner):
                 after['total'] - before['total'], after['old'] - before['old'], after['new'] - before['new'],
             )
             self._ca_before_metrics = None
+        if self.args.get('dual_mask_p_conflict_diagnostics', False):
+            from utils.p_conflict_diagnostics import evaluate_p_conflict, summarize_p_conflict
+            start = time.perf_counter()
+            report = evaluate_p_conflict(self._network, self.test_loader, self._device, self.scale)
+            logging.info('P-conflict diagnostic Task %s: %s', self._cur_task, json.dumps(report))
+            history = getattr(self, '_p_conflict_reports', [])
+            history.append(report)
+            self._p_conflict_reports = history
+            logging.info('P-conflict summary through Task %s: %s',
+                         self._cur_task, json.dumps(summarize_p_conflict(history)))
+            modules = [m for m in self._iter_lora_modules() if m.p_conflict_components]
+            component_bytes = sum(c.delta.numel() * c.delta.element_size()
+                                  for m in modules for c in m.p_conflict_components)
+            layer_norms = [float(m.p_conflict_components[self._cur_task].delta.norm())
+                           for m in modules]
+            logging.info('P-conflict storage Task %s: bytes=%s, layer_norms=%s, diagnostic_seconds=%.2f',
+                         self._cur_task, component_bytes, layer_norms, time.perf_counter() - start)
         return result
 
     def _measure_ca_accuracy(self):

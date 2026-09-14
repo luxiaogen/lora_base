@@ -238,6 +238,8 @@ class Attention_LoRA(nn.Module):
         shape = (self.dim * 3, self.dim)
 
         self.P_lora = torch.nn.ModuleList([None for _ in range(self.n_tasks)])
+        self.p_conflict_components = nn.ModuleList()
+        self._p_conflict_weights = None
         for branch in ("S", "P"):
             self.register_buffer(f"inherit_{branch}_A", None)
             self.register_buffer(f"inherit_{branch}_B", None)
@@ -336,6 +338,9 @@ class Attention_LoRA(nn.Module):
 
     def _init_params(self, args):
         self.args = args
+        if args.get('dual_mask_p_conflict_diagnostics', False):
+            from utils.p_conflict_diagnostics import ConflictComponent
+            self.p_conflict_components = nn.ModuleList([ConflictComponent() for _ in range(self.n_tasks)])
         inherit_branches = str(args.get("dual_mask_lora_inherit_branches", "both")).lower()
         if inherit_branches not in {"both", "s", "p"}:
             raise ValueError("dual_mask_lora_inherit_branches must be both, s or p")
@@ -1360,10 +1365,20 @@ class Attention_LoRA(nn.Module):
         self._finalize_safe_residual(x)
         return out
 
+    def _p_conflict_correction(self, x, task):
+        correction = x.new_zeros((*x.shape[:-1], self.dim * 3))
+        for i, component in enumerate(self.p_conflict_components[:task + 1]):
+            if component.delta.numel():
+                weight = self._p_conflict_weights[:, i].to(x).view(-1, 1, 1)
+                correction = correction + (weight - 1) * F.linear(x, component.delta)
+        return correction
+
     def forward(self, x: torch.Tensor, task: int, register_hook: bool = False, get_feat: bool = False, get_cur_feat: bool = False):
 
         Bsz, N, C = x.shape
         qkv:torch.Tensor = self.qkv(x) + self._contrib_from_units(x, task) # y=W0x+ΔWx
+        if self._p_conflict_weights is not None and not self.pretrained_anchor_mode:
+            qkv = qkv + self._p_conflict_correction(x, task)
         qkv:torch.Tensor = qkv.reshape(Bsz, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
 
         q, k, v = qkv.unbind(0)
@@ -1417,6 +1432,11 @@ class Attention_LoRA(nn.Module):
             with torch.no_grad():
                 delta = torch.stack([item["safe_delta"] for item in branch_deltas]).sum(dim=0)
                 self.qkv.weight.add_(delta.to(device, dtype))
+                if self.p_conflict_components:
+                    for item in branch_deltas:
+                        if item['name'] == 'P':
+                            _, mask = self._merge_base_and_conflict(item['raw_delta'], True, conflict_ratio)
+                            self.p_conflict_components[t].delta = (item['safe_delta'] * mask).detach().clone()
 
             # safe_delta 已经永久写入 qkv.weight；旧 A/B 后续不再参与前向。
             if self.args.get("dual_mask_lora_inherit", False):
