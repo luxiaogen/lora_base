@@ -336,6 +336,9 @@ class Attention_LoRA(nn.Module):
 
     def _init_params(self, args):
         self.args = args
+        inherit_branches = str(args.get("dual_mask_lora_inherit_branches", "both")).lower()
+        if inherit_branches not in {"both", "s", "p"}:
+            raise ValueError("dual_mask_lora_inherit_branches must be both, s or p")
         self.use_slora: bool = args["use_slora"]
         self.use_plora: bool = args["use_plora"]
         # msg = f'Use slora:{self.use_slora} and Use plora:{self.use_plora}'
@@ -651,10 +654,13 @@ class Attention_LoRA(nn.Module):
             device=device,dtype=dtype,
         )
 
-        if t > 0 and self.args.get("dual_mask_lora_inherit", False):
-            self._inherit_lora(self.S_lora[t], "S")
-            if self.use_plora:
-                self._inherit_lora(self.P_lora[t], "P")
+        for branch, unit in (("S", self.S_lora[t]), ("P", self.P_lora[t])):
+            active = branch == "S" or (t > 0 and self.use_plora)
+            if t > 0 and active and self._branch_inheritance_enabled(branch):
+                self._inherit_lora(unit, branch)
+            else:
+                logging.info("Task %s layer %s %s inheritance: fresh A/B (selected=%s, active=%s)",
+                             t, self.layer_idx, branch, self._branch_inheritance_enabled(branch), active)
 
         self.rebuild_dual_masks()  # Dual masks rebuilt: W0 protect density 0.5000, plastic density 0.5000
         projection_mode = "QKV"
@@ -670,6 +676,10 @@ class Attention_LoRA(nn.Module):
             sum(p.numel() for p in self.S_lora[t].parameters()),
             sum(p.numel() for p in self.P_lora[t].parameters()), t > 0 and self.use_plora,
         )
+
+    def _branch_inheritance_enabled(self, branch):
+        selected = str(self.args.get("dual_mask_lora_inherit_branches", "both")).lower()
+        return bool(self.args.get("dual_mask_lora_inherit", False)) and selected in ("both", branch.lower())
 
     @torch.no_grad()
     def _inherit_lora(self, unit, branch):
@@ -1412,6 +1422,8 @@ class Attention_LoRA(nn.Module):
             if self.args.get("dual_mask_lora_inherit", False):
                 for item in branch_deltas:
                     branch = item["name"]
+                    if not self._branch_inheritance_enabled(branch):
+                        continue
                     unit = self.S_lora[t] if branch == "S" else self.P_lora[t]
                     setattr(self, f"inherit_{branch}_A", unit.A_weight.detach().clone())
                     setattr(self, f"inherit_{branch}_B", unit.B_weight.detach().clone())

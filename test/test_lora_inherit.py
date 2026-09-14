@@ -36,8 +36,13 @@ class LoRAInheritanceTests(unittest.TestCase):
                 self.assertTrue(torch.equal(value, outcomes[0][0][key]), key)
 
     def test_three_task_lifecycle_gradients_and_exactly_once_merge(self):
+        for branches in ('both', 's', 'p'):
+            with self.subTest(branches=branches):
+                self.check_three_task_lifecycle(branches)
+
+    def check_three_task_lifecycle(self, branches):
         torch.manual_seed(17)
-        module = self.make_module(dual_mask_lora_inherit=True)
+        module = self.make_module(dual_mask_lora_inherit=True, dual_mask_lora_inherit_branches=branches)
         anchor = module.pretrained_weight.clone()
         x = torch.randn(3, 4, 4)
         previous_s = previous_p = None
@@ -46,16 +51,22 @@ class LoRAInheritanceTests(unittest.TestCase):
             module.set_task_and_stage(task, 0)
             module.eval()
             self.assertEqual(module._contrib_from_units(x, task).count_nonzero().item(), 0)
-            if task > 0:
+            if task > 0 and branches in ('both', 's'):
                 self.assertTrue(torch.equal(module.S_lora[task].A_weight, previous_s[0]))
                 self.assertTrue(torch.equal(module.S_lora[task].B_weight, previous_s[1]))
                 self.assertFalse(module.S_lora[task].A_weight.requires_grad)
+            elif task > 0:
+                self.assertIsNone(module.S_lora[task].initial_delta)
+                self.assertEqual(module.S_lora[task].B_weight.count_nonzero().item(), 0)
             if task == 1:
                 self.assertIsNone(module.P_lora[task].initial_delta)
                 self.assertEqual(module.P_lora[task].B_weight.count_nonzero().item(), 0)
-            if task == 2:
+            if task == 2 and branches in ('both', 'p'):
                 self.assertTrue(torch.equal(module.P_lora[task].A_weight, previous_p[0]))
                 self.assertTrue(torch.equal(module.P_lora[task].B_weight, previous_p[1]))
+            elif task == 2:
+                self.assertIsNone(module.P_lora[task].initial_delta)
+                self.assertEqual(module.P_lora[task].B_weight.count_nonzero().item(), 0)
             optimizer = torch.optim.SGD([p for p in module.parameters() if p.requires_grad], lr=.1)
             for _ in range(3):
                 optimizer.zero_grad()
@@ -63,6 +74,8 @@ class LoRAInheritanceTests(unittest.TestCase):
                 self.assertTrue(torch.isfinite(loss))
                 loss.backward()
                 self.assertGreater(module.S_lora[task].B_weight.grad.norm().item(), 0)
+                if task > 0:
+                    self.assertGreater(module.P_lora[task].B_weight.grad.norm().item(), 0)
                 optimizer.step()
             previous_s = (module.S_lora[task].A_weight.clone(), module.S_lora[task].B_weight.clone())
             if task > 0:
@@ -74,6 +87,51 @@ class LoRAInheritanceTests(unittest.TestCase):
                 self.assertTrue(torch.equal(module.pretrained_weight, anchor))
                 self.assertIsNone(module.S_lora[task])
                 self.assertIsNone(module.P_lora[task])
+                if branches == 's':
+                    self.assertIsNone(module.inherit_P_A)
+                    self.assertIsNone(module.inherit_P_B)
+                if branches == 'p':
+                    self.assertIsNone(module.inherit_S_A)
+                    self.assertIsNone(module.inherit_S_B)
+
+    def test_branch_selection_preserves_task0_rng_and_unselected_initialization(self):
+        results = []
+        for branches in ('both', 's', 'p'):
+            torch.manual_seed(1993)
+            module = self.make_module(dual_mask_lora_inherit=True, dual_mask_lora_inherit_branches=branches)
+            module.before_task(0)
+            results.append((module.S_lora[0].A_weight.clone(), torch.get_rng_state()))
+        for weights, rng in results[1:]:
+            self.assertTrue(torch.equal(weights, results[0][0]))
+            self.assertTrue(torch.equal(rng, results[0][1]))
+        for selected, fresh_branch in (('s', 'P'), ('p', 'S')):
+            module = self.make_module(dual_mask_lora_inherit=True, dual_mask_lora_inherit_branches=selected)
+            module.before_task(1)
+            with torch.no_grad():
+                module.S_lora[1].B_weight.fill_(.2)
+                module.P_lora[1].B_weight.fill_(.3)
+            module.after_task(1)
+            fresh = copy.deepcopy(module)
+            fresh.args = dict(module.args, dual_mask_lora_inherit=False)
+            torch.manual_seed(23)
+            module.before_task(2)
+            rng = torch.get_rng_state()
+            torch.manual_seed(23)
+            fresh.before_task(2)
+            self.assertTrue(torch.equal(rng, torch.get_rng_state()))
+            actual, expected = getattr(module, fresh_branch + '_lora')[2], getattr(fresh, fresh_branch + '_lora')[2]
+            self.assertTrue(torch.equal(actual.A_weight, expected.A_weight))
+            self.assertTrue(torch.equal(actual.B_weight, expected.B_weight))
+
+    def test_invalid_branch_selection_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, 'dual_mask_lora_inherit_branches'):
+            self.make_module(dual_mask_lora_inherit_branches='sp_typo')
+
+    def test_disabled_switch_overrides_branch_selection(self):
+        for branches in ('both', 's', 'p'):
+            module = self.make_module(dual_mask_lora_inherit=False, dual_mask_lora_inherit_branches=branches)
+            self.assertFalse(module._branch_inheritance_enabled('S'))
+            self.assertFalse(module._branch_inheritance_enabled('P'))
 
     def test_private_rank_resize_and_no_learning_does_not_remerge(self):
         module = self.make_module(dual_mask_lora_inherit=True)
@@ -100,6 +158,11 @@ class LoRAInheritanceTests(unittest.TestCase):
             module.inherit_P_A, module.inherit_P_B = previous_a.clone(), previous_b.clone()
 
     def test_real_learner_three_task_cpu_smoke(self):
+        for branches in ('both', 's', 'p'):
+            with self.subTest(branches=branches):
+                self.check_real_learner_three_task_cpu_smoke(branches)
+
+    def check_real_learner_three_task_cpu_smoke(self, branches):
         from methods.dlora import Learner
         from models.network import ViT
 
@@ -109,7 +172,8 @@ class LoRAInheritanceTests(unittest.TestCase):
                     total_sessions=3, rank=2, num_heads=2, init_epoch=2, epochs=2, num_workers=0,
                     dual_mask_svd_rank=2, dual_mask_competence_adaptive=False,
                     dual_mask_reg_weight=.01, dual_mask_conflict_reg_enabled=False,
-                    dual_mask_lora_inherit=True, dual_mask_qv_after_task0=False)
+                    dual_mask_lora_inherit=True, dual_mask_lora_inherit_branches=branches,
+                    dual_mask_qv_after_task0=False)
         encoder = ViT(img_size=8, patch_size=4, embed_dim=8, depth=1, num_heads=2, rank=2, n_tasks=3)
         with patch('models.network._create_vision_transformer', return_value=encoder):
             learner = Learner(args)
@@ -124,9 +188,14 @@ class LoRAInheritanceTests(unittest.TestCase):
             self.assertIsNone(module.S_lora[task])
             self.assertIsNone(module.P_lora[task])
             self.assertTrue(torch.isfinite(module.qkv.weight).all())
-            self.assertIsNotNone(module.inherit_S_B)
-            if task > 0:
+            if branches in ('both', 's'):
+                self.assertIsNotNone(module.inherit_S_B)
+            else:
+                self.assertIsNone(module.inherit_S_B)
+            if task > 0 and branches in ('both', 'p'):
                 self.assertIsNotNone(module.inherit_P_B)
+            else:
+                self.assertIsNone(module.inherit_P_B)
 
     def test_sequential_initialization_does_not_overwrite_inherited_factors(self):
         module = self.make_module(dual_mask_lora_inherit=True, use_slora=False, use_plora=False)

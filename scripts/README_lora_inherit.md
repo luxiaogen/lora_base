@@ -2,6 +2,60 @@
 
 Branch: `codex/lora-inherit`, based on `57032f8`. Main is not changed.
 
+## S-only / P-only follow-up (2026-09-14)
+
+The new `dual_mask_lora_inherit_branches=both|s|p` selects which branch inherits.
+The existing `dual_mask_lora_inherit` remains the master switch; false always means
+fresh initialization. Omitting the new option preserves the previous both-branch behavior.
+
+| Condition | Master switch | Branch selector | S initialization | P initialization |
+|---|---|---|---|---|
+| fresh | false | both | fresh each task | fresh each task |
+| s_only | true | s | inherit from Task1 | fresh each task |
+| p_only | true | p | fresh each task | first active at Task1; inherit from Task2 |
+
+Both S and P still train normally. Task0 remains fresh QKV with anchor10. Selected
+branches alone cache their factors, and retain the centered `BA - BA_start` update.
+Adaptive rank resizing, frozen A after Task0, weight decay and merge semantics are
+the same as the original inheritance experiment described below.
+
+Run these scripts from the repository root in the existing training environment:
+
+```bash
+git fetch origin
+git switch codex/lora-inherit
+git pull --ff-only origin codex/lora-inherit
+
+# 5090D: ImageNet-R and ImageNet-A; 18 full T10 runs
+lrun scripts/9_14_lora_inherit_branches_5090.sh ./logs/9_14_lora_inherit_branches_5090.log
+
+# 3090: CUB; 9 full T10 runs
+lrun scripts/9_14_lora_inherit_branches_3090.sh ./logs/9_14_lora_inherit_branches_3090.log
+```
+
+For each dataset, seeds 1993/1996/1997 each run fresh, s_only, then p_only.
+All 27 runs start independently from pretrained weights, train Task0-9 for 20
+epochs/task and CA5, and never load a Task0 checkpoint. Dataset paths are read from
+the machine's existing JSON configs. The scripts do not change directories.
+The run count is 1.5 times the original sweep, so budget about 1.5 times its
+observed wall time; this is not a ten-hour cutoff. To run only ImageNet-R:
+
+```bash
+bash scripts/9_14_lora_inherit_branches.sh imgr10
+```
+
+Use `DRY_RUN=1 bash scripts/9_14_lora_inherit_branches_5090.sh` to inspect all
+commands without loading models or checking dataset paths. The launcher preflight
+runs the inheritance and script tests; synthetic 2-epoch output belongs to those
+tests, followed by the real 20-epoch experiments.
+
+Verification: 23 focused tests pass locally, including both/s/p three-task CPU
+smokes, nonselected-branch initialization/RNG, zero initial delta, gradients,
+exactly-once merge, branch-selective caching, and comparison of every generated
+CLI override with the previous sweep specifications. This verifies execution,
+not GPU performance. Compare same-machine fresh against s_only and p_only on
+Average/Last, Old/New and Forgetting, with all three seeds reported.
+
 ## Exact change
 
 `dual_mask_lora_inherit=false` is the unchanged fresh-initialization baseline.
