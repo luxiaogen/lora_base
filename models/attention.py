@@ -669,7 +669,7 @@ class Attention_LoRA(nn.Module):
 
         self.rebuild_dual_masks()  # Dual masks rebuilt: W0 protect density 0.5000, plastic density 0.5000
         projection_mode = "QKV"
-        if t == 0 and self.args.get("dual_mask_task0_qk", False):
+        if self.args.get("dual_mask_qk_all_tasks", False) or (t == 0 and self.args.get("dual_mask_task0_qk", False)):
             projection_mode = "QK"
         elif t > 0 and self.args.get("dual_mask_qv_after_task0", False):
             projection_mode = "QV"
@@ -915,7 +915,7 @@ class Attention_LoRA(nn.Module):
 
     def _projection_delta(self, delta: torch.Tensor) -> torch.Tensor:
         # Read args dynamically so a resumed Task0 snapshot can switch projections.
-        if self.cur_task == 0 and self.args.get("dual_mask_task0_qk", False):
+        if self.args.get("dual_mask_qk_all_tasks", False) or (self.cur_task == 0 and self.args.get("dual_mask_task0_qk", False)):
             delta = delta.clone()
             delta[2 * self.dim:3 * self.dim] = 0
         elif self.cur_task > 0 and self.args.get("dual_mask_qv_after_task0", False):
