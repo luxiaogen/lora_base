@@ -4,7 +4,12 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
-from utils.p_conflict_diagnostics import conditional_onehot_weights, diagnostic_logits, evaluate_p_conflict
+from utils.p_conflict_diagnostics import (
+    conditional_blend_weights,
+    conditional_onehot_weights,
+    diagnostic_logits,
+    evaluate_p_conflict,
+)
 
 
 class ToyNetwork(nn.Module):
@@ -56,7 +61,7 @@ class PredictedOnehotTests(unittest.TestCase):
         net = RepeatedForwardDriftNetwork()
         outputs, _ = diagnostic_logits(net, self.images, 1., torch.tensor([0, 1, 1]))
         torch.testing.assert_close(outputs['ones'], self.images + 2e-6, rtol=0, atol=0)
-        self.assertEqual(net.calls, 7)
+        self.assertEqual(net.calls, 8)
 
     def test_conditional_onehot_only_changes_low_margin_samples(self):
         task_probs = torch.tensor([[0.55, 0.45], [0.9, 0.1]])
@@ -66,6 +71,26 @@ class PredictedOnehotTests(unittest.TestCase):
             conditional_onehot_weights(torch.ones(2, 1), torch.zeros(2, dtype=torch.long), 0.2),
             torch.ones(2, 1),
         )
+
+    def test_conditional_blend_changes_strength_continuously(self):
+        task_probs = torch.tensor([[0.5, 0.5], [0.55, 0.45], [0.9, 0.1]])
+        predicted_tasks = torch.tensor([0, 0, 0])
+        weights = conditional_blend_weights(task_probs, predicted_tasks, 0.2)
+        torch.testing.assert_close(weights, torch.tensor([[1., 0.], [1., 0.5], [1., 1.]]))
+        torch.testing.assert_close(
+            conditional_blend_weights(torch.ones(2, 1), torch.zeros(2, dtype=torch.long), 0.2),
+            torch.ones(2, 1),
+        )
+
+    def test_conditional_blend_is_label_free_and_preserves_high_margin_logits(self):
+        a, wa = diagnostic_logits(self.net, self.images, 1., torch.tensor([0, 1, 1]), 0.5)
+        b, wb = diagnostic_logits(self.net, self.images, 1., torch.tensor([1, 0, 0]), 0.5)
+        torch.testing.assert_close(a['conditional_blend'], b['conditional_blend'])
+        torch.testing.assert_close(wa['conditional_blend'], wb['conditional_blend'])
+        high_margin = torch.tensor([[8., 0., 0., 0.]])
+        outputs, weights = diagnostic_logits(self.net, high_margin, 1., torch.tensor([0]), 0.1)
+        torch.testing.assert_close(weights['conditional_blend'], torch.ones(1, 2))
+        self.assertTrue(torch.equal(outputs['conditional_blend'], outputs['ones']))
 
     def test_conditional_prediction_does_not_read_true_tasks(self):
         a, _ = diagnostic_logits(self.net, self.images, 1., torch.tensor([0, 1, 1]), 0.5)
@@ -77,6 +102,7 @@ class PredictedOnehotTests(unittest.TestCase):
         report = evaluate_p_conflict(self.net, loader, torch.device('cpu'), 1.)
         hard = report['predicted_onehot']
         conditional = report['conditional_onehot']
+        blend = report['conditional_blend']
         groups = hard['by_first_pass_task']
         self.assertEqual(groups['correct']['samples'], 2)
         self.assertEqual(groups['wrong']['samples'], 1)
@@ -88,6 +114,9 @@ class PredictedOnehotTests(unittest.TestCase):
         self.assertEqual(conditional['margin_threshold'], 0.1)
         self.assertEqual(conditional['selected_corrected'], conditional['corrected'])
         self.assertEqual(conditional['selected_broken'], conditional['broken'])
+        self.assertEqual(blend['margin_threshold'], 0.1)
+        self.assertGreaterEqual(blend['mean_strength'], 0)
+        self.assertLessEqual(blend['mean_strength'], 1)
         self.assertEqual(set(hard['first_pass_evidence']), {'corrected', 'broken'})
         self.assertEqual(hard['first_pass_evidence']['corrected']['task_margin']['count'], hard['corrected'])
         self.assertEqual(hard['first_pass_evidence']['broken']['task_margin']['count'], hard['broken'])

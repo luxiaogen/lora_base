@@ -59,6 +59,20 @@ def conditional_onehot_weights(task_probs, predicted_tasks, margin_threshold):
 
 
 @torch.no_grad()
+def conditional_blend_weights(task_probs, predicted_tasks, margin_threshold):
+    """Continuously blend from ones to predicted one-hot below the margin threshold."""
+    n = task_probs.shape[1]
+    threshold = float(margin_threshold)
+    if n == 1 or threshold <= 0:
+        return torch.ones_like(task_probs)
+    top_two = task_probs.topk(2, dim=1).values
+    margin = top_two[:, 0] - top_two[:, 1]
+    strength = (1 - margin / threshold).clamp(0, 1).unsqueeze(1)
+    predicted = F.one_hot(predicted_tasks, num_classes=n).to(task_probs)
+    return 1 + strength * (predicted - 1)
+
+
+@torch.no_grad()
 def diagnostic_logits(network, images, scale, true_tasks, margin_threshold=0.1):
     """Oracle changes the features, not the set of candidate classes."""
     n = network.numtask
@@ -74,6 +88,7 @@ def diagnostic_logits(network, images, scale, true_tasks, margin_threshold=0.1):
         'conservative': conservative_weights(task_probs),
         'predicted_onehot': predicted_onehot,
         'conditional_onehot': conditional_onehot_weights(task_probs, predicted_tasks, margin_threshold),
+        'conditional_blend': conditional_blend_weights(task_probs, predicted_tasks, margin_threshold),
         'oracle': F.one_hot(true_tasks, num_classes=n).to(task_probs),
     }
     outputs = {'ones': baseline}
@@ -82,7 +97,7 @@ def diagnostic_logits(network, images, scale, true_tasks, margin_threshold=0.1):
             continue
         with conflict_weights(network, values):
             logits = network.interface(images)
-        if mode == 'conditional_onehot':
+        if mode in {'conditional_onehot', 'conditional_blend'}:
             selected = values.ne(1).any(1).unsqueeze(1)
             logits = torch.where(selected, logits, baseline)
         outputs[mode] = logits
@@ -112,10 +127,10 @@ def evaluate_p_conflict(network, loader, device, scale, margin_threshold=0.1):
     generator_states = {g: g.get_state() for g in generators}
     cuda_devices = sorted({p.device.index for p in network.parameters() if p.device.type == 'cuda'})
     prediction_modes = ('ones', 'uniform', 'soft', 'conservative', 'predicted_onehot',
-                        'conditional_onehot', 'oracle')
+                        'conditional_onehot', 'conditional_blend', 'oracle')
     predictions = {mode: [] for mode in prediction_modes}
     labels, weight_sums = [], {}
-    task_margins, task_entropies, conditional_gates = [], [], []
+    task_margins, task_entropies, conditional_gates, blend_strengths = [], [], [], []
     try:
         with torch.random.fork_rng(devices=cuda_devices), torch.no_grad():
             network.eval()
@@ -136,6 +151,7 @@ def evaluate_p_conflict(network, loader, device, scale, margin_threshold=0.1):
                 task_margins.append(margin.cpu())
                 task_entropies.append(entropy.cpu())
                 conditional_gates.append(weights['conditional_onehot'].ne(1).any(1).cpu())
+                blend_strengths.append((1 - weights['conditional_blend'].min(1).values).cpu())
                 for mode, logits in outputs.items():
                     predictions[mode].append(logits.argmax(1).cpu())
                     weight_sums[mode] = weight_sums.get(mode, 0) + weights[mode].sum(0).cpu()
@@ -151,6 +167,7 @@ def evaluate_p_conflict(network, loader, device, scale, margin_threshold=0.1):
     task_margins = torch.cat(task_margins)
     task_entropies = torch.cat(task_entropies)
     conditional_gates = torch.cat(conditional_gates)
+    blend_strengths = torch.cat(blend_strengths)
     baseline_correct = predictions['ones'] == targets
     true_task = targets // network.class_num
     first_task_correct = predictions['ones'] // network.class_num == true_task
@@ -205,6 +222,13 @@ def evaluate_p_conflict(network, loader, device, scale, margin_threshold=0.1):
         'selected_rate': float(conditional_gates.double().mean() * 100),
         'selected_corrected': int((conditional_gates & conditional_correct & ~baseline_correct).sum()),
         'selected_broken': int((conditional_gates & ~conditional_correct & baseline_correct).sum()),
+    })
+    blend_active = blend_strengths > 0
+    report['conditional_blend'].update({
+        'margin_threshold': float(margin_threshold),
+        'active_samples': int(blend_active.sum()),
+        'active_rate': float(blend_active.double().mean() * 100),
+        'mean_strength': float(blend_strengths.double().mean()),
     })
     return report
 
