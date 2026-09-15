@@ -19,6 +19,16 @@ class ToyNetwork(nn.Module):
         return images + (self._p_conflict_weights - 1).repeat_interleave(2, dim=1)
 
 
+class RepeatedForwardDriftNetwork(ToyNetwork):
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+
+    def interface(self, images):
+        self.calls += 1
+        return super().interface(images) + self.calls * 2e-6
+
+
 class PredictedOnehotTests(unittest.TestCase):
     def setUp(self):
         self.net = ToyNetwork()
@@ -41,6 +51,12 @@ class PredictedOnehotTests(unittest.TestCase):
         torch.testing.assert_close(a['predicted_onehot'], b['predicted_onehot'])
         torch.testing.assert_close(wa['predicted_onehot'], wb['predicted_onehot'])
         self.assertFalse(torch.equal(a['oracle'], b['oracle']))
+
+    def test_baseline_mode_reuses_first_forward(self):
+        net = RepeatedForwardDriftNetwork()
+        outputs, _ = diagnostic_logits(net, self.images, 1., torch.tensor([0, 1, 1]))
+        torch.testing.assert_close(outputs['ones'], self.images + 2e-6, rtol=0, atol=0)
+        self.assertEqual(net.calls, 6)
 
     def test_group_counts_and_correction_accounting(self):
         loader = DataLoader(TensorDataset(torch.arange(3), self.images, torch.tensor([0, 2, 3])), batch_size=2)
