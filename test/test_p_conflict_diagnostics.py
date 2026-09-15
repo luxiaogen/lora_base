@@ -157,7 +157,7 @@ class PConflictNetworkTests(unittest.TestCase):
     def require_feature(self):
         self.assertTrue(hasattr(make_module(), 'p_conflict_components'), 'P-conflict diagnostics not implemented')
 
-    def test_four_modes_all_classes_soft_weights_and_no_label_leakage(self):
+    def test_five_modes_all_classes_soft_weights_and_no_label_leakage(self):
         self.require_feature()
         from utils.p_conflict_diagnostics import diagnostic_logits, conflict_weights
         torch.manual_seed(29)
@@ -166,22 +166,35 @@ class PConflictNetworkTests(unittest.TestCase):
         baseline = net.interface(x)
         outputs, weights = diagnostic_logits(net, x, 20., torch.tensor([0, 1, 2]))
         self.assertTrue(torch.equal(outputs['ones'], baseline))
-        self.assertEqual(set(outputs), {'ones', 'uniform', 'soft', 'oracle'})
+        self.assertEqual(set(outputs), {'ones', 'uniform', 'soft', 'conservative', 'oracle'})
         expected = (20 * baseline).softmax(1).reshape(3, 3, 2).sum(2)
         torch.testing.assert_close(weights['soft'], expected)
         torch.testing.assert_close(weights['uniform'], torch.full((3, 3), 1/3))
+        self.assertTrue(torch.all(weights['conservative'] >= weights['soft']))
+        self.assertTrue(torch.all(weights['conservative'] <= 1))
         self.assertTrue(torch.equal(weights['oracle'], torch.eye(3)))
         for mode, logits in outputs.items():
             self.assertEqual(logits.shape, (3, 6))
             with conflict_weights(net, weights[mode]):
                 torch.testing.assert_close(logits, net.interface(x))
         alternate, _ = diagnostic_logits(net, x, 20., torch.tensor([2, 0, 1]))
-        for mode in ('ones', 'uniform', 'soft'):
+        for mode in ('ones', 'uniform', 'soft', 'conservative'):
             self.assertTrue(torch.equal(outputs[mode], alternate[mode]))
         self.assertFalse(torch.equal(outputs['oracle'], alternate['oracle']))
         self.assertTrue(torch.equal(net.interface(x), baseline))
 
-    def test_task0_four_modes_identical(self):
+    def test_conservative_weights_use_entropy_without_a_tuned_threshold(self):
+        from utils.p_conflict_diagnostics import conservative_weights
+        flat = torch.full((2, 4), .25)
+        torch.testing.assert_close(conservative_weights(flat), torch.ones_like(flat))
+        sharp = torch.eye(4)
+        torch.testing.assert_close(conservative_weights(sharp), sharp)
+        probs = torch.tensor([[.7, .2, .1]])
+        weights = conservative_weights(probs)
+        self.assertTrue(torch.all(weights > probs))
+        self.assertTrue(torch.all(weights < 1))
+
+    def test_task0_five_modes_identical(self):
         self.require_feature()
         from utils.p_conflict_diagnostics import diagnostic_logits
         net = make_network()
@@ -249,7 +262,7 @@ class PConflictNetworkTests(unittest.TestCase):
         self.assertEqual(summary['ones']['forgetting'], ((96. - 83.) + (88. - 80.)) / 2)
         self.assertIsNone(summarize_p_conflict(reports[-1:])['ones']['forgetting'])
 
-    def test_real_learner_trains_three_tasks_and_reports_four_modes(self):
+    def test_real_learner_trains_three_tasks_and_reports_five_modes(self):
         from methods.dlora import Learner
         from models.network import ViT
         from utils.p_conflict_diagnostics import evaluate_p_conflict
@@ -277,7 +290,7 @@ class PConflictNetworkTests(unittest.TestCase):
         test = TensorDataset(torch.arange(6), torch.randn(6, 3, 8, 8), torch.arange(6))
         report = evaluate_p_conflict(learner._network, DataLoader(test, batch_size=3),
                                      torch.device('cpu'), learner.scale)
-        self.assertEqual(set(report), {'ones', 'uniform', 'soft', 'oracle'})
+        self.assertEqual(set(report), {'ones', 'uniform', 'soft', 'conservative', 'oracle'})
         self.assertEqual(sum(map(sum, report['ones']['task_confusion_counts'])), 6)
 
 

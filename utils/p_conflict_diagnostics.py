@@ -1,5 +1,6 @@
 """Evaluation-only interventions on already merged, suppressed P contributions."""
 from contextlib import contextmanager
+import math
 import random
 
 import numpy as np
@@ -34,6 +35,17 @@ def conflict_weights(network, weights):
 
 
 @torch.no_grad()
+def conservative_weights(task_probs):
+    """Blend from baseline ones toward soft routing only when task evidence is sharp."""
+    n = task_probs.shape[1]
+    if n == 1:
+        return torch.ones_like(task_probs)
+    entropy = -(task_probs * task_probs.clamp_min(torch.finfo(task_probs.dtype).tiny).log()).sum(1)
+    confidence = (1 - entropy / math.log(n)).clamp(0, 1).unsqueeze(1)
+    return 1 - confidence * (1 - task_probs)
+
+
+@torch.no_grad()
 def diagnostic_logits(network, images, scale, true_tasks):
     """Oracle changes the features, not the set of candidate classes."""
     n = network.numtask
@@ -44,6 +56,7 @@ def diagnostic_logits(network, images, scale, true_tasks):
         'ones': torch.ones_like(task_probs),
         'uniform': torch.full_like(task_probs, 1.0 / n),
         'soft': task_probs,
+        'conservative': conservative_weights(task_probs),
         'oracle': F.one_hot(true_tasks, num_classes=n).to(task_probs),
     }
     outputs = {}
@@ -62,7 +75,7 @@ def evaluate_p_conflict(network, loader, device, scale):
                               getattr(loader.sampler, 'generator', None)) if g is not None}
     generator_states = {g: g.get_state() for g in generators}
     cuda_devices = sorted({p.device.index for p in network.parameters() if p.device.type == 'cuda'})
-    predictions = {mode: [] for mode in ('ones', 'uniform', 'soft', 'oracle')}
+    predictions = {mode: [] for mode in ('ones', 'uniform', 'soft', 'conservative', 'oracle')}
     labels, weight_sums = [], {}
     try:
         with torch.random.fork_rng(devices=cuda_devices), torch.no_grad():
