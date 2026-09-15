@@ -27,12 +27,12 @@ class OvernightQVConservativeScriptsTests(unittest.TestCase):
         qv_script = ROOT / 'scripts/9_15_imgr10_qv_pair_3090.sh'
         source_5090, runs_5090 = commands(conservative_script)
         source_3090, runs_3090 = commands(qv_script)
-        self.assertEqual(len(runs_5090), 3)
-        self.assertEqual(len(runs_3090), 6)
+        self.assertEqual(len(runs_5090), 1)
+        self.assertEqual(len(runs_3090), 2)
         self.assertNotIn('cd "$(dirname', source_5090 + source_3090)
         for script in (conservative_script, qv_script):
             subprocess.run(['bash', '-n', str(script)], check=True)
-        for seed in (1993, 1996, 1997):
+        for seed in (1993,):
             diagnostic = next(run for run in runs_5090 if run['seed'] == f'[{seed}]')
             self.assertEqual(diagnostic['dual_mask_p_conflict_diagnostics'], 'true')
             self.assertEqual(diagnostic['dual_mask_qv_all_tasks'], 'false')
@@ -57,12 +57,12 @@ class OvernightQVConservativeScriptsTests(unittest.TestCase):
 
     def test_specs_record_same_matrices_as_scripts(self):
         expectations = (
-            ('imgr10_conservative_soft_5090', 3),
-            ('imgr10_qv_pair_3090', 6),
+            ('imgr10_conservative_soft_5090', 1),
+            ('imgr10_qv_pair_3090', 2),
         )
         for name, expected_runs in expectations:
             spec = json.loads((ROOT / f'scripts/sweeps/{name}.json').read_text())
-            self.assertEqual(spec['seeds'], [1993, 1996, 1997])
+            self.assertEqual(spec['seeds'], [1993])
             self.assertEqual(len(spec['seeds']) * len(spec['variants']), expected_runs)
             self.assertEqual(spec['datasets'][0]['config'], 'exps/dlora/imgr10.json')
 
