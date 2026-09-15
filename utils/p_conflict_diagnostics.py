@@ -46,19 +46,34 @@ def conservative_weights(task_probs):
 
 
 @torch.no_grad()
-def diagnostic_logits(network, images, scale, true_tasks):
+def conditional_onehot_weights(task_probs, predicted_tasks, margin_threshold):
+    """Use predicted one-hot only when the top-two task probabilities are close."""
+    n = task_probs.shape[1]
+    if n == 1:
+        return torch.ones_like(task_probs)
+    top_two = task_probs.topk(2, dim=1).values
+    margin = top_two[:, 0] - top_two[:, 1]
+    ambiguous = margin < float(margin_threshold)
+    predicted = F.one_hot(predicted_tasks, num_classes=n).to(task_probs)
+    return torch.where(ambiguous.unsqueeze(1), predicted, torch.ones_like(task_probs))
+
+
+@torch.no_grad()
+def diagnostic_logits(network, images, scale, true_tasks, margin_threshold=0.1):
     """Oracle changes the features, not the set of candidate classes."""
     n = network.numtask
     with conflict_weights(network, None):
         baseline = network.interface(images)
     task_probs = (baseline * scale).softmax(1).reshape(len(images), n, network.class_num).sum(2)
     predicted_tasks = baseline.argmax(1) // network.class_num
+    predicted_onehot = F.one_hot(predicted_tasks, num_classes=n).to(task_probs)
     weights = {
         'ones': torch.ones_like(task_probs),
         'uniform': torch.full_like(task_probs, 1.0 / n),
         'soft': task_probs,
         'conservative': conservative_weights(task_probs),
-        'predicted_onehot': F.one_hot(predicted_tasks, num_classes=n).to(task_probs),
+        'predicted_onehot': predicted_onehot,
+        'conditional_onehot': conditional_onehot_weights(task_probs, predicted_tasks, margin_threshold),
         'oracle': F.one_hot(true_tasks, num_classes=n).to(task_probs),
     }
     outputs = {'ones': baseline}
@@ -66,11 +81,29 @@ def diagnostic_logits(network, images, scale, true_tasks):
         if mode == 'ones':
             continue
         with conflict_weights(network, values):
-            outputs[mode] = network.interface(images)
+            logits = network.interface(images)
+        if mode == 'conditional_onehot':
+            selected = values.ne(1).any(1).unsqueeze(1)
+            logits = torch.where(selected, logits, baseline)
+        outputs[mode] = logits
     return outputs, weights
 
 
-def evaluate_p_conflict(network, loader, device, scale):
+def _distribution(values):
+    if not values.numel():
+        return {'count': 0, 'mean': None, 'q25': None, 'median': None, 'q75': None}
+    values = values.double()
+    quantiles = torch.quantile(values, torch.tensor([0.25, 0.5, 0.75], dtype=values.dtype))
+    return {
+        'count': int(values.numel()),
+        'mean': float(values.mean()),
+        'q25': float(quantiles[0]),
+        'median': float(quantiles[1]),
+        'q75': float(quantiles[2]),
+    }
+
+
+def evaluate_p_conflict(network, loader, device, scale, margin_threshold=0.1):
     """Read-only, post-CA diagnostic. No results feed training or normal predictions."""
     python_state, numpy_state = random.getstate(), np.random.get_state()
     modes = [(m, m.training) for m in network.modules()]
@@ -78,15 +111,31 @@ def evaluate_p_conflict(network, loader, device, scale):
                               getattr(loader.sampler, 'generator', None)) if g is not None}
     generator_states = {g: g.get_state() for g in generators}
     cuda_devices = sorted({p.device.index for p in network.parameters() if p.device.type == 'cuda'})
-    predictions = {mode: [] for mode in ('ones', 'uniform', 'soft', 'conservative', 'predicted_onehot', 'oracle')}
+    prediction_modes = ('ones', 'uniform', 'soft', 'conservative', 'predicted_onehot',
+                        'conditional_onehot', 'oracle')
+    predictions = {mode: [] for mode in prediction_modes}
     labels, weight_sums = [], {}
+    task_margins, task_entropies, conditional_gates = [], [], []
     try:
         with torch.random.fork_rng(devices=cuda_devices), torch.no_grad():
             network.eval()
             for _, images, targets in loader:
                 images, targets = images.to(device), targets.to(device)
-                outputs, weights = diagnostic_logits(network, images, scale, targets // network.class_num)
+                outputs, weights = diagnostic_logits(
+                    network, images, scale, targets // network.class_num, margin_threshold)
                 labels.append(targets.cpu())
+                task_probs = weights['soft']
+                if network.numtask == 1:
+                    margin = torch.ones(len(images), device=images.device)
+                    entropy = torch.zeros(len(images), device=images.device)
+                else:
+                    top_two = task_probs.topk(2, dim=1).values
+                    margin = top_two[:, 0] - top_two[:, 1]
+                    entropy = -(task_probs * task_probs.clamp_min(
+                        torch.finfo(task_probs.dtype).tiny).log()).sum(1) / math.log(network.numtask)
+                task_margins.append(margin.cpu())
+                task_entropies.append(entropy.cpu())
+                conditional_gates.append(weights['conditional_onehot'].ne(1).any(1).cpu())
                 for mode, logits in outputs.items():
                     predictions[mode].append(logits.argmax(1).cpu())
                     weight_sums[mode] = weight_sums.get(mode, 0) + weights[mode].sum(0).cpu()
@@ -99,6 +148,9 @@ def evaluate_p_conflict(network, loader, device, scale):
             module.training = training
     targets = torch.cat(labels)
     predictions = {mode: torch.cat(values) for mode, values in predictions.items()}
+    task_margins = torch.cat(task_margins)
+    task_entropies = torch.cat(task_entropies)
+    conditional_gates = torch.cat(conditional_gates)
     baseline_correct = predictions['ones'] == targets
     true_task = targets // network.class_num
     first_task_correct = predictions['ones'] // network.class_num == true_task
@@ -132,6 +184,28 @@ def evaluate_p_conflict(network, loader, device, scale):
                     'broken': int((group & ~correct & baseline_correct).sum()),
                     'final_task_correct': int((group & (pred_task == true_task)).sum()),
                 }
+    hard_correct = predictions['predicted_onehot'] == targets
+    effect_groups = {
+        'corrected': hard_correct & ~baseline_correct,
+        'broken': ~hard_correct & baseline_correct,
+    }
+    report['predicted_onehot']['first_pass_evidence'] = {
+        name: {
+            'task_margin': _distribution(task_margins[group]),
+            'normalized_entropy': _distribution(task_entropies[group]),
+            'conditional_gate_rate': float(conditional_gates[group].double().mean() * 100)
+            if group.any() else None,
+        }
+        for name, group in effect_groups.items()
+    }
+    conditional_correct = predictions['conditional_onehot'] == targets
+    report['conditional_onehot'].update({
+        'margin_threshold': float(margin_threshold),
+        'selected_samples': int(conditional_gates.sum()),
+        'selected_rate': float(conditional_gates.double().mean() * 100),
+        'selected_corrected': int((conditional_gates & conditional_correct & ~baseline_correct).sum()),
+        'selected_broken': int((conditional_gates & ~conditional_correct & baseline_correct).sum()),
+    })
     return report
 
 

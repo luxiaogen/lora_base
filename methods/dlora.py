@@ -842,7 +842,8 @@ class Learner(BaseLearner):
         if self.args.get('dual_mask_p_conflict_diagnostics', False):
             from utils.p_conflict_diagnostics import evaluate_p_conflict, summarize_p_conflict
             start = time.perf_counter()
-            report = evaluate_p_conflict(self._network, self.test_loader, self._device, self.scale)
+            margin_threshold = float(self.args.get('dual_mask_conflict_ratio', 0.1))
+            report = evaluate_p_conflict(self._network, self.test_loader, self._device, self.scale, margin_threshold)
             logging.info('P-conflict diagnostic Task %s: %s', self._cur_task, json.dumps(report))
             history = getattr(self, '_p_conflict_reports', [])
             history.append(report)

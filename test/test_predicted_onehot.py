@@ -4,7 +4,7 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
-from utils.p_conflict_diagnostics import diagnostic_logits, evaluate_p_conflict
+from utils.p_conflict_diagnostics import conditional_onehot_weights, diagnostic_logits, evaluate_p_conflict
 
 
 class ToyNetwork(nn.Module):
@@ -56,12 +56,27 @@ class PredictedOnehotTests(unittest.TestCase):
         net = RepeatedForwardDriftNetwork()
         outputs, _ = diagnostic_logits(net, self.images, 1., torch.tensor([0, 1, 1]))
         torch.testing.assert_close(outputs['ones'], self.images + 2e-6, rtol=0, atol=0)
-        self.assertEqual(net.calls, 6)
+        self.assertEqual(net.calls, 7)
+
+    def test_conditional_onehot_only_changes_low_margin_samples(self):
+        task_probs = torch.tensor([[0.55, 0.45], [0.9, 0.1]])
+        weights = conditional_onehot_weights(task_probs, torch.tensor([0, 0]), 0.2)
+        torch.testing.assert_close(weights, torch.tensor([[1., 0.], [1., 1.]]))
+        torch.testing.assert_close(
+            conditional_onehot_weights(torch.ones(2, 1), torch.zeros(2, dtype=torch.long), 0.2),
+            torch.ones(2, 1),
+        )
+
+    def test_conditional_prediction_does_not_read_true_tasks(self):
+        a, _ = diagnostic_logits(self.net, self.images, 1., torch.tensor([0, 1, 1]), 0.5)
+        b, _ = diagnostic_logits(self.net, self.images, 1., torch.tensor([1, 0, 0]), 0.5)
+        torch.testing.assert_close(a['conditional_onehot'], b['conditional_onehot'])
 
     def test_group_counts_and_correction_accounting(self):
         loader = DataLoader(TensorDataset(torch.arange(3), self.images, torch.tensor([0, 2, 3])), batch_size=2)
         report = evaluate_p_conflict(self.net, loader, torch.device('cpu'), 1.)
         hard = report['predicted_onehot']
+        conditional = report['conditional_onehot']
         groups = hard['by_first_pass_task']
         self.assertEqual(groups['correct']['samples'], 2)
         self.assertEqual(groups['wrong']['samples'], 1)
@@ -70,6 +85,12 @@ class PredictedOnehotTests(unittest.TestCase):
             self.assertEqual(sum(group[key] for group in groups.values()), hard[key])
         self.assertAlmostEqual(hard['total'] - report['ones']['total'],
                                (hard['corrected'] - hard['broken']) * 100 / 3)
+        self.assertEqual(conditional['margin_threshold'], 0.1)
+        self.assertEqual(conditional['selected_corrected'], conditional['corrected'])
+        self.assertEqual(conditional['selected_broken'], conditional['broken'])
+        self.assertEqual(set(hard['first_pass_evidence']), {'corrected', 'broken'})
+        self.assertEqual(hard['first_pass_evidence']['corrected']['task_margin']['count'], hard['corrected'])
+        self.assertEqual(hard['first_pass_evidence']['broken']['task_margin']['count'], hard['broken'])
 
 
 if __name__ == '__main__':
