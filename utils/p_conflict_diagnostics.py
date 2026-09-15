@@ -52,11 +52,13 @@ def diagnostic_logits(network, images, scale, true_tasks):
     with conflict_weights(network, None):
         baseline = network.interface(images)
     task_probs = (baseline * scale).softmax(1).reshape(len(images), n, network.class_num).sum(2)
+    predicted_tasks = baseline.argmax(1) // network.class_num
     weights = {
         'ones': torch.ones_like(task_probs),
         'uniform': torch.full_like(task_probs, 1.0 / n),
         'soft': task_probs,
         'conservative': conservative_weights(task_probs),
+        'predicted_onehot': F.one_hot(predicted_tasks, num_classes=n).to(task_probs),
         'oracle': F.one_hot(true_tasks, num_classes=n).to(task_probs),
     }
     outputs = {}
@@ -75,7 +77,7 @@ def evaluate_p_conflict(network, loader, device, scale):
                               getattr(loader.sampler, 'generator', None)) if g is not None}
     generator_states = {g: g.get_state() for g in generators}
     cuda_devices = sorted({p.device.index for p in network.parameters() if p.device.type == 'cuda'})
-    predictions = {mode: [] for mode in ('ones', 'uniform', 'soft', 'conservative', 'oracle')}
+    predictions = {mode: [] for mode in ('ones', 'uniform', 'soft', 'conservative', 'predicted_onehot', 'oracle')}
     labels, weight_sums = [], {}
     try:
         with torch.random.fork_rng(devices=cuda_devices), torch.no_grad():
@@ -98,6 +100,7 @@ def evaluate_p_conflict(network, loader, device, scale):
     predictions = {mode: torch.cat(values) for mode, values in predictions.items()}
     baseline_correct = predictions['ones'] == targets
     true_task = targets // network.class_num
+    first_task_correct = predictions['ones'] // network.class_num == true_task
     n = network.numtask
     old = true_task < n - 1
     report = {}
@@ -118,6 +121,16 @@ def evaluate_p_conflict(network, loader, device, scale):
             'task_confusion_counts': confusion.tolist(),
             'mean_weights': (weight_sums[mode] / len(targets)).tolist(),
         }
+        if mode == 'predicted_onehot':
+            report[mode]['first_pass_task_accuracy'] = first_task_correct.double().mean().item() * 100
+            report[mode]['by_first_pass_task'] = {}
+            for name, group in [('correct', first_task_correct), ('wrong', ~first_task_correct)]:
+                report[mode]['by_first_pass_task'][name] = {
+                    'samples': int(group.sum()),
+                    'corrected': int((group & correct & ~baseline_correct).sum()),
+                    'broken': int((group & ~correct & baseline_correct).sum()),
+                    'final_task_correct': int((group & (pred_task == true_task)).sum()),
+                }
     return report
 
 
