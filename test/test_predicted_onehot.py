@@ -57,11 +57,25 @@ class PredictedOnehotTests(unittest.TestCase):
         torch.testing.assert_close(wa['predicted_onehot'], wb['predicted_onehot'])
         self.assertFalse(torch.equal(a['oracle'], b['oracle']))
 
+    def test_oracle_low_and_high_margin_partitions_are_complementary(self):
+        outputs, weights = diagnostic_logits(
+            self.net, self.images, 1., torch.tensor([0, 1, 1]), margin_threshold=0.5)
+        torch.testing.assert_close(
+            weights['conditional_oracle'],
+            torch.tensor([[1., 0.], [1., 1.], [1., 1.]]),
+        )
+        torch.testing.assert_close(
+            weights['high_confidence_oracle'],
+            torch.tensor([[1., 1.], [0., 1.], [0., 1.]]),
+        )
+        self.assertEqual(outputs['conditional_oracle'].shape, self.images.shape)
+        self.assertEqual(outputs['high_confidence_oracle'].shape, self.images.shape)
+
     def test_baseline_mode_reuses_first_forward(self):
         net = RepeatedForwardDriftNetwork()
         outputs, _ = diagnostic_logits(net, self.images, 1., torch.tensor([0, 1, 1]))
         torch.testing.assert_close(outputs['ones'], self.images + 2e-6, rtol=0, atol=0)
-        self.assertEqual(net.calls, 8)
+        self.assertEqual(net.calls, 10)
 
     def test_conditional_onehot_only_changes_low_margin_samples(self):
         task_probs = torch.tensor([[0.55, 0.45], [0.9, 0.1]])
@@ -103,6 +117,8 @@ class PredictedOnehotTests(unittest.TestCase):
         hard = report['predicted_onehot']
         conditional = report['conditional_onehot']
         blend = report['conditional_blend']
+        low_oracle = report['conditional_oracle']
+        high_oracle = report['high_confidence_oracle']
         groups = hard['by_first_pass_task']
         self.assertEqual(groups['correct']['samples'], 2)
         self.assertEqual(groups['wrong']['samples'], 1)
@@ -117,6 +133,10 @@ class PredictedOnehotTests(unittest.TestCase):
         self.assertEqual(blend['margin_threshold'], 0.1)
         self.assertGreaterEqual(blend['mean_strength'], 0)
         self.assertLessEqual(blend['mean_strength'], 1)
+        self.assertTrue(low_oracle['oracle_only'])
+        self.assertTrue(high_oracle['oracle_only'])
+        self.assertEqual(low_oracle['selected_samples'] + high_oracle['selected_samples'], 3)
+        self.assertAlmostEqual(low_oracle['selected_rate'] + high_oracle['selected_rate'], 100.)
         self.assertEqual(set(hard['first_pass_evidence']), {'corrected', 'broken'})
         self.assertEqual(hard['first_pass_evidence']['corrected']['task_margin']['count'], hard['corrected'])
         self.assertEqual(hard['first_pass_evidence']['broken']['task_margin']['count'], hard['broken'])
