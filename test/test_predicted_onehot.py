@@ -9,6 +9,7 @@ from utils.p_conflict_diagnostics import (
     conditional_onehot_weights,
     diagnostic_logits,
     evaluate_p_conflict,
+    select_counterfactual,
     select_top2_counterfactual,
 )
 
@@ -77,7 +78,7 @@ class PredictedOnehotTests(unittest.TestCase):
         ambiguous = torch.zeros_like(self.images)
         outputs, _ = diagnostic_logits(net, ambiguous, 1., torch.tensor([0, 1, 1]))
         torch.testing.assert_close(outputs['ones'], ambiguous + 2e-6, rtol=0, atol=0)
-        self.assertEqual(net.calls, 13)
+        self.assertEqual(net.calls, 15)
 
     def test_top2_task_oracle_only_routes_covered_low_margin_samples(self):
         net = ToyNetwork()
@@ -104,6 +105,34 @@ class PredictedOnehotTests(unittest.TestCase):
         torch.testing.assert_close(output, torch.tensor([[0., 2.], [2., 0.]]))
         self.assertTrue(torch.equal(accepted, torch.tensor([True, False])))
         self.assertTrue(torch.equal(selected_tasks, torch.tensor([1, 0])))
+
+    def test_gain_scores_keep_ones_as_a_fallback(self):
+        baseline = torch.tensor([[1., 0.]])
+        candidates = torch.tensor([[[1.2, 0.], [1., 0.1]]])
+        candidate_tasks = torch.tensor([[0, 1]])
+        output, accepted, selected_tasks, evidence = select_counterfactual(
+            baseline, candidates, candidate_tasks, 1., 1, score_mode='margin_gain')
+        self.assertTrue(bool(accepted[0]))
+        self.assertEqual(int(selected_tasks[0]), 0)
+        torch.testing.assert_close(output, candidates[:, 0])
+        self.assertGreater(float(evidence['margin_gain'][0]), 0.)
+        self.assertGreater(float(evidence['top_class_gain'][0]), 0.)
+
+    def test_union_candidates_recover_task_missed_by_probability_top2(self):
+        net = ToyNetwork()
+        net.numtask, net.class_num = 3, 2
+        images = torch.tensor([[4., -10., 3.9, 3.9, 3.8, 3.8]])
+        outputs, weights, _ = diagnostic_logits(
+            net, images, 1., torch.tensor([0]), margin_threshold=1., return_details=True)
+        torch.testing.assert_close(weights['top2_task_oracle'], torch.ones(1, 3))
+        torch.testing.assert_close(weights['union_task_oracle'], torch.tensor([[1., 0., 0.]]))
+        self.assertTrue(torch.equal(outputs['top2_task_oracle'], outputs['ones']))
+        self.assertFalse(torch.equal(outputs['union_task_oracle'], outputs['ones']))
+        loader = DataLoader(TensorDataset(torch.arange(1), images, torch.tensor([0])), batch_size=1)
+        report = evaluate_p_conflict(net, loader, torch.device('cpu'), 1., margin_threshold=1.)
+        coverage = report['ones']['candidate_coverage']
+        self.assertEqual(coverage['prob_top2']['covered_rate'], 0.)
+        self.assertEqual(coverage['union_top2']['covered_rate'], 100.)
 
     def test_conditional_onehot_only_changes_low_margin_samples(self):
         task_probs = torch.tensor([[0.55, 0.45], [0.9, 0.1]])
@@ -139,6 +168,10 @@ class PredictedOnehotTests(unittest.TestCase):
         b, _ = diagnostic_logits(self.net, self.images, 1., torch.tensor([1, 0, 0]), 0.5)
         torch.testing.assert_close(a['conditional_onehot'], b['conditional_onehot'])
         torch.testing.assert_close(a['top2_counterfactual'], b['top2_counterfactual'])
+        torch.testing.assert_close(a['union_counterfactual'], b['union_counterfactual'])
+        torch.testing.assert_close(a['union_delta_margin'], b['union_delta_margin'])
+        torch.testing.assert_close(a['union_own_gain'], b['union_own_gain'])
+        torch.testing.assert_close(a['union_top_class_gain'], b['union_top_class_gain'])
 
     def test_top2_counterfactual_preserves_high_margin_samples(self):
         high_margin = torch.tensor([[8., 0., 0., 0.]])
@@ -154,6 +187,7 @@ class PredictedOnehotTests(unittest.TestCase):
         conditional = report['conditional_onehot']
         blend = report['conditional_blend']
         counterfactual = report['top2_counterfactual']
+        union_counterfactual = report['union_counterfactual']
         top2_oracle = report['top2_task_oracle']
         low_oracle = report['conditional_oracle']
         high_oracle = report['high_confidence_oracle']
@@ -175,6 +209,8 @@ class PredictedOnehotTests(unittest.TestCase):
         self.assertGreaterEqual(counterfactual['evaluated_samples'], counterfactual['accepted_samples'])
         self.assertEqual(counterfactual['accepted_corrected'], counterfactual['corrected'])
         self.assertEqual(counterfactual['accepted_broken'], counterfactual['broken'])
+        self.assertEqual(set(union_counterfactual['selected_evidence']), {'corrected', 'broken'})
+        self.assertIn('margin_gain', union_counterfactual['selected_evidence']['corrected'])
         self.assertTrue(top2_oracle['oracle_only'])
         self.assertLessEqual(top2_oracle['true_task_in_top2_samples'],
                              top2_oracle['evaluated_samples'])

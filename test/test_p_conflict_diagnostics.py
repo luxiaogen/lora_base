@@ -169,7 +169,9 @@ class PConflictNetworkTests(unittest.TestCase):
         self.assertEqual(set(outputs), {'ones', 'uniform', 'soft', 'conservative', 'predicted_onehot',
                                         'conditional_onehot', 'conditional_blend', 'conditional_oracle',
                                         'high_confidence_oracle', 'top2_counterfactual',
-                                        'top2_task_oracle', 'oracle'})
+                                        'union_counterfactual', 'union_delta_margin', 'union_own_gain',
+                                        'union_top_class_gain',
+                                        'top2_task_oracle', 'union_task_oracle', 'oracle'})
         expected = (20 * baseline).softmax(1).reshape(3, 3, 2).sum(2)
         torch.testing.assert_close(weights['soft'], expected)
         torch.testing.assert_close(weights['uniform'], torch.full((3, 3), 1/3))
@@ -182,7 +184,9 @@ class PConflictNetworkTests(unittest.TestCase):
                 torch.testing.assert_close(logits, net.interface(x))
         alternate, _ = diagnostic_logits(net, x, 20., torch.tensor([2, 0, 1]))
         for mode in ('ones', 'uniform', 'soft', 'conservative', 'predicted_onehot',
-                     'conditional_onehot', 'conditional_blend', 'top2_counterfactual'):
+                     'conditional_onehot', 'conditional_blend', 'top2_counterfactual',
+                     'union_counterfactual', 'union_delta_margin', 'union_own_gain',
+                     'union_top_class_gain'):
             self.assertTrue(torch.equal(outputs[mode], alternate[mode]))
         self.assertFalse(torch.equal(outputs['oracle'], alternate['oracle']))
         self.assertTrue(torch.equal(net.interface(x), baseline))
@@ -297,7 +301,9 @@ class PConflictNetworkTests(unittest.TestCase):
         self.assertEqual(set(report), {'ones', 'uniform', 'soft', 'conservative', 'predicted_onehot',
                                        'conditional_onehot', 'conditional_blend', 'conditional_oracle',
                                        'high_confidence_oracle', 'top2_counterfactual',
-                                       'top2_task_oracle', 'oracle'})
+                                       'union_counterfactual', 'union_delta_margin', 'union_own_gain',
+                                       'union_top_class_gain',
+                                       'top2_task_oracle', 'union_task_oracle', 'oracle'})
         self.assertEqual(sum(map(sum, report['ones']['task_confusion_counts'])), 6)
 
 
