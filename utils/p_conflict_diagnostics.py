@@ -285,6 +285,7 @@ def evaluate_p_conflict(network, loader, device, scale, margin_threshold=0.1):
                             'union_counterfactual',
                             'union_delta_margin', 'union_own_gain', 'union_top_class_gain')
     counterfactual_gates = {mode: [] for mode in counterfactual_modes}
+    counterfactual_selected_tasks = {mode: [] for mode in counterfactual_modes}
     coverage_names = ('prob_top2', 'prob_top3', 'prob_top5', 'maxlogit_top2', 'union_top2')
     candidate_coverages = {name: [] for name in coverage_names}
     candidate_counts = {name: [] for name in coverage_names}
@@ -316,6 +317,7 @@ def evaluate_p_conflict(network, loader, device, scale, margin_threshold=0.1):
                 conditional_gates.append(weights['conditional_onehot'].ne(1).any(1).cpu())
                 for mode in counterfactual_modes:
                     counterfactual_gates[mode].append(details[mode]['accepted'].cpu())
+                    counterfactual_selected_tasks[mode].append(weights[mode].argmax(1).cpu())
                     for name in evidence_names:
                         selection_evidence[mode][name].append(details[mode][name].cpu())
                 true_tasks = targets // network.class_num
@@ -360,6 +362,9 @@ def evaluate_p_conflict(network, loader, device, scale, margin_threshold=0.1):
     conditional_gates = torch.cat(conditional_gates)
     counterfactual_gates = {
         mode: torch.cat(values) for mode, values in counterfactual_gates.items()
+    }
+    counterfactual_selected_tasks = {
+        mode: torch.cat(values) for mode, values in counterfactual_selected_tasks.items()
     }
     candidate_coverages = {
         name: torch.cat(values) for name, values in candidate_coverages.items()
@@ -449,9 +454,16 @@ def evaluate_p_conflict(network, loader, device, scale, margin_threshold=0.1):
     evaluated_wrong = evaluated & ~first_task_correct
     for mode in counterfactual_modes:
         gate = counterfactual_gates[mode]
+        selected_task = counterfactual_selected_tasks[mode]
         correct = predictions[mode] == targets
         corrected = gate & correct & ~baseline_correct
         broken = gate & ~correct & baseline_correct
+
+        def task_selection_counts(group):
+            counts = torch.bincount(
+                true_task[group] * n + selected_task[group], minlength=n*n)
+            return counts.reshape(n, n).tolist()
+
         report[mode].update({
             'margin_threshold': float(margin_threshold),
             'evaluated_samples': int(evaluated.sum()),
@@ -460,6 +472,14 @@ def evaluate_p_conflict(network, loader, device, scale, margin_threshold=0.1):
             'accepted_rate': float(gate.double().mean() * 100),
             'accepted_corrected': int(corrected.sum()),
             'accepted_broken': int(broken.sum()),
+            'corrected_old': int((corrected & old).sum()),
+            'corrected_new': int((corrected & ~old).sum()),
+            'broken_old': int((broken & old).sum()),
+            'broken_new': int((broken & ~old).sum()),
+            'task_selection_axes': 'rows=true_task, columns=selected_task',
+            'accepted_task_selection_counts': task_selection_counts(gate),
+            'corrected_task_selection_counts': task_selection_counts(corrected),
+            'broken_task_selection_counts': task_selection_counts(broken),
             'selected_evidence': {
                 group_name: {
                     name: _distribution(selection_evidence[mode][name][group])

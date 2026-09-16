@@ -230,6 +230,35 @@ class PredictedOnehotTests(unittest.TestCase):
         self.assertGreaterEqual(counterfactual['evaluated_samples'], counterfactual['accepted_samples'])
         self.assertEqual(counterfactual['accepted_corrected'], counterfactual['corrected'])
         self.assertEqual(counterfactual['accepted_broken'], counterfactual['broken'])
+        self.assertEqual(
+            [counterfactual[name] for name in
+             ('corrected_old', 'corrected_new', 'broken_old', 'broken_new')],
+            [0, 0, 1, 0],
+        )
+        self.assertEqual(counterfactual['accepted_task_selection_counts'],
+                         [[0, 1], [1, 1]])
+        self.assertEqual(counterfactual['corrected_task_selection_counts'],
+                         [[0, 0], [0, 0]])
+        self.assertEqual(counterfactual['broken_task_selection_counts'],
+                         [[0, 1], [0, 0]])
+        for mode in ('top2_counterfactual', 'top2_top_class_gain',
+                     'union_counterfactual', 'union_delta_margin',
+                     'union_own_gain', 'union_top_class_gain'):
+            item = report[mode]
+            self.assertEqual(item['corrected_old'] + item['corrected_new'],
+                             item['accepted_corrected'])
+            self.assertEqual(item['broken_old'] + item['broken_new'],
+                             item['accepted_broken'])
+            self.assertEqual(item['task_selection_axes'],
+                             'rows=true_task, columns=selected_task')
+            for name, expected in (
+                    ('accepted_task_selection_counts', item['accepted_samples']),
+                    ('corrected_task_selection_counts', item['accepted_corrected']),
+                    ('broken_task_selection_counts', item['accepted_broken'])):
+                matrix = item[name]
+                self.assertEqual(len(matrix), self.net.numtask)
+                self.assertTrue(all(len(row) == self.net.numtask for row in matrix))
+                self.assertEqual(sum(sum(row) for row in matrix), expected)
         self.assertEqual(set(union_counterfactual['selected_evidence']), {'corrected', 'broken'})
         self.assertIn('margin_gain', union_counterfactual['selected_evidence']['corrected'])
         self.assertTrue(top2_oracle['oracle_only'])
