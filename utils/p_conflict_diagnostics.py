@@ -73,6 +73,28 @@ def conditional_blend_weights(task_probs, predicted_tasks, margin_threshold):
 
 
 @torch.no_grad()
+def select_top2_counterfactual(baseline_logits, candidate_logits, candidate_tasks, scale, class_num):
+    """Accept the best candidate only when it beats the original task margin."""
+    batch, candidate_count, classes = candidate_logits.shape
+    n = classes // class_num
+    baseline_probs = (baseline_logits * scale).softmax(1).reshape(batch, n, class_num).sum(2)
+    baseline_top2 = baseline_probs.topk(2, dim=1).values
+    baseline_margin = baseline_top2[:, 0] - baseline_top2[:, 1]
+    candidate_probs = (candidate_logits.reshape(-1, classes) * scale).softmax(1)
+    candidate_probs = candidate_probs.reshape(batch, candidate_count, n, class_num).sum(3)
+    own = candidate_probs.gather(2, candidate_tasks.unsqueeze(2)).squeeze(2)
+    candidate_mask = F.one_hot(candidate_tasks, num_classes=n).bool()
+    other = candidate_probs.masked_fill(candidate_mask, float('-inf')).max(2).values
+    best_score, best_index = (own - other).max(1)
+    rows = torch.arange(batch, device=baseline_logits.device)
+    selected_logits = candidate_logits[rows, best_index]
+    selected_tasks = candidate_tasks[rows, best_index]
+    accepted = best_score > baseline_margin
+    output = torch.where(accepted.unsqueeze(1), selected_logits, baseline_logits)
+    return output, accepted, selected_tasks
+
+
+@torch.no_grad()
 def diagnostic_logits(network, images, scale, true_tasks, margin_threshold=0.1):
     """Oracle changes the features, not the set of candidate classes."""
     n = network.numtask
@@ -110,6 +132,26 @@ def diagnostic_logits(network, images, scale, true_tasks, margin_threshold=0.1):
             selected = values.ne(1).any(1).unsqueeze(1)
             logits = torch.where(selected, logits, baseline)
         outputs[mode] = logits
+    counterfactual_weights = torch.ones_like(task_probs)
+    counterfactual_logits = baseline.clone()
+    if n > 1 and low_margin.any():
+        ambiguous = low_margin.nonzero(as_tuple=False).squeeze(1)
+        candidate_tasks = task_probs[ambiguous].topk(2, dim=1).indices
+        candidate_logits = []
+        for index in range(2):
+            candidate_weights = F.one_hot(candidate_tasks[:, index], num_classes=n).to(task_probs)
+            with conflict_weights(network, candidate_weights):
+                candidate_logits.append(network.interface(images[ambiguous]))
+        candidate_logits = torch.stack(candidate_logits, dim=1)
+        selected_logits, accepted, selected_tasks = select_top2_counterfactual(
+            baseline[ambiguous], candidate_logits, candidate_tasks, scale, network.class_num)
+        counterfactual_logits[ambiguous] = selected_logits
+        accepted_weights = torch.ones(len(ambiguous), n, device=images.device, dtype=task_probs.dtype)
+        accepted_weights[accepted] = F.one_hot(
+            selected_tasks[accepted], num_classes=n).to(task_probs)
+        counterfactual_weights[ambiguous] = accepted_weights
+    weights['top2_counterfactual'] = counterfactual_weights
+    outputs['top2_counterfactual'] = counterfactual_logits
     return outputs, weights
 
 
@@ -137,10 +179,11 @@ def evaluate_p_conflict(network, loader, device, scale, margin_threshold=0.1):
     cuda_devices = sorted({p.device.index for p in network.parameters() if p.device.type == 'cuda'})
     prediction_modes = ('ones', 'uniform', 'soft', 'conservative', 'predicted_onehot',
                         'conditional_onehot', 'conditional_blend', 'conditional_oracle',
-                        'high_confidence_oracle', 'oracle')
+                        'high_confidence_oracle', 'top2_counterfactual', 'oracle')
     predictions = {mode: [] for mode in prediction_modes}
     labels, weight_sums = [], {}
-    task_margins, task_entropies, conditional_gates, blend_strengths = [], [], [], []
+    task_margins, task_entropies = [], []
+    conditional_gates, counterfactual_gates, blend_strengths = [], [], []
     try:
         with torch.random.fork_rng(devices=cuda_devices), torch.no_grad():
             network.eval()
@@ -161,6 +204,7 @@ def evaluate_p_conflict(network, loader, device, scale, margin_threshold=0.1):
                 task_margins.append(margin.cpu())
                 task_entropies.append(entropy.cpu())
                 conditional_gates.append(weights['conditional_onehot'].ne(1).any(1).cpu())
+                counterfactual_gates.append(weights['top2_counterfactual'].ne(1).any(1).cpu())
                 blend_strengths.append((1 - weights['conditional_blend'].min(1).values).cpu())
                 for mode, logits in outputs.items():
                     predictions[mode].append(logits.argmax(1).cpu())
@@ -177,6 +221,7 @@ def evaluate_p_conflict(network, loader, device, scale, margin_threshold=0.1):
     task_margins = torch.cat(task_margins)
     task_entropies = torch.cat(task_entropies)
     conditional_gates = torch.cat(conditional_gates)
+    counterfactual_gates = torch.cat(counterfactual_gates)
     blend_strengths = torch.cat(blend_strengths)
     baseline_correct = predictions['ones'] == targets
     true_task = targets // network.class_num
@@ -250,6 +295,17 @@ def evaluate_p_conflict(network, loader, device, scale, margin_threshold=0.1):
         'active_samples': int(blend_active.sum()),
         'active_rate': float(blend_active.double().mean() * 100),
         'mean_strength': float(blend_strengths.double().mean()),
+    })
+    counterfactual_correct = predictions['top2_counterfactual'] == targets
+    evaluated = task_margins < float(margin_threshold)
+    report['top2_counterfactual'].update({
+        'margin_threshold': float(margin_threshold),
+        'evaluated_samples': int(evaluated.sum()),
+        'evaluated_rate': float(evaluated.double().mean() * 100),
+        'accepted_samples': int(counterfactual_gates.sum()),
+        'accepted_rate': float(counterfactual_gates.double().mean() * 100),
+        'accepted_corrected': int((counterfactual_gates & counterfactual_correct & ~baseline_correct).sum()),
+        'accepted_broken': int((counterfactual_gates & ~counterfactual_correct & baseline_correct).sum()),
     })
     return report
 

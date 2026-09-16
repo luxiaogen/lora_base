@@ -9,6 +9,7 @@ from utils.p_conflict_diagnostics import (
     conditional_onehot_weights,
     diagnostic_logits,
     evaluate_p_conflict,
+    select_top2_counterfactual,
 )
 
 
@@ -73,9 +74,23 @@ class PredictedOnehotTests(unittest.TestCase):
 
     def test_baseline_mode_reuses_first_forward(self):
         net = RepeatedForwardDriftNetwork()
-        outputs, _ = diagnostic_logits(net, self.images, 1., torch.tensor([0, 1, 1]))
-        torch.testing.assert_close(outputs['ones'], self.images + 2e-6, rtol=0, atol=0)
-        self.assertEqual(net.calls, 10)
+        ambiguous = torch.zeros_like(self.images)
+        outputs, _ = diagnostic_logits(net, ambiguous, 1., torch.tensor([0, 1, 1]))
+        torch.testing.assert_close(outputs['ones'], ambiguous + 2e-6, rtol=0, atol=0)
+        self.assertEqual(net.calls, 12)
+
+    def test_top2_counterfactual_accepts_only_clear_margin_improvement(self):
+        baseline = torch.tensor([[0.1, 0.], [2., 0.]])
+        candidates = torch.tensor([
+            [[0.2, 0.], [0., 2.]],
+            [[1., 0.], [0., 0.5]],
+        ])
+        top2_tasks = torch.tensor([[0, 1], [0, 1]])
+        output, accepted, selected_tasks = select_top2_counterfactual(
+            baseline, candidates, top2_tasks, scale=1., class_num=1)
+        torch.testing.assert_close(output, torch.tensor([[0., 2.], [2., 0.]]))
+        self.assertTrue(torch.equal(accepted, torch.tensor([True, False])))
+        self.assertTrue(torch.equal(selected_tasks, torch.tensor([1, 0])))
 
     def test_conditional_onehot_only_changes_low_margin_samples(self):
         task_probs = torch.tensor([[0.55, 0.45], [0.9, 0.1]])
@@ -110,6 +125,13 @@ class PredictedOnehotTests(unittest.TestCase):
         a, _ = diagnostic_logits(self.net, self.images, 1., torch.tensor([0, 1, 1]), 0.5)
         b, _ = diagnostic_logits(self.net, self.images, 1., torch.tensor([1, 0, 0]), 0.5)
         torch.testing.assert_close(a['conditional_onehot'], b['conditional_onehot'])
+        torch.testing.assert_close(a['top2_counterfactual'], b['top2_counterfactual'])
+
+    def test_top2_counterfactual_preserves_high_margin_samples(self):
+        high_margin = torch.tensor([[8., 0., 0., 0.]])
+        outputs, weights = diagnostic_logits(self.net, high_margin, 1., torch.tensor([0]), 0.1)
+        self.assertTrue(torch.equal(outputs['top2_counterfactual'], outputs['ones']))
+        torch.testing.assert_close(weights['top2_counterfactual'], torch.ones(1, 2))
 
     def test_group_counts_and_correction_accounting(self):
         loader = DataLoader(TensorDataset(torch.arange(3), self.images, torch.tensor([0, 2, 3])), batch_size=2)
@@ -117,6 +139,7 @@ class PredictedOnehotTests(unittest.TestCase):
         hard = report['predicted_onehot']
         conditional = report['conditional_onehot']
         blend = report['conditional_blend']
+        counterfactual = report['top2_counterfactual']
         low_oracle = report['conditional_oracle']
         high_oracle = report['high_confidence_oracle']
         groups = hard['by_first_pass_task']
@@ -133,6 +156,10 @@ class PredictedOnehotTests(unittest.TestCase):
         self.assertEqual(blend['margin_threshold'], 0.1)
         self.assertGreaterEqual(blend['mean_strength'], 0)
         self.assertLessEqual(blend['mean_strength'], 1)
+        self.assertEqual(counterfactual['margin_threshold'], 0.1)
+        self.assertGreaterEqual(counterfactual['evaluated_samples'], counterfactual['accepted_samples'])
+        self.assertEqual(counterfactual['accepted_corrected'], counterfactual['corrected'])
+        self.assertEqual(counterfactual['accepted_broken'], counterfactual['broken'])
         self.assertTrue(low_oracle['oracle_only'])
         self.assertTrue(high_oracle['oracle_only'])
         self.assertEqual(low_oracle['selected_samples'] + high_oracle['selected_samples'], 3)
