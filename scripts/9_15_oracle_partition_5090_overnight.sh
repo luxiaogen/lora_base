@@ -20,8 +20,6 @@ run_job() {
     local name="${protocol}_oracle_partition_seed${seed}"
     local log_file="$LOG_DIR/${name}_${TIMESTAMP}.log"
 
-    python -c 'import json, pathlib, sys; p=pathlib.Path(json.load(open(sys.argv[1]))["data_path"]); print("Dataset:", p); assert (p/"train").is_dir() and (p/"test").is_dir(), "Missing train/ or test/"' "$config" || return 1
-
     echo "============================================================"
     echo "Starting $name"
     echo "Protocol: QKV, ${tasks} tasks, ${classes_per_task} classes/task, seed ${seed}"
@@ -90,15 +88,16 @@ run_job() {
 }
 
 # T10: complete the three-seed set after the current seed-1993 run.
-run_job imgr10 exps/dlora/imgr10.json 1996 10 20 || FAILED=1
-run_job imgr10 exps/dlora/imgr10.json 1997 10 20 || FAILED=1
+if [[ "${ORACLE_PARTITION_SKIP_T10:-0}" != 1 ]]; then
+    run_job imgr10 exps/dlora/imgr10.json 1996 10 20 || FAILED=1
+    run_job imgr10 exps/dlora/imgr10.json 1997 10 20 || FAILED=1
+fi
 
-# T20: test whether the useful oracle region changes as task ambiguity increases.
-run_job imgr20 exps/dlora/imgr20.json 1993 20 10 || FAILED=1
-run_job imgr20 exps/dlora/imgr20.json 1996 20 10 || FAILED=1
+# T20 reuses this machine's ImageNet-R JSON and changes only the task split.
+run_job imgr20 exps/dlora/imgr10.json 1993 20 10 || FAILED=1
 
 echo "============================================================"
-echo "Finished 4 runs for oracle_partition_5090_overnight; FAILED=$FAILED"
+echo "Finished scheduled runs for oracle_partition_5090_overnight; FAILED=$FAILED"
 echo "Logs: $LOG_DIR"
 echo "============================================================"
 exit $FAILED

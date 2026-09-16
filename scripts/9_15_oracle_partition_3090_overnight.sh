@@ -21,8 +21,6 @@ run_job() {
     local name="${protocol}_oracle_partition_seed${seed}_${repeat}"
     local log_file="$LOG_DIR/${name}_${TIMESTAMP}.log"
 
-    python -c 'import json, pathlib, sys; p=pathlib.Path(json.load(open(sys.argv[1]))["data_path"]); print("Dataset:", p); assert (p/"train").is_dir() and (p/"test").is_dir(), "Missing train/ or test/"' "$config" || return 1
-
     echo "============================================================"
     echo "Starting $name"
     echo "Protocol: QKV, ${tasks} tasks, ${classes_per_task} classes/task, seed ${seed}, ${repeat}"
@@ -91,13 +89,17 @@ run_job() {
 }
 
 # Cross-device replication of the current 5090D seed-1993 T10 run.
-run_job imgr10 exps/dlora/imgr10.json 1993 10 20 cross_device || FAILED=1
+if [[ "${ORACLE_PARTITION_SKIP_T10:-0}" != 1 ]]; then
+    run_job imgr10 exps/dlora/imgr10.json 1993 10 20 cross_device || FAILED=1
+fi
 
-# T20 on a disjoint seed from the 5090D schedule.
-run_job imgr20 exps/dlora/imgr20.json 1997 20 10 primary || FAILED=1
+# T20 reuses this machine's ImageNet-R JSON and changes only the task split.
+run_job imgr20 exps/dlora/imgr10.json 1993 20 10 primary || FAILED=1
 
 # Same-seed T10 repeat estimates nondeterministic run-to-run variation.
-run_job imgr10 exps/dlora/imgr10.json 1993 10 20 repeat2 || FAILED=1
+if [[ "${ORACLE_PARTITION_SKIP_T10:-0}" != 1 ]]; then
+    run_job imgr10 exps/dlora/imgr10.json 1993 10 20 repeat2 || FAILED=1
+fi
 
 echo "============================================================"
 echo "Finished 3 runs for oracle_partition_3090_overnight; FAILED=$FAILED"
