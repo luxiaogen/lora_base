@@ -106,9 +106,12 @@ def diagnostic_logits(network, images, scale, true_tasks, margin_threshold=0.1):
     true_onehot = F.one_hot(true_tasks, num_classes=n).to(task_probs)
     if n == 1:
         low_margin = torch.zeros(len(images), dtype=torch.bool, device=images.device)
+        true_task_in_top2 = torch.ones(len(images), dtype=torch.bool, device=images.device)
     else:
-        top_two = task_probs.topk(2, dim=1).values
-        low_margin = top_two[:, 0] - top_two[:, 1] < float(margin_threshold)
+        top_two = task_probs.topk(2, dim=1)
+        low_margin = top_two.values[:, 0] - top_two.values[:, 1] < float(margin_threshold)
+        true_task_in_top2 = top_two.indices.eq(true_tasks.unsqueeze(1)).any(1)
+    top2_oracle_active = low_margin & true_task_in_top2
     weights = {
         'ones': torch.ones_like(task_probs),
         'uniform': torch.full_like(task_probs, 1.0 / n),
@@ -119,6 +122,8 @@ def diagnostic_logits(network, images, scale, true_tasks, margin_threshold=0.1):
         'conditional_blend': conditional_blend_weights(task_probs, predicted_tasks, margin_threshold),
         'conditional_oracle': torch.where(low_margin.unsqueeze(1), true_onehot, torch.ones_like(task_probs)),
         'high_confidence_oracle': torch.where(low_margin.unsqueeze(1), torch.ones_like(task_probs), true_onehot),
+        'top2_task_oracle': torch.where(
+            top2_oracle_active.unsqueeze(1), true_onehot, torch.ones_like(task_probs)),
         'oracle': true_onehot,
     }
     outputs = {'ones': baseline}
@@ -128,7 +133,7 @@ def diagnostic_logits(network, images, scale, true_tasks, margin_threshold=0.1):
         with conflict_weights(network, values):
             logits = network.interface(images)
         if mode in {'conditional_onehot', 'conditional_blend', 'conditional_oracle',
-                    'high_confidence_oracle'}:
+                    'high_confidence_oracle', 'top2_task_oracle'}:
             selected = values.ne(1).any(1).unsqueeze(1)
             logits = torch.where(selected, logits, baseline)
         outputs[mode] = logits
@@ -179,11 +184,12 @@ def evaluate_p_conflict(network, loader, device, scale, margin_threshold=0.1):
     cuda_devices = sorted({p.device.index for p in network.parameters() if p.device.type == 'cuda'})
     prediction_modes = ('ones', 'uniform', 'soft', 'conservative', 'predicted_onehot',
                         'conditional_onehot', 'conditional_blend', 'conditional_oracle',
-                        'high_confidence_oracle', 'top2_counterfactual', 'oracle')
+                        'high_confidence_oracle', 'top2_counterfactual',
+                        'top2_task_oracle', 'oracle')
     predictions = {mode: [] for mode in prediction_modes}
     labels, weight_sums = [], {}
     task_margins, task_entropies = [], []
-    conditional_gates, counterfactual_gates, blend_strengths = [], [], []
+    conditional_gates, counterfactual_gates, top2_coverages, blend_strengths = [], [], [], []
     try:
         with torch.random.fork_rng(devices=cuda_devices), torch.no_grad():
             network.eval()
@@ -205,6 +211,12 @@ def evaluate_p_conflict(network, loader, device, scale, margin_threshold=0.1):
                 task_entropies.append(entropy.cpu())
                 conditional_gates.append(weights['conditional_onehot'].ne(1).any(1).cpu())
                 counterfactual_gates.append(weights['top2_counterfactual'].ne(1).any(1).cpu())
+                if network.numtask == 1:
+                    top2_coverages.append(torch.ones(len(images), dtype=torch.bool))
+                else:
+                    candidates = task_probs.topk(2, dim=1).indices
+                    true_tasks = targets // network.class_num
+                    top2_coverages.append(candidates.eq(true_tasks.unsqueeze(1)).any(1).cpu())
                 blend_strengths.append((1 - weights['conditional_blend'].min(1).values).cpu())
                 for mode, logits in outputs.items():
                     predictions[mode].append(logits.argmax(1).cpu())
@@ -222,6 +234,7 @@ def evaluate_p_conflict(network, loader, device, scale, margin_threshold=0.1):
     task_entropies = torch.cat(task_entropies)
     conditional_gates = torch.cat(conditional_gates)
     counterfactual_gates = torch.cat(counterfactual_gates)
+    top2_coverages = torch.cat(top2_coverages)
     blend_strengths = torch.cat(blend_strengths)
     baseline_correct = predictions['ones'] == targets
     true_task = targets // network.class_num
@@ -234,7 +247,8 @@ def evaluate_p_conflict(network, loader, device, scale, margin_threshold=0.1):
         pred_task = pred // network.class_num
         confusion = torch.bincount(true_task * n + pred_task, minlength=n*n).reshape(n, n)
         report[mode] = {
-            'oracle_only': mode in {'conditional_oracle', 'high_confidence_oracle', 'oracle'},
+            'oracle_only': mode in {
+                'conditional_oracle', 'high_confidence_oracle', 'top2_task_oracle', 'oracle'},
             'total': correct.double().mean().item() * 100,
             'old': correct[old].double().mean().item() * 100 if old.any() else None,
             'new': correct[~old].double().mean().item() * 100 if (~old).any() else None,
@@ -306,6 +320,24 @@ def evaluate_p_conflict(network, loader, device, scale, margin_threshold=0.1):
         'accepted_rate': float(counterfactual_gates.double().mean() * 100),
         'accepted_corrected': int((counterfactual_gates & counterfactual_correct & ~baseline_correct).sum()),
         'accepted_broken': int((counterfactual_gates & ~counterfactual_correct & baseline_correct).sum()),
+    })
+    top2_covered = evaluated & top2_coverages
+    evaluated_wrong = evaluated & ~first_task_correct
+    wrong_covered = evaluated_wrong & top2_coverages
+    top2_oracle_correct = predictions['top2_task_oracle'] == targets
+    report['top2_task_oracle'].update({
+        'margin_threshold': float(margin_threshold),
+        'evaluated_samples': int(evaluated.sum()),
+        'true_task_in_top2_samples': int(top2_covered.sum()),
+        'true_task_in_top2_rate': float(top2_covered.double().sum() / evaluated.sum() * 100)
+        if evaluated.any() else None,
+        'first_pass_wrong_samples': int(evaluated_wrong.sum()),
+        'first_pass_wrong_true_task_in_top2_samples': int(wrong_covered.sum()),
+        'first_pass_wrong_true_task_in_top2_rate': float(
+            wrong_covered.double().sum() / evaluated_wrong.sum() * 100)
+        if evaluated_wrong.any() else None,
+        'selected_corrected': int((top2_covered & top2_oracle_correct & ~baseline_correct).sum()),
+        'selected_broken': int((top2_covered & ~top2_oracle_correct & baseline_correct).sum()),
     })
     return report
 

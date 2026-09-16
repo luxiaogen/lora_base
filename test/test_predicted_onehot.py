@@ -22,7 +22,7 @@ class ToyNetwork(nn.Module):
     def interface(self, images):
         if self._p_conflict_weights is None:
             return images
-        return images + (self._p_conflict_weights - 1).repeat_interleave(2, dim=1)
+        return images + (self._p_conflict_weights - 1).repeat_interleave(self.class_num, dim=1)
 
 
 class RepeatedForwardDriftNetwork(ToyNetwork):
@@ -77,7 +77,20 @@ class PredictedOnehotTests(unittest.TestCase):
         ambiguous = torch.zeros_like(self.images)
         outputs, _ = diagnostic_logits(net, ambiguous, 1., torch.tensor([0, 1, 1]))
         torch.testing.assert_close(outputs['ones'], ambiguous + 2e-6, rtol=0, atol=0)
-        self.assertEqual(net.calls, 12)
+        self.assertEqual(net.calls, 13)
+
+    def test_top2_task_oracle_only_routes_covered_low_margin_samples(self):
+        net = ToyNetwork()
+        net.numtask, net.class_num = 3, 1
+        images = torch.tensor([[2., 1.9, -5.], [2., 1.9, -5.], [8., 0., 0.]])
+        outputs, weights = diagnostic_logits(
+            net, images, 1., torch.tensor([1, 2, 0]), margin_threshold=0.1)
+        torch.testing.assert_close(
+            weights['top2_task_oracle'],
+            torch.tensor([[0., 1., 0.], [1., 1., 1.], [1., 1., 1.]]),
+        )
+        self.assertFalse(torch.equal(outputs['top2_task_oracle'][0], outputs['ones'][0]))
+        self.assertTrue(torch.equal(outputs['top2_task_oracle'][1:], outputs['ones'][1:]))
 
     def test_top2_counterfactual_accepts_only_clear_margin_improvement(self):
         baseline = torch.tensor([[0.1, 0.], [2., 0.]])
@@ -135,11 +148,13 @@ class PredictedOnehotTests(unittest.TestCase):
 
     def test_group_counts_and_correction_accounting(self):
         loader = DataLoader(TensorDataset(torch.arange(3), self.images, torch.tensor([0, 2, 3])), batch_size=2)
-        report = evaluate_p_conflict(self.net, loader, torch.device('cpu'), 1.)
+        report = evaluate_p_conflict(
+            self.net, loader, torch.device('cpu'), 1., margin_threshold=1.0)
         hard = report['predicted_onehot']
         conditional = report['conditional_onehot']
         blend = report['conditional_blend']
         counterfactual = report['top2_counterfactual']
+        top2_oracle = report['top2_task_oracle']
         low_oracle = report['conditional_oracle']
         high_oracle = report['high_confidence_oracle']
         groups = hard['by_first_pass_task']
@@ -150,16 +165,21 @@ class PredictedOnehotTests(unittest.TestCase):
             self.assertEqual(sum(group[key] for group in groups.values()), hard[key])
         self.assertAlmostEqual(hard['total'] - report['ones']['total'],
                                (hard['corrected'] - hard['broken']) * 100 / 3)
-        self.assertEqual(conditional['margin_threshold'], 0.1)
+        self.assertEqual(conditional['margin_threshold'], 1.0)
         self.assertEqual(conditional['selected_corrected'], conditional['corrected'])
         self.assertEqual(conditional['selected_broken'], conditional['broken'])
-        self.assertEqual(blend['margin_threshold'], 0.1)
+        self.assertEqual(blend['margin_threshold'], 1.0)
         self.assertGreaterEqual(blend['mean_strength'], 0)
         self.assertLessEqual(blend['mean_strength'], 1)
-        self.assertEqual(counterfactual['margin_threshold'], 0.1)
+        self.assertEqual(counterfactual['margin_threshold'], 1.0)
         self.assertGreaterEqual(counterfactual['evaluated_samples'], counterfactual['accepted_samples'])
         self.assertEqual(counterfactual['accepted_corrected'], counterfactual['corrected'])
         self.assertEqual(counterfactual['accepted_broken'], counterfactual['broken'])
+        self.assertTrue(top2_oracle['oracle_only'])
+        self.assertLessEqual(top2_oracle['true_task_in_top2_samples'],
+                             top2_oracle['evaluated_samples'])
+        self.assertGreaterEqual(top2_oracle['true_task_in_top2_rate'], 0.)
+        self.assertLessEqual(top2_oracle['true_task_in_top2_rate'], 100.)
         self.assertTrue(low_oracle['oracle_only'])
         self.assertTrue(high_oracle['oracle_only'])
         self.assertEqual(low_oracle['selected_samples'] + high_oracle['selected_samples'], 3)
