@@ -182,6 +182,7 @@ def diagnostic_logits(network, images, scale, true_tasks, margin_threshold=0.1,
     counterfactual_modes = {
         'top2_counterfactual': 'absolute_margin',
         'top2_top_class_gain': 'top_class_gain',
+        'top2_task_consistent_gain': 'top_class_gain',
         'union_counterfactual': 'absolute_margin',
         'union_delta_margin': 'margin_gain',
         'union_own_gain': 'own_gain',
@@ -216,6 +217,8 @@ def diagnostic_logits(network, images, scale, true_tasks, margin_threshold=0.1,
         candidate_sets = {
             'top2_counterfactual': (candidate_tasks[:, :2], candidate_logits[:, :2]),
             'top2_top_class_gain': (candidate_tasks[:, :2], candidate_logits[:, :2]),
+            'top2_task_consistent_gain': (
+                candidate_tasks[:, :2], candidate_logits[:, :2]),
             'union_counterfactual': (candidate_tasks, candidate_logits),
             'union_delta_margin': (candidate_tasks, candidate_logits),
             'union_own_gain': (candidate_tasks, candidate_logits),
@@ -226,6 +229,13 @@ def diagnostic_logits(network, images, scale, true_tasks, margin_threshold=0.1,
             selected_logits, accepted, selected_tasks, selected_evidence = select_counterfactual(
                 baseline[ambiguous], mode_logits, mode_tasks, scale, network.class_num,
                 score_mode=score_mode)
+            if mode == 'top2_task_consistent_gain':
+                baseline_tasks = predicted_tasks[ambiguous]
+                candidate_tasks_after = selected_logits.argmax(1) // network.class_num
+                accepted = accepted & selected_tasks.eq(baseline_tasks)
+                accepted = accepted & candidate_tasks_after.eq(baseline_tasks)
+                selected_logits = torch.where(
+                    accepted.unsqueeze(1), selected_logits, baseline[ambiguous])
             outputs[mode][ambiguous] = selected_logits
             accepted_weights = torch.ones(
                 len(ambiguous), n, device=images.device, dtype=task_probs.dtype)
@@ -273,7 +283,7 @@ def evaluate_p_conflict(network, loader, device, scale, margin_threshold=0.1):
     prediction_modes = ('ones', 'uniform', 'soft', 'conservative', 'predicted_onehot',
                         'conditional_onehot', 'conditional_blend', 'conditional_oracle',
                         'high_confidence_oracle', 'top2_counterfactual',
-                        'top2_top_class_gain',
+                        'top2_top_class_gain', 'top2_task_consistent_gain',
                         'union_counterfactual', 'union_delta_margin', 'union_own_gain',
                         'union_top_class_gain',
                         'top2_task_oracle', 'union_task_oracle', 'oracle')
@@ -282,6 +292,7 @@ def evaluate_p_conflict(network, loader, device, scale, margin_threshold=0.1):
     task_margins, task_entropies = [], []
     conditional_gates, blend_strengths = [], []
     counterfactual_modes = ('top2_counterfactual', 'top2_top_class_gain',
+                            'top2_task_consistent_gain',
                             'union_counterfactual',
                             'union_delta_margin', 'union_own_gain', 'union_top_class_gain')
     counterfactual_gates = {mode: [] for mode in counterfactual_modes}

@@ -169,7 +169,7 @@ class PConflictNetworkTests(unittest.TestCase):
         self.assertEqual(set(outputs), {'ones', 'uniform', 'soft', 'conservative', 'predicted_onehot',
                                         'conditional_onehot', 'conditional_blend', 'conditional_oracle',
                                         'high_confidence_oracle', 'top2_counterfactual',
-                                        'top2_top_class_gain',
+                                        'top2_top_class_gain', 'top2_task_consistent_gain',
                                         'union_counterfactual', 'union_delta_margin', 'union_own_gain',
                                         'union_top_class_gain',
                                         'top2_task_oracle', 'union_task_oracle', 'oracle'})
@@ -303,7 +303,7 @@ class PConflictNetworkTests(unittest.TestCase):
         self.assertEqual(set(report), {'ones', 'uniform', 'soft', 'conservative', 'predicted_onehot',
                                        'conditional_onehot', 'conditional_blend', 'conditional_oracle',
                                        'high_confidence_oracle', 'top2_counterfactual',
-                                       'top2_top_class_gain',
+                                       'top2_top_class_gain', 'top2_task_consistent_gain',
                                        'union_counterfactual', 'union_delta_margin', 'union_own_gain',
                                        'union_top_class_gain',
                                        'top2_task_oracle', 'union_task_oracle', 'oracle'})

@@ -37,6 +37,14 @@ class RepeatedForwardDriftNetwork(ToyNetwork):
         return super().interface(images) + self.calls * 2e-6
 
 
+class TaskGainNetwork(ToyNetwork):
+    def interface(self, images):
+        if self._p_conflict_weights is None:
+            return images
+        task_gain = self._p_conflict_weights * images.new_tensor([0.5, 1.0])
+        return images + task_gain.repeat_interleave(self.class_num, dim=1)
+
+
 class PredictedOnehotTests(unittest.TestCase):
     def setUp(self):
         self.net = ToyNetwork()
@@ -150,9 +158,27 @@ class PredictedOnehotTests(unittest.TestCase):
             for call in selector.call_args_list
             if call.kwargs.get('score_mode') == 'top_class_gain'
         ]
-        self.assertEqual(top_class_candidate_counts, [2, 4])
+        self.assertEqual(top_class_candidate_counts, [2, 2, 4])
         self.assertIn('top2_top_class_gain', outputs)
         self.assertIn('top2_top_class_gain', weights)
+
+    def test_task_consistent_gain_rejects_cross_task_switches(self):
+        net = TaskGainNetwork()
+        images = torch.tensor([[2., 0., 1.9, 0.], [1.9, 0., 2., 0.]])
+        outputs, weights, details = diagnostic_logits(
+            net, images, 1., torch.tensor([0, 1]), margin_threshold=1.,
+            return_details=True)
+        self.assertTrue(torch.equal(
+            details['top2_top_class_gain']['accepted'], torch.tensor([True, True])))
+        self.assertTrue(torch.equal(
+            details['top2_task_consistent_gain']['accepted'], torch.tensor([False, True])))
+        torch.testing.assert_close(
+            weights['top2_task_consistent_gain'], torch.tensor([[1., 1.], [0., 1.]]))
+        torch.testing.assert_close(outputs['top2_task_consistent_gain'][0], images[0])
+        self.assertFalse(torch.equal(outputs['top2_task_consistent_gain'][1], images[1]))
+        baseline_tasks = images.argmax(1) // net.class_num
+        candidate_tasks = outputs['top2_task_consistent_gain'].argmax(1) // net.class_num
+        self.assertTrue(torch.equal(candidate_tasks, baseline_tasks))
 
     def test_conditional_onehot_only_changes_low_margin_samples(self):
         task_probs = torch.tensor([[0.55, 0.45], [0.9, 0.1]])
@@ -193,6 +219,8 @@ class PredictedOnehotTests(unittest.TestCase):
         torch.testing.assert_close(a['union_own_gain'], b['union_own_gain'])
         torch.testing.assert_close(a['union_top_class_gain'], b['union_top_class_gain'])
         torch.testing.assert_close(a['top2_top_class_gain'], b['top2_top_class_gain'])
+        torch.testing.assert_close(
+            a['top2_task_consistent_gain'], b['top2_task_consistent_gain'])
 
     def test_top2_counterfactual_preserves_high_margin_samples(self):
         high_margin = torch.tensor([[8., 0., 0., 0.]])
@@ -242,6 +270,7 @@ class PredictedOnehotTests(unittest.TestCase):
         self.assertEqual(counterfactual['broken_task_selection_counts'],
                          [[0, 1], [0, 0]])
         for mode in ('top2_counterfactual', 'top2_top_class_gain',
+                     'top2_task_consistent_gain',
                      'union_counterfactual', 'union_delta_margin',
                      'union_own_gain', 'union_top_class_gain'):
             item = report[mode]
