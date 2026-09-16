@@ -93,8 +93,8 @@ if [[ "${ORACLE_PARTITION_SKIP_T10:-0}" != 1 ]]; then
     run_job imgr10 exps/dlora/imgr10.json 1993 10 20 cross_device || FAILED=1
 fi
 
-# T20 reuses this machine's ImageNet-R JSON and changes only the task split.
-run_job imgr20 exps/dlora/imgr10.json 1993 20 10 primary || FAILED=1
+# T20 reads this machine's own ImageNet-R T20 configuration.
+run_job imgr20 exps/dlora/imgr20.json 1993 20 10 primary || FAILED=1
 
 # Same-seed T10 repeat estimates nondeterministic run-to-run variation.
 if [[ "${ORACLE_PARTITION_SKIP_T10:-0}" != 1 ]]; then
