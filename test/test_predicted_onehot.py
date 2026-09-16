@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import torch
 from torch import nn
@@ -134,6 +135,25 @@ class PredictedOnehotTests(unittest.TestCase):
         self.assertEqual(coverage['prob_top2']['covered_rate'], 0.)
         self.assertEqual(coverage['union_top2']['covered_rate'], 100.)
 
+    def test_top2_top_class_gain_uses_only_probability_top2_candidates(self):
+        net = ToyNetwork()
+        net.numtask, net.class_num = 3, 2
+        images = torch.tensor([[4., -10., 3.9, 3.9, 3.8, 3.8]])
+        with patch(
+                'utils.p_conflict_diagnostics.select_counterfactual',
+                wraps=select_counterfactual) as selector:
+            outputs, weights, _ = diagnostic_logits(
+                net, images, 1., torch.tensor([0]), margin_threshold=1.,
+                return_details=True)
+        top_class_candidate_counts = [
+            call.args[1].shape[1]
+            for call in selector.call_args_list
+            if call.kwargs.get('score_mode') == 'top_class_gain'
+        ]
+        self.assertEqual(top_class_candidate_counts, [2, 4])
+        self.assertIn('top2_top_class_gain', outputs)
+        self.assertIn('top2_top_class_gain', weights)
+
     def test_conditional_onehot_only_changes_low_margin_samples(self):
         task_probs = torch.tensor([[0.55, 0.45], [0.9, 0.1]])
         weights = conditional_onehot_weights(task_probs, torch.tensor([0, 0]), 0.2)
@@ -172,6 +192,7 @@ class PredictedOnehotTests(unittest.TestCase):
         torch.testing.assert_close(a['union_delta_margin'], b['union_delta_margin'])
         torch.testing.assert_close(a['union_own_gain'], b['union_own_gain'])
         torch.testing.assert_close(a['union_top_class_gain'], b['union_top_class_gain'])
+        torch.testing.assert_close(a['top2_top_class_gain'], b['top2_top_class_gain'])
 
     def test_top2_counterfactual_preserves_high_margin_samples(self):
         high_margin = torch.tensor([[8., 0., 0., 0.]])

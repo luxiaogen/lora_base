@@ -181,6 +181,7 @@ def diagnostic_logits(network, images, scale, true_tasks, margin_threshold=0.1,
         outputs[mode] = logits
     counterfactual_modes = {
         'top2_counterfactual': 'absolute_margin',
+        'top2_top_class_gain': 'top_class_gain',
         'union_counterfactual': 'absolute_margin',
         'union_delta_margin': 'margin_gain',
         'union_own_gain': 'own_gain',
@@ -214,6 +215,7 @@ def diagnostic_logits(network, images, scale, true_tasks, margin_threshold=0.1,
         candidate_logits = torch.stack(candidate_logits, dim=1)
         candidate_sets = {
             'top2_counterfactual': (candidate_tasks[:, :2], candidate_logits[:, :2]),
+            'top2_top_class_gain': (candidate_tasks[:, :2], candidate_logits[:, :2]),
             'union_counterfactual': (candidate_tasks, candidate_logits),
             'union_delta_margin': (candidate_tasks, candidate_logits),
             'union_own_gain': (candidate_tasks, candidate_logits),
@@ -271,6 +273,7 @@ def evaluate_p_conflict(network, loader, device, scale, margin_threshold=0.1):
     prediction_modes = ('ones', 'uniform', 'soft', 'conservative', 'predicted_onehot',
                         'conditional_onehot', 'conditional_blend', 'conditional_oracle',
                         'high_confidence_oracle', 'top2_counterfactual',
+                        'top2_top_class_gain',
                         'union_counterfactual', 'union_delta_margin', 'union_own_gain',
                         'union_top_class_gain',
                         'top2_task_oracle', 'union_task_oracle', 'oracle')
@@ -278,7 +281,8 @@ def evaluate_p_conflict(network, loader, device, scale, margin_threshold=0.1):
     labels, weight_sums = [], {}
     task_margins, task_entropies = [], []
     conditional_gates, blend_strengths = [], []
-    counterfactual_modes = ('top2_counterfactual', 'union_counterfactual',
+    counterfactual_modes = ('top2_counterfactual', 'top2_top_class_gain',
+                            'union_counterfactual',
                             'union_delta_margin', 'union_own_gain', 'union_top_class_gain')
     counterfactual_gates = {mode: [] for mode in counterfactual_modes}
     coverage_names = ('prob_top2', 'prob_top3', 'prob_top5', 'maxlogit_top2', 'union_top2')

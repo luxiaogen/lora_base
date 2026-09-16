@@ -5,13 +5,15 @@ from pathlib import Path
 
 
 class CandidateUnionDiagnosticScriptTests(unittest.TestCase):
-    def test_two_machine_scripts_use_local_dataset_configs(self):
+    def test_diagnostic_scripts_use_local_dataset_configs(self):
         root = Path(__file__).resolve().parents[1]
         cases = [
             ('scripts/9_16_candidate_union_diagnostic_3090.sh',
              'exps/dlora/imgr10.json', 'max_tasks=10'),
             ('scripts/9_16_candidate_union_diagnostic_5090.sh',
              'exps/dlora/imgr20.json', 'max_tasks=20'),
+            ('scripts/9_16_imgr10_top2_top_class_gain_seed1993.sh',
+             'exps/dlora/imgr10.json', 'max_tasks=10'),
         ]
         for relative, config, max_tasks in cases:
             result = subprocess.run(
