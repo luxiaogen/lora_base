@@ -843,7 +843,19 @@ class Learner(BaseLearner):
             from utils.p_conflict_diagnostics import evaluate_p_conflict, summarize_p_conflict
             start = time.perf_counter()
             margin_threshold = float(self.args.get('dual_mask_conflict_ratio', 0.1))
-            report = evaluate_p_conflict(self._network, self.test_loader, self._device, self.scale, margin_threshold)
+            w0_class_means = getattr(self, '_w0_class_means', {})
+            w0_class_ids = torch.tensor(sorted(w0_class_means), dtype=torch.long)
+            w0_prototypes = None
+            if len(w0_class_ids):
+                w0_prototypes = torch.stack([
+                    w0_class_means[int(class_id)] for class_id in w0_class_ids
+                ])
+            report = evaluate_p_conflict(
+                self._network, self.test_loader, self._device, self.scale, margin_threshold,
+                w0_prototypes=w0_prototypes,
+                w0_class_ids=w0_class_ids if w0_prototypes is not None else None,
+                w0_context_factory=self._pretrained_anchor_context,
+            )
             logging.info('P-conflict diagnostic Task %s: %s', self._cur_task, json.dumps(report))
             history = getattr(self, '_p_conflict_reports', [])
             history.append(report)

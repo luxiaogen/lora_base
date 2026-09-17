@@ -1,5 +1,5 @@
 """Evaluation-only interventions on already merged, suppressed P contributions."""
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import math
 import random
 
@@ -73,6 +73,21 @@ def conditional_blend_weights(task_probs, predicted_tasks, margin_threshold):
 
 
 @torch.no_grad()
+def w0_prototype_task_scores(features, prototypes, class_ids, num_tasks, class_num):
+    """Return each sample's best frozen-W_pre class similarity per task."""
+    features = F.normalize(features, dim=1)
+    prototypes = F.normalize(prototypes.to(features), dim=1)
+    similarities = features @ prototypes.T
+    prototype_tasks = class_ids.to(features.device) // class_num
+    scores = features.new_full((len(features), num_tasks), float('-inf'))
+    for task in range(num_tasks):
+        task_classes = prototype_tasks == task
+        if task_classes.any():
+            scores[:, task] = similarities[:, task_classes].max(1).values
+    return scores
+
+
+@torch.no_grad()
 def counterfactual_evidence(baseline_logits, candidate_logits, candidate_tasks, scale, class_num):
     """Measure how each candidate changes its own task evidence and competitors."""
     batch, candidate_count, classes = candidate_logits.shape
@@ -136,7 +151,7 @@ def select_top2_counterfactual(baseline_logits, candidate_logits, candidate_task
 
 @torch.no_grad()
 def diagnostic_logits(network, images, scale, true_tasks, margin_threshold=0.1,
-                      return_details=False):
+                      return_details=False, w0_task_scores=None):
     """Oracle changes the features, not the set of candidate classes."""
     n = network.numtask
     with conflict_weights(network, None):
@@ -183,6 +198,7 @@ def diagnostic_logits(network, images, scale, true_tasks, margin_threshold=0.1,
         'top2_counterfactual': 'absolute_margin',
         'top2_top_class_gain': 'top_class_gain',
         'top2_task_consistent_gain': 'top_class_gain',
+        'top2_w0_prototype_consistent': 'top_class_gain',
         'union_counterfactual': 'absolute_margin',
         'union_delta_margin': 'margin_gain',
         'union_own_gain': 'own_gain',
@@ -198,7 +214,7 @@ def diagnostic_logits(network, images, scale, true_tasks, margin_threshold=0.1,
                 name: torch.full((len(images),), float('nan'), device=images.device,
                                  dtype=task_probs.dtype)
                 for name in ('absolute_margin', 'margin_gain', 'own_gain', 'other_change',
-                             'top_class_gain')
+                             'top_class_gain', 'w0_prototype_gain')
             },
         }
     weights['union_task_oracle'] = torch.ones_like(task_probs)
@@ -219,6 +235,8 @@ def diagnostic_logits(network, images, scale, true_tasks, margin_threshold=0.1,
             'top2_top_class_gain': (candidate_tasks[:, :2], candidate_logits[:, :2]),
             'top2_task_consistent_gain': (
                 candidate_tasks[:, :2], candidate_logits[:, :2]),
+            'top2_w0_prototype_consistent': (
+                candidate_tasks[:, :2], candidate_logits[:, :2]),
             'union_counterfactual': (candidate_tasks, candidate_logits),
             'union_delta_margin': (candidate_tasks, candidate_logits),
             'union_own_gain': (candidate_tasks, candidate_logits),
@@ -226,9 +244,35 @@ def diagnostic_logits(network, images, scale, true_tasks, margin_threshold=0.1,
         }
         for mode, score_mode in counterfactual_modes.items():
             mode_tasks, mode_logits = candidate_sets[mode]
-            selected_logits, accepted, selected_tasks, selected_evidence = select_counterfactual(
-                baseline[ambiguous], mode_logits, mode_tasks, scale, network.class_num,
-                score_mode=score_mode)
+            if mode == 'top2_w0_prototype_consistent' and w0_task_scores is not None:
+                prototype_scores = w0_task_scores[ambiguous].gather(1, mode_tasks)
+                best_index = prototype_scores.argmax(1)
+                rows = torch.arange(len(ambiguous), device=images.device)
+                selected_tasks = mode_tasks[rows, best_index]
+                selected_logits = mode_logits[rows, best_index]
+                selected_evidence = {
+                    name: values[rows, best_index]
+                    for name, values in counterfactual_evidence(
+                        baseline[ambiguous], mode_logits, mode_tasks, scale,
+                        network.class_num).items()
+                }
+                baseline_tasks = predicted_tasks[ambiguous]
+                baseline_prototype_scores = w0_task_scores[ambiguous].gather(
+                    1, baseline_tasks.unsqueeze(1)).squeeze(1)
+                selected_evidence['w0_prototype_gain'] = (
+                    prototype_scores[rows, best_index] - baseline_prototype_scores)
+                candidate_tasks_after = selected_logits.argmax(1) // network.class_num
+                accepted = selected_tasks.ne(baseline_tasks)
+                accepted = accepted & candidate_tasks_after.eq(selected_tasks)
+                selected_logits = torch.where(
+                    accepted.unsqueeze(1), selected_logits, baseline[ambiguous])
+            else:
+                selected_logits, accepted, selected_tasks, selected_evidence = select_counterfactual(
+                    baseline[ambiguous], mode_logits, mode_tasks, scale, network.class_num,
+                    score_mode=score_mode)
+            if mode == 'top2_w0_prototype_consistent' and w0_task_scores is None:
+                accepted = torch.zeros_like(accepted)
+                selected_logits = baseline[ambiguous]
             if mode == 'top2_task_consistent_gain':
                 baseline_tasks = predicted_tasks[ambiguous]
                 candidate_tasks_after = selected_logits.argmax(1) // network.class_num
@@ -272,7 +316,8 @@ def _distribution(values):
     }
 
 
-def evaluate_p_conflict(network, loader, device, scale, margin_threshold=0.1):
+def evaluate_p_conflict(network, loader, device, scale, margin_threshold=0.1,
+                        w0_prototypes=None, w0_class_ids=None, w0_context_factory=None):
     """Read-only, post-CA diagnostic. No results feed training or normal predictions."""
     python_state, numpy_state = random.getstate(), np.random.get_state()
     modes = [(m, m.training) for m in network.modules()]
@@ -284,6 +329,7 @@ def evaluate_p_conflict(network, loader, device, scale, margin_threshold=0.1):
                         'conditional_onehot', 'conditional_blend', 'conditional_oracle',
                         'high_confidence_oracle', 'top2_counterfactual',
                         'top2_top_class_gain', 'top2_task_consistent_gain',
+                        'top2_w0_prototype_consistent',
                         'union_counterfactual', 'union_delta_margin', 'union_own_gain',
                         'union_top_class_gain',
                         'top2_task_oracle', 'union_task_oracle', 'oracle')
@@ -293,6 +339,7 @@ def evaluate_p_conflict(network, loader, device, scale, margin_threshold=0.1):
     conditional_gates, blend_strengths = [], []
     counterfactual_modes = ('top2_counterfactual', 'top2_top_class_gain',
                             'top2_task_consistent_gain',
+                            'top2_w0_prototype_consistent',
                             'union_counterfactual',
                             'union_delta_margin', 'union_own_gain', 'union_top_class_gain')
     counterfactual_gates = {mode: [] for mode in counterfactual_modes}
@@ -301,7 +348,7 @@ def evaluate_p_conflict(network, loader, device, scale, margin_threshold=0.1):
     candidate_coverages = {name: [] for name in coverage_names}
     candidate_counts = {name: [] for name in coverage_names}
     evidence_names = ('absolute_margin', 'margin_gain', 'own_gain', 'other_change',
-                      'top_class_gain')
+                      'top_class_gain', 'w0_prototype_gain')
     selection_evidence = {
         mode: {name: [] for name in evidence_names} for mode in counterfactual_modes
     }
@@ -310,9 +357,17 @@ def evaluate_p_conflict(network, loader, device, scale, margin_threshold=0.1):
             network.eval()
             for _, images, targets in loader:
                 images, targets = images.to(device), targets.to(device)
+                w0_task_scores = None
+                if w0_prototypes is not None and w0_class_ids is not None:
+                    context = w0_context_factory() if w0_context_factory else nullcontext()
+                    with context:
+                        w0_features = network.extract_vector(images)
+                    w0_task_scores = w0_prototype_task_scores(
+                        w0_features, w0_prototypes, w0_class_ids,
+                        network.numtask, network.class_num)
                 outputs, weights, details = diagnostic_logits(
                     network, images, scale, targets // network.class_num, margin_threshold,
-                    return_details=True)
+                    return_details=True, w0_task_scores=w0_task_scores)
                 labels.append(targets.cpu())
                 task_probs = weights['soft']
                 if network.numtask == 1:

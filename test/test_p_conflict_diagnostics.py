@@ -1,5 +1,6 @@
 """Read-only P-conflict interventions: no training changes or label leakage."""
 import copy
+from contextlib import contextmanager
 import json
 from pathlib import Path
 import random
@@ -170,6 +171,7 @@ class PConflictNetworkTests(unittest.TestCase):
                                         'conditional_onehot', 'conditional_blend', 'conditional_oracle',
                                         'high_confidence_oracle', 'top2_counterfactual',
                                         'top2_top_class_gain', 'top2_task_consistent_gain',
+                                        'top2_w0_prototype_consistent',
                                         'union_counterfactual', 'union_delta_margin', 'union_own_gain',
                                         'union_top_class_gain',
                                         'top2_task_oracle', 'union_task_oracle', 'oracle'})
@@ -186,7 +188,8 @@ class PConflictNetworkTests(unittest.TestCase):
         alternate, _ = diagnostic_logits(net, x, 20., torch.tensor([2, 0, 1]))
         for mode in ('ones', 'uniform', 'soft', 'conservative', 'predicted_onehot',
                      'conditional_onehot', 'conditional_blend', 'top2_counterfactual',
-                     'top2_top_class_gain',
+                     'top2_top_class_gain', 'top2_task_consistent_gain',
+                     'top2_w0_prototype_consistent',
                      'union_counterfactual', 'union_delta_margin', 'union_own_gain',
                      'union_top_class_gain'):
             self.assertTrue(torch.equal(outputs[mode], alternate[mode]))
@@ -260,6 +263,31 @@ class PConflictNetworkTests(unittest.TestCase):
         self.assertIn('P-conflict diagnostic Task 2', '\n'.join(logs.output))
         self.assertIn('"oracle_only": true', '\n'.join(logs.output))
 
+    def test_learner_supplies_frozen_w0_prototypes_to_diagnostic(self):
+        from methods.base import BaseLearner
+        from methods.dlora import Learner
+        learner = Learner.__new__(Learner)
+        learner._network = make_network()
+        learner._device = torch.device('cpu')
+        learner._cur_task = 2
+        learner.args = {'dual_mask_p_conflict_diagnostics': True}
+        learner.scale = 20.
+        learner.test_loader = DataLoader(TensorDataset(
+            torch.arange(6), torch.randn(6, 3, 8, 8), torch.arange(6)), batch_size=2)
+        learner._w0_class_means = {class_id: torch.randn(4) for class_id in range(6)}
+        context_entries = []
+
+        @contextmanager
+        def pretrained_context():
+            context_entries.append(True)
+            yield
+
+        learner._pretrained_anchor_context = pretrained_context
+        result = ({'grouped': {'total': 75.}, 'top1': 75.}, None, None, None)
+        with patch.object(BaseLearner, 'eval_task', return_value=result):
+            self.assertIs(learner.eval_task(), result)
+        self.assertTrue(context_entries, 'diagnostic did not extract frozen W_pre features')
+
     def test_summary_uses_same_average_and_old_task_forgetting_definition(self):
         from utils.p_conflict_diagnostics import summarize_p_conflict
         reports = [
@@ -298,16 +326,30 @@ class PConflictNetworkTests(unittest.TestCase):
             self.assertTrue(torch.isfinite(module.qkv.weight).all())
         self.assertGreater(module.p_conflict_components[2].delta.numel(), 0)
         test = TensorDataset(torch.arange(6), torch.randn(6, 3, 8, 8), torch.arange(6))
+        with learner._pretrained_anchor_context(), torch.no_grad():
+            w0_features = learner._network.extract_vector(test.tensors[1])
+        learner._w0_class_means = {
+            int(class_id): w0_features[class_id].cpu() for class_id in range(6)
+        }
+        class_ids = torch.tensor(sorted(learner._w0_class_means), dtype=torch.long)
+        prototypes = torch.stack([
+            learner._w0_class_means[int(class_id)] for class_id in class_ids
+        ])
         report = evaluate_p_conflict(learner._network, DataLoader(test, batch_size=3),
-                                     torch.device('cpu'), learner.scale)
+                                     torch.device('cpu'), learner.scale,
+                                     w0_prototypes=prototypes,
+                                     w0_class_ids=class_ids,
+                                     w0_context_factory=learner._pretrained_anchor_context)
         self.assertEqual(set(report), {'ones', 'uniform', 'soft', 'conservative', 'predicted_onehot',
                                        'conditional_onehot', 'conditional_blend', 'conditional_oracle',
                                        'high_confidence_oracle', 'top2_counterfactual',
                                        'top2_top_class_gain', 'top2_task_consistent_gain',
+                                       'top2_w0_prototype_consistent',
                                        'union_counterfactual', 'union_delta_margin', 'union_own_gain',
                                        'union_top_class_gain',
                                        'top2_task_oracle', 'union_task_oracle', 'oracle'})
         self.assertEqual(sum(map(sum, report['ones']['task_confusion_counts'])), 6)
+        self.assertTrue(np.isfinite(report['top2_w0_prototype_consistent']['total']))
 
 
 class FirstRoundScriptTests(unittest.TestCase):

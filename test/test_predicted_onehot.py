@@ -1,9 +1,11 @@
 import unittest
+from contextlib import nullcontext
 from unittest.mock import patch
 
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
+import utils.p_conflict_diagnostics as p_conflict_diagnostics
 
 from utils.p_conflict_diagnostics import (
     conditional_blend_weights,
@@ -43,6 +45,21 @@ class TaskGainNetwork(ToyNetwork):
             return images
         task_gain = self._p_conflict_weights * images.new_tensor([0.5, 1.0])
         return images + task_gain.repeat_interleave(self.class_num, dim=1)
+
+
+class PrototypeSwitchNetwork(ToyNetwork):
+    def __init__(self):
+        super().__init__()
+        self.class_num = 1
+
+    def interface(self, images):
+        if self._p_conflict_weights is None:
+            return images
+        task_gain = self._p_conflict_weights * images.new_tensor([0.1, 0.2])
+        return images + task_gain
+
+    def extract_vector(self, images):
+        return images
 
 
 class PredictedOnehotTests(unittest.TestCase):
@@ -158,7 +175,7 @@ class PredictedOnehotTests(unittest.TestCase):
             for call in selector.call_args_list
             if call.kwargs.get('score_mode') == 'top_class_gain'
         ]
-        self.assertEqual(top_class_candidate_counts, [2, 2, 4])
+        self.assertEqual(top_class_candidate_counts, [2, 2, 2, 4])
         self.assertIn('top2_top_class_gain', outputs)
         self.assertIn('top2_top_class_gain', weights)
 
@@ -179,6 +196,92 @@ class PredictedOnehotTests(unittest.TestCase):
         baseline_tasks = images.argmax(1) // net.class_num
         candidate_tasks = outputs['top2_task_consistent_gain'].argmax(1) // net.class_num
         self.assertTrue(torch.equal(candidate_tasks, baseline_tasks))
+
+    def test_w0_prototype_consistency_accepts_only_supported_task_switches(self):
+        net = PrototypeSwitchNetwork()
+        images = torch.tensor([
+            [1.00, 0.95],
+            [2.00, 0.95],
+            [5.00, 0.00],
+            [1.00, 0.95],
+        ])
+        prototype_scores = torch.tensor([
+            [0.20, 0.90],
+            [0.20, 0.90],
+            [0.20, 0.90],
+            [0.90, 0.20],
+        ])
+        try:
+            outputs, weights, details = diagnostic_logits(
+                net, images, 1., torch.tensor([1, 1, 0, 0]), margin_threshold=.6,
+                return_details=True, w0_task_scores=prototype_scores)
+        except TypeError as error:
+            self.fail(f'diagnostic_logits must accept W_pre prototype scores: {error}')
+
+        mode = 'top2_w0_prototype_consistent'
+        self.assertIn(mode, outputs)
+        self.assertTrue(torch.equal(
+            details[mode]['accepted'], torch.tensor([True, False, False, False])))
+        torch.testing.assert_close(weights[mode], torch.tensor([
+            [0., 1.],
+            [1., 1.],
+            [1., 1.],
+            [1., 1.],
+        ]))
+        self.assertEqual(int(outputs[mode][0].argmax()), 1)
+        torch.testing.assert_close(outputs[mode][1:], outputs['ones'][1:])
+        self.assertIn('w0_prototype_gain', details[mode])
+        self.assertAlmostEqual(float(details[mode]['w0_prototype_gain'][0]), 0.7)
+        self.assertTrue(torch.isnan(details[mode]['w0_prototype_gain'][2]))
+        alternate, _, _ = diagnostic_logits(
+            net, images, 1., torch.tensor([0, 0, 1, 1]), margin_threshold=.6,
+            return_details=True, w0_task_scores=prototype_scores)
+        torch.testing.assert_close(outputs[mode], alternate[mode])
+
+    def test_w0_prototype_scores_take_best_class_match_per_task(self):
+        self.assertTrue(
+            hasattr(p_conflict_diagnostics, 'w0_prototype_task_scores'),
+            'W_pre prototype task scoring is not implemented',
+        )
+        scores = p_conflict_diagnostics.w0_prototype_task_scores(
+            torch.tensor([[1., 0.], [0., 1.]]),
+            torch.tensor([[1., 0.], [0.8, 0.2], [0., 1.]]),
+            torch.tensor([0, 1, 2]),
+            num_tasks=2,
+            class_num=2,
+        )
+        torch.testing.assert_close(
+            scores,
+            torch.tensor([[1., 0.], [0.24253563, 1.]]),
+            atol=1e-7,
+            rtol=1e-6,
+        )
+
+    def test_evaluation_reports_label_free_w0_prototype_consistency(self):
+        net = PrototypeSwitchNetwork()
+        images = torch.tensor([
+            [1.00, 0.95],
+            [2.00, 0.95],
+            [5.00, 0.00],
+            [1.00, 0.95],
+        ])
+        targets = torch.tensor([1, 1, 0, 0])
+        loader = DataLoader(TensorDataset(torch.arange(4), images, targets), batch_size=4)
+        try:
+            report = evaluate_p_conflict(
+                net, loader, torch.device('cpu'), 1., margin_threshold=1.,
+                w0_prototypes=torch.tensor([[1., 0.], [1., 1.]]),
+                w0_class_ids=torch.tensor([0, 1]),
+                w0_context_factory=nullcontext,
+            )
+        except TypeError as error:
+            self.fail(f'evaluate_p_conflict must wire W_pre prototype evidence: {error}')
+
+        result = report['top2_w0_prototype_consistent']
+        self.assertFalse(result['oracle_only'])
+        self.assertEqual(result['accepted_samples'], 2)
+        self.assertEqual(result['accepted_corrected'], 1)
+        self.assertEqual(result['accepted_broken'], 1)
 
     def test_conditional_onehot_only_changes_low_margin_samples(self):
         task_probs = torch.tensor([[0.55, 0.45], [0.9, 0.1]])
@@ -221,6 +324,8 @@ class PredictedOnehotTests(unittest.TestCase):
         torch.testing.assert_close(a['top2_top_class_gain'], b['top2_top_class_gain'])
         torch.testing.assert_close(
             a['top2_task_consistent_gain'], b['top2_task_consistent_gain'])
+        torch.testing.assert_close(
+            a['top2_w0_prototype_consistent'], b['top2_w0_prototype_consistent'])
 
     def test_top2_counterfactual_preserves_high_margin_samples(self):
         high_margin = torch.tensor([[8., 0., 0., 0.]])
@@ -271,6 +376,7 @@ class PredictedOnehotTests(unittest.TestCase):
                          [[0, 1], [0, 0]])
         for mode in ('top2_counterfactual', 'top2_top_class_gain',
                      'top2_task_consistent_gain',
+                     'top2_w0_prototype_consistent',
                      'union_counterfactual', 'union_delta_margin',
                      'union_own_gain', 'union_top_class_gain'):
             item = report[mode]
