@@ -116,6 +116,7 @@ class Learner(BaseLearner):
         self._weight_drift_curve = []
 
         self._functional_merge_calibration = None
+        self._p_conflict_merge_filter = []
 
         for layer_idx, module in enumerate(self._iter_lora_modules()):
             module.layer_idx = layer_idx
@@ -273,6 +274,93 @@ class Learner(BaseLearner):
 
     def _collect_anchor_features(self, loader):
         return self._collect_features(loader, use_pretrained_anchor=True)
+
+    def _collect_current_logits(self, loader, selected_indices=None):
+        was_training = self._network.training
+        self._network.eval()
+        selected_indices = None if selected_indices is None else selected_indices.cpu()
+        indices, logits, targets = [], [], []
+        with torch.no_grad():
+            for batch_indices, inputs, batch_targets in loader:
+                if selected_indices is not None:
+                    selected = torch.isin(batch_indices.cpu(), selected_indices)
+                    if not selected.any():
+                        continue
+                    batch_indices = batch_indices[selected]
+                    inputs = inputs[selected]
+                    batch_targets = batch_targets[selected]
+                output = self._network(inputs.to(self._device))
+                indices.append(batch_indices.detach().cpu())
+                logits.append(output["logits"].detach().cpu())
+                targets.append(batch_targets.detach().cpu())
+        self._network.train(was_training)
+        return torch.cat(indices), torch.cat(logits), torch.cat(targets)
+
+    def _calibrate_p_conflict_merge(self, loader):
+        from utils.dual_mask_metrics import (
+            deterministic_class_holdout_mask,
+            p_conflict_merge_margin_diagnostics,
+        )
+
+        modules = list(self._iter_lora_modules())
+        if self._cur_task == 0 or not modules:
+            return
+        for module in modules:
+            module.set_p_conflict_merge_gate(1.0)
+
+        indices, logits_with, targets = self._collect_current_logits(loader)
+        local_targets = targets - self._known_classes
+        holdout = deterministic_class_holdout_mask(
+            local_targets,
+            indices,
+            int(self.args.get("dual_mask_competence_holdout_mod", 5)),
+        )
+        holdout_indices = indices[holdout]
+        holdout_logits = logits_with[holdout]
+        holdout_targets = local_targets[holdout]
+
+        reports = []
+        for layer_idx, module in enumerate(modules):
+            module.set_p_conflict_merge_gate(0.0)
+            candidate_indices, logits_without, candidate_targets = (
+                self._collect_current_logits(loader, holdout_indices)
+            )
+            module.set_p_conflict_merge_gate(1.0)
+            if not torch.equal(candidate_indices, holdout_indices):
+                raise RuntimeError("P-conflict merge holdout order changed")
+            if not torch.equal(candidate_targets - self._known_classes, holdout_targets):
+                raise RuntimeError("P-conflict merge holdout labels changed")
+            report = p_conflict_merge_margin_diagnostics(
+                holdout_logits,
+                logits_without,
+                holdout_targets,
+                holdout_indices,
+                holdout_mod=None,
+            )
+            report["layer"] = layer_idx
+            reports.append(report)
+            logging.info(
+                "Task %s P-conflict merge margin layer %s: samples=%s, "
+                "margin_with=%.6f, margin_without=%.6f, gain=%+.6f, gate=%.1f",
+                self._cur_task,
+                layer_idx,
+                report["sample_count"],
+                report["margin_with"],
+                report["margin_without"],
+                report["gain"],
+                report["gate"],
+            )
+
+        for module, report in zip(modules, reports):
+            module.set_p_conflict_merge_gate(report["gate"])
+        self._p_conflict_merge_filter = reports
+        logging.info(
+            "Task %s P-conflict merge filter: selected=%s/%s, gates=%s",
+            self._cur_task,
+            sum(item["gate"] > 0.0 for item in reports),
+            len(reports),
+            [item["gate"] for item in reports],
+        )
 
     def _calibrate_functional_merge(self, loader):
         from utils.dual_mask_metrics import functional_merge_diagnostics, select_functional_merge_candidate
@@ -570,10 +658,13 @@ class Learner(BaseLearner):
 
         functional_merge_calibration = bool(self.args.get("dual_mask_functional_merge_calibration", False))
 
+        p_conflict_merge_filter = bool(self.args.get("dual_mask_p_conflict_merge_filter", False))
+
         selective_anchor_enabled = bool(self.args.get("dual_mask_selective_anchor_enabled", False))
 
         if (track_w0 or competence_adaptive or plasticity_adaptive or all_seen_competence
                 or old_overlap_conflict or functional_merge_calibration or selective_anchor_enabled
+                or p_conflict_merge_filter
         ):
             w0_dataset = data_manager.get_dataset(  # 所有训练样本，顺序固定  | 确定性测试视图：用于判断冻结 W0 的原始能力
                 np.arange(self._known_classes, self._total_classes),
@@ -678,6 +769,9 @@ class Learner(BaseLearner):
         if bool(self.args.get("dual_mask_functional_merge_calibration", False)):
             calibration_loader = getattr(self, "w0_loader", train_loader)
             self._calibrate_functional_merge(calibration_loader)
+        if bool(self.args.get("dual_mask_p_conflict_merge_filter", False)):
+            calibration_loader = getattr(self, "w0_loader", train_loader)
+            self._calibrate_p_conflict_merge(calibration_loader)
             
         with torch.no_grad():
             # Task t 的 LoRA刚训练完，但增量还没有融合进主干网络 W0

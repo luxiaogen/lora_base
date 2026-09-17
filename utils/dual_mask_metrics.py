@@ -52,6 +52,57 @@ def _prototype_holdout_mask(
             calibration[positions[::holdout_mod]] = True
     return calibration
 
+
+def deterministic_class_holdout_mask(
+    targets: torch.Tensor,
+    indices: torch.Tensor,
+    holdout_mod: int = 5,
+) -> torch.Tensor:
+    return _prototype_holdout_mask(targets, indices, holdout_mod)
+
+
+def _classification_margins(logits: torch.Tensor, targets: torch.Tensor):
+    if logits.ndim != 2 or logits.shape[1] < 2:
+        raise ValueError("classification margins require at least two classes")
+    targets = targets.to(device=logits.device, dtype=torch.long)
+    positive = logits.gather(1, targets[:, None]).squeeze(1)
+    correct = F.one_hot(targets, num_classes=logits.shape[1]).bool()
+    negative = logits.masked_fill(correct, float("-inf")).max(dim=1).values
+    return positive - negative
+
+
+def p_conflict_merge_margin_diagnostics(
+    logits_with: torch.Tensor,
+    logits_without: torch.Tensor,
+    targets: torch.Tensor,
+    indices: torch.Tensor,
+    holdout_mod: Optional[int] = 5,
+):
+    if logits_with.shape != logits_without.shape:
+        raise ValueError("with/without logits must have the same shape")
+    if holdout_mod is None:
+        selected = torch.ones(len(targets), dtype=torch.bool, device=targets.device)
+    else:
+        selected = deterministic_class_holdout_mask(targets, indices, holdout_mod)
+    if not selected.any():
+        return {
+            "sample_count": 0,
+            "margin_with": 0.0,
+            "margin_without": 0.0,
+            "gain": 0.0,
+            "gate": 0.0,
+        }
+    margin_with = _classification_margins(logits_with[selected], targets[selected]).mean()
+    margin_without = _classification_margins(logits_without[selected], targets[selected]).mean()
+    gain = margin_with - margin_without
+    return {
+        "sample_count": int(selected.sum().item()),
+        "margin_with": float(margin_with.item()),
+        "margin_without": float(margin_without.item()),
+        "gain": float(gain.item()),
+        "gate": float(gain.item() > 0.0),
+    }
+
 """
     return :    ncm_loss          = W_pre 在当前任务上的原型分类损失
                 plasticity_demand = 归一化后的任务学习需求 D_t

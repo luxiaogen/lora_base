@@ -240,6 +240,7 @@ class Attention_LoRA(nn.Module):
         self.P_lora = torch.nn.ModuleList([None for _ in range(self.n_tasks)])
         self.p_conflict_components = nn.ModuleList()
         self._p_conflict_weights = None
+        self.p_conflict_merge_gate = None
         for branch in ("S", "P"):
             self.register_buffer(f"inherit_{branch}_A", None)
             self.register_buffer(f"inherit_{branch}_B", None)
@@ -519,6 +520,12 @@ class Attention_LoRA(nn.Module):
             self._functional_merge_strength_override = None
             return
         self._functional_merge_strength_override = min(max(float(strength), 0.0),1.0,)
+
+    def set_p_conflict_merge_gate(self, gate: Optional[float]):
+        if gate is None:
+            self.p_conflict_merge_gate = None
+            return
+        self.p_conflict_merge_gate = min(max(float(gate), 0.0), 1.0)
 
     @staticmethod
     def _parse_vis_indices(value):
@@ -955,6 +962,7 @@ class Attention_LoRA(nn.Module):
             # 保护区统一使用 competence-adaptive 强度，复现旧版平衡控制器。
             protect_gate = 1.0 - protect_strength * protect_mask
 
+        conflict_mask = torch.zeros_like(protect_gate)
         private_conflict_disabled = (isolated and self.dual_mask_private_conflict_mode == "none")
         if gate_mode == "protect_only" or private_conflict_disabled:
             conflict_gate = torch.ones_like(protect_gate)
@@ -975,7 +983,11 @@ class Attention_LoRA(nn.Module):
             gate = plastic_mask * conflict_gate
         else:
             gate = protect_gate * conflict_gate  # [2304,768]
-        return delta * gate
+        safe_delta = delta * gate
+        if isolated and self.p_conflict_merge_gate is not None:
+            conflict_component = safe_delta * conflict_mask.to(safe_delta.dtype)
+            safe_delta = safe_delta - (1.0 - self.p_conflict_merge_gate) * conflict_component
+        return safe_delta
 
     def _merge_base_and_conflict(
             self,
@@ -1455,5 +1467,7 @@ class Attention_LoRA(nn.Module):
             self.S_lora[t] = None
             self.P_lora[t] = None
             self._functional_merge_strength_override = None
+
+        self.p_conflict_merge_gate = None
 
         return None
