@@ -325,6 +325,7 @@ class Attention_LoRA(nn.Module):
         self.layer_idx = -1
 
     def _init_params(self, args):
+        self.p_region_diagnostic = bool(args.get("dual_mask_p_region_diagnostic", False))
         self.args = args
         self.use_slora: bool = args["use_slora"]
         self.use_plora: bool = args["use_plora"]
@@ -1348,6 +1349,15 @@ class Attention_LoRA(nn.Module):
 
             for item in branch_deltas:
                 mask_delta(item, conflict_ratio, conflict_strength)
+
+            if getattr(self, "p_region_diagnostic", False):
+                from utils.p_region_diagnostic import matched_removals
+                self._p_region_removals = None
+                for item in branch_deltas:
+                    if item["isolated"]:
+                        _, mask = self._merge_base_and_conflict(item["raw_delta"], True, conflict_ratio)
+                        self._p_region_removals, norms = matched_removals(item["safe_delta"], mask)
+                        logging.info("P-region norms task=%s layer=%s %s", t, self.layer_idx, norms)
 
             self._save_dual_mask_snapshot(t, branch_deltas, conflict_ratio=conflict_ratio, conflict_strength=conflict_strength)
 
