@@ -52,3 +52,6 @@ manuscript/
 *.xlsx
 .reasonix/
 reasonix.toml
+
+# Pinned external baselines downloaded by the transfer experiment launcher
+.external/
