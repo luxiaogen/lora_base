@@ -124,7 +124,8 @@ class MaskSelectionTests(unittest.TestCase):
             )
         )
 
-        self.assertAlmostEqual(uniform_entropy.item(), 1.0)
+        # Float32 log/reduction rounding differs across PyTorch/platform builds.
+        self.assertAlmostEqual(uniform_entropy.item(), 1.0, delta=1e-6)
         self.assertAlmostEqual(uniform_top_energy.item(), 0.2)
         self.assertAlmostEqual(
             Attention_LoRA._conflict_energy50_ratio(uniform_score).item(),
