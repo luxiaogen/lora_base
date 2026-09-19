@@ -1,0 +1,106 @@
+{
+  "name": "p_region_train_screen",
+  "datasets": [
+    {
+      "name": "imgr10",
+      "config": "exps/dlora/imgr10.json"
+    }
+  ],
+  "seeds": [
+    1993
+  ],
+  "common_overrides": {
+    "init_cls": 20,
+    "increment": 20,
+    "total_sessions": 10,
+    "init_epoch": 20,
+    "epochs": 20,
+    "rank": 64,
+    "ca": true,
+    "ca_epochs": 5,
+    "dual_mask_task0_gate_mode": "unmasked",
+    "dual_mask_conflict_energy_adaptive": true,
+    "dual_mask_conflict_energy_ratio_floor": true,
+    "dual_mask_conflict_ratio": 0.1,
+    "dual_mask_conflict_strength": 0.5,
+    "dual_mask_conflict_old_overlap_adaptive": true,
+    "dual_mask_conflict_reg_enabled": false,
+    "dual_mask_reg_weight": 0.01,
+    "dual_mask_private_conflict_mode": "global",
+    "dual_mask_conflict_merge_mode": "suppress",
+    "dual_mask_private_rank": 0,
+    "dual_mask_anchor_reg_enabled": true,
+    "dual_mask_anchor_reg_weight": 10,
+    "dual_mask_anchor_reg_task0_only": true,
+    "dual_mask_selective_anchor_enabled": false,
+    "dual_mask_functional_merge_calibration": false,
+    "dual_mask_safe_residual_enabled": false,
+    "dual_mask_track_w0_metrics": true,
+    "dual_mask_vis": false,
+    "experiment_tracker": "wandb",
+    "wandb_project": "LoDA_ICML2026",
+    "wandb_mode": "online",
+    "wandb_group": "p_region_train_merge_5090",
+    "use_slora": true,
+    "use_plora": true,
+    "lora_A_init": "kaiming",
+    "slora_gamma": 0.5,
+    "plora_gamma": 0.75,
+    "dual_mask_competence_adaptive": true,
+    "dual_mask_plasticity_adaptive": true,
+    "dual_mask_s_protect_enabled": true,
+    "dual_mask_p_region_diagnostic": false,
+    "dual_mask_p_region_train_mode": "none",
+    "dual_mask_p_region_train_amount": 0.5
+  },
+  "variants": [
+    {
+      "name": "baseline",
+      "description": "Original baseline; extra attenuation disabled",
+      "overrides": {
+        "dual_mask_p_region_train_mode": "none",
+        "dual_mask_p_region_train_amount": 0.5
+      }
+    },
+    {
+      "name": "conflict50",
+      "description": "Extra C attenuation in training AND merge",
+      "overrides": {
+        "dual_mask_p_region_train_mode": "conflict",
+        "dual_mask_p_region_train_amount": 0.5
+      }
+    },
+    {
+      "name": "nonconflict50",
+      "description": "Matched-budget U attenuation in training AND merge",
+      "overrides": {
+        "dual_mask_p_region_train_mode": "nonconflict",
+        "dual_mask_p_region_train_amount": 0.5
+      }
+    },
+    {
+      "name": "conflict25",
+      "description": "Milder C attenuation",
+      "overrides": {
+        "dual_mask_p_region_train_mode": "conflict",
+        "dual_mask_p_region_train_amount": 0.25
+      }
+    },
+    {
+      "name": "nonconflict25",
+      "description": "Milder matched U control",
+      "overrides": {
+        "dual_mask_p_region_train_mode": "nonconflict",
+        "dual_mask_p_region_train_amount": 0.25
+      }
+    },
+    {
+      "name": "baseline_repeat",
+      "description": "Same seed baseline repetition; fresh training",
+      "overrides": {
+        "dual_mask_p_region_train_mode": "none",
+        "dual_mask_p_region_train_amount": 0.5
+      }
+    }
+  ]
+}

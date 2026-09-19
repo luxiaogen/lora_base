@@ -326,6 +326,17 @@ class Attention_LoRA(nn.Module):
 
     def _init_params(self, args):
         self.p_region_diagnostic = bool(args.get("dual_mask_p_region_diagnostic", False))
+        self.dual_mask_p_region_train_mode = str(args.get("dual_mask_p_region_train_mode", "none")).lower()
+        self.dual_mask_p_region_train_amount = float(args.get("dual_mask_p_region_train_amount", 0.5))
+        if self.dual_mask_p_region_train_mode not in {"none", "conflict", "nonconflict"}:
+            raise ValueError("dual_mask_p_region_train_mode must be none/conflict/nonconflict")
+        if not 0 <= self.dual_mask_p_region_train_amount <= 1:
+            raise ValueError("dual_mask_p_region_train_amount must be in [0, 1]")
+        if self.dual_mask_p_region_train_mode != "none":
+            if str(args.get("dual_mask_conflict_merge_mode", "suppress")).lower() != "suppress":
+                raise ValueError("P-region training requires suppress merge for consistent forward/merge")
+            if args.get("dual_mask_safe_residual_enabled", False) or args.get("dual_mask_functional_merge_calibration", False):
+                raise ValueError("P-region training is a standalone ablation; disable residual/calibration")
         self.args = args
         self.use_slora: bool = args["use_slora"]
         self.use_plora: bool = args["use_plora"]
@@ -888,6 +899,7 @@ class Attention_LoRA(nn.Module):
 
         private_conflict_disabled = (isolated and self.dual_mask_private_conflict_mode == "none")
         if gate_mode == "protect_only" or private_conflict_disabled:
+            conflict_mask = torch.zeros_like(protect_mask)
             conflict_gate = torch.ones_like(protect_gate)
         else:
             # conflict 高表示,W0 很重要，而且 LoRA 也想大幅修改这个位置
@@ -906,7 +918,12 @@ class Attention_LoRA(nn.Module):
             gate = plastic_mask * conflict_gate
         else:
             gate = protect_gate * conflict_gate  # [2304,768]
-        return delta * gate
+        safe_delta = delta * gate
+        if isolated and self.cur_task > 0 and self.dual_mask_p_region_train_mode != "none":
+            from utils.p_region_training import shrink_private_region
+            safe_delta = shrink_private_region(safe_delta, conflict_mask, self.dual_mask_p_region_train_mode,
+                                               self.dual_mask_p_region_train_amount)
+        return safe_delta
 
     def _merge_base_and_conflict(
             self,
@@ -1295,7 +1312,12 @@ class Attention_LoRA(nn.Module):
 
         if t_idx > 0 and self.use_plora and unit_p is not None:
             ## P_lora 只能在 W0 非重要区域更新
-            out = out + plora_gamma * self._masked_unit_forward(x, unit_p, isolated=True, residual_scale=plora_gamma)
+            if self.dual_mask_p_region_train_mode != "none" and self.dual_mask_p_region_train_amount > 0:
+                # Same gamma-scaled delta as after_task; avoid scale-dependent mask rounding.
+                delta = plora_gamma * (unit_p.B_weight @ unit_p.A_weight)
+                out = out + F.linear(x, self._safe_delta(delta, isolated=True))
+            else:
+                out = out + plora_gamma * self._masked_unit_forward(x, unit_p, isolated=True, residual_scale=plora_gamma)
 
         self._finalize_safe_residual(x)
         return out
@@ -1349,6 +1371,18 @@ class Attention_LoRA(nn.Module):
 
             for item in branch_deltas:
                 mask_delta(item, conflict_ratio, conflict_strength)
+
+            if self.dual_mask_p_region_train_mode != "none":
+                from utils.p_region_training import region_budget
+                for item in branch_deltas:
+                    if item["isolated"]:
+                        base, mask = self._merge_base_and_conflict(item["raw_delta"], True, conflict_ratio)
+                        original_safe = base * (1 - conflict_strength * mask)
+                        cn, un, target, cs, us = region_budget(original_safe, mask, self.dual_mask_p_region_train_amount)
+                        logging.info("P-region training task=%s layer=%s mode=%s amount=%.2f C_norm=%.6f U_norm=%.6f "
+                                     "target_removed=%.6f actual_removed=%.6f C_fraction=%.6f U_fraction=%.6f",
+                                     t, self.layer_idx, self.dual_mask_p_region_train_mode, self.dual_mask_p_region_train_amount,
+                                     cn.item(), un.item(), target.item(), (original_safe-item["safe_delta"]).norm().item(), cs.item(), us.item())
 
             if getattr(self, "p_region_diagnostic", False):
                 from utils.p_region_diagnostic import matched_removals
