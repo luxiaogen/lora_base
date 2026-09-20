@@ -574,7 +574,7 @@ class Learner(BaseLearner):
         prepare_w0 = (track_w0 or competence_adaptive or plasticity_adaptive or all_seen_competence
                 or old_overlap_conflict or functional_merge_calibration or selective_anchor_enabled
         )
-        if prepare_w0 or bool(self.args.get("dual_mask_p_region_diagnostic", False)):
+        if prepare_w0 or bool(self.args.get("dual_mask_p_region_diagnostic", False)) or bool(self.args.get("dual_mask_p_conflict_group_diagnostic", False)):
             w0_dataset = data_manager.get_dataset(  # 所有训练样本，顺序固定  | 确定性测试视图：用于判断冻结 W0 的原始能力
                 np.arange(self._known_classes, self._total_classes),
                 source='train',  # 用训练集样本，但模拟最终测试时的输入方式，评估 W0 的原始能力
@@ -602,10 +602,27 @@ class Learner(BaseLearner):
             self._stage2_compact_classifier( # CA 分类器对齐
                 self.task_sizes[-1],ca_epochs=int(self.args.get("ca_epochs", 5)),)
 
+        if bool(self.args.get("dual_mask_p_conflict_group_diagnostic", False)):
+            if self._cur_task in (1, 2, 9):
+                self._diagnose_p_conflict_groups(self.test_loader.dataset, "post_ca_test_diagnostic_only")
+            for module in self._iter_lora_modules():
+                module._p_conflict_component = None
+
         if bool(self.args.get("dual_mask_p_region_diagnostic", False)):
             self._diagnose_p_regions(self.test_loader, "post_ca_test", per_layer=False)
             for module in self._iter_lora_modules():
                 module._p_region_removals = None
+
+    def _diagnose_p_conflict_groups(self, dataset, source):
+        from torch.utils.data import Subset
+        from utils.p_conflict_groups import balanced_indices, compare_groups
+        # Fixed deterministic test transform, no old training data retention, no gate selection.
+        indices = balanced_indices(dataset.labels, per_class=4)
+        loader = DataLoader(Subset(dataset, indices), batch_size=self.batch_size, shuffle=False, num_workers=0)
+        report = compare_groups(self._network, list(self._iter_lora_modules()), loader, self._device, self.task_sizes)
+        logging.info("P-conflict groups %s", json.dumps({"task": self._cur_task, "source": source,
+                     "current_task_component_only": True, "selection_used": False,
+                     "positive_margin_change_means": "removal_helped", "report": report}, allow_nan=False))
 
     def _diagnose_p_regions(self, loader, source, per_layer):
         from utils.p_region_diagnostic import compare_regions
@@ -704,6 +721,9 @@ class Learner(BaseLearner):
             print('*' * 10 + 'Extrace features for merging shared component!' + '*' * 10)
             for module in lora_modules:
                 module.after_task(task=self._cur_task)
+
+        if bool(self.args.get("dual_mask_p_conflict_group_diagnostic", False)) and self._cur_task in (1, 2, 9):
+            self._diagnose_p_conflict_groups(self.w0_loader.dataset, "pre_ca_train_subset_not_holdout")
 
         if bool(self.args.get("dual_mask_p_region_diagnostic", False)) and self._cur_task in (1, 2, 9):
             # Training-subset diagnostic, NOT independent validation or gate selection.

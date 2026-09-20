@@ -326,6 +326,7 @@ class Attention_LoRA(nn.Module):
 
     def _init_params(self, args):
         self.p_region_diagnostic = bool(args.get("dual_mask_p_region_diagnostic", False))
+        self.p_conflict_group_diagnostic = bool(args.get("dual_mask_p_conflict_group_diagnostic", False))
         self.dual_mask_p_region_train_mode = str(args.get("dual_mask_p_region_train_mode", "none")).lower()
         self.dual_mask_p_region_train_amount = float(args.get("dual_mask_p_region_train_amount", 0.5))
         if self.dual_mask_p_region_train_mode not in {"none", "conflict", "nonconflict"}:
@@ -1383,6 +1384,13 @@ class Attention_LoRA(nn.Module):
                                      "target_removed=%.6f actual_removed=%.6f C_fraction=%.6f U_fraction=%.6f",
                                      t, self.layer_idx, self.dual_mask_p_region_train_mode, self.dual_mask_p_region_train_amount,
                                      cn.item(), un.item(), target.item(), (original_safe-item["safe_delta"]).norm().item(), cs.item(), us.item())
+
+            if getattr(self, "p_conflict_group_diagnostic", False):
+                self._p_conflict_component = None
+                for item in branch_deltas:
+                    if item["isolated"]:
+                        _, mask = self._merge_base_and_conflict(item["raw_delta"], True, conflict_ratio)
+                        self._p_conflict_component = (item["safe_delta"].detach().float() * mask).cpu()
 
             if getattr(self, "p_region_diagnostic", False):
                 from utils.p_region_diagnostic import matched_removals

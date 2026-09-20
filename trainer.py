@@ -319,6 +319,13 @@ def _train(args, experiment_tracker=None):
             result_str = "Forgetting: {:.4f}\tBackward: {:.4f}".format(forgetting, backward)
             logging.info(result_str)
 
+        if bool(args.get('dual_mask_p_conflict_group_diagnostic', False)):
+            acquired = np.diag(model.acc_matrix)[:task_id+1]
+            current = model.acc_matrix[:task_id+1, task_id]
+            peak = np.max(model.acc_matrix[:task_id+1, :task_id+1], axis=1)
+            logging.info('P-group retention task=%s acquired=%s current=%s peak=%s drop_from_acquired=%s',
+                         task_id, acquired.tolist(), current.tolist(), peak.tolist(), (acquired-current).tolist())
+
         _log_experiment_task(experiment_tracker,model,task_id,cnn_accy,cnn_accy_with_task,cnn_accy_task,
                              w0_accuracy,train_seconds,eval_seconds,forgetting,backward,)
 

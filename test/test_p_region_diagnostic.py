@@ -98,6 +98,7 @@ class RegionTests(unittest.TestCase):
             module.S_lora[1].B.weight.normal_(0, 0.1)
         enabled = copy.deepcopy(module)
         enabled.p_region_diagnostic = True
+        enabled.p_conflict_group_diagnostic = True
         raw = enabled.plora_gamma * (enabled.P_lora[1].B_weight @ enabled.P_lora[1].A_weight)
         ratio, strength = enabled._conflict_parameters()
         safe = enabled._compose_merge_delta(raw, True, ratio, strength)
@@ -114,6 +115,7 @@ class RegionTests(unittest.TestCase):
         self.assertTrue(torch.allclose(before, enabled(inputs, task=1), atol=1e-5))
         self.assertIsNone(enabled.P_lora[1])
         self.assertIsNotNone(enabled._p_region_removals)
+        self.assertTrue(torch.equal(enabled._p_conflict_component, (safe.detach().float() * mask).cpu()))
         for mode in expected_removals:
             self.assertTrue(torch.equal(expected_removals[mode], enabled._p_region_removals[mode]))
         self.assertTrue(torch.equal(module(inputs, task=1), enabled(inputs, task=1)))
