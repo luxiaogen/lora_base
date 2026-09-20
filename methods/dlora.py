@@ -172,7 +172,7 @@ class Learner(BaseLearner):
 
         self._last_training_loss_metrics = {}
         subspace_mode = self.args.get("dual_mask_p_input_subspace", "none")
-        subspace_applies = subspace_mode in ("old", "random") and self._cur_task > 0
+        subspace_applies = subspace_mode in ("old", "random", "norm") and self._cur_task > 0
         if (reg_weight <= 0.0
                 and not anchor_applies and not safe_residual_applies and not selective_anchor_applies and not subspace_applies):
             return None
@@ -185,7 +185,8 @@ class Learner(BaseLearner):
         weighted_losses = []
         if subspace_applies:
             from utils.p_input_subspace import conflict_subspace_loss
-            losses = [conflict_subspace_loss(module, subspace_mode) for module in modules]
+            rank = int(self.args.get("dual_mask_p_input_rank", 32))
+            losses = [conflict_subspace_loss(module, subspace_mode, rank) for module in modules]
             losses = [loss for loss in losses if loss is not None]
             if losses:
                 subspace_loss = torch.stack(losses).mean()
@@ -625,9 +626,9 @@ class Learner(BaseLearner):
                 module._p_region_removals = None
 
         subspace_mode = self.args.get("dual_mask_p_input_subspace", "none")
-        if subspace_mode not in ("none", "baseline", "old", "random"):
+        if subspace_mode not in ("none", "baseline", "old", "random", "norm"):
             raise ValueError("Unknown dual_mask_p_input_subspace")
-        if subspace_mode != "none":
+        if subspace_mode in ("baseline", "old", "random"):
             from torch.utils.data import Subset
             from utils.p_conflict_groups import balanced_indices
             from utils.p_input_subspace import collect_input_bases

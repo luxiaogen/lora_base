@@ -51,7 +51,7 @@ class InputSubspaceTests(unittest.TestCase):
         x = torch.randn(3, 2, 4)
         module.eval(); reference.eval()
         torch.testing.assert_close(module(x, 1), reference(x, 1), rtol=0, atol=0)
-        for mode in ("old", "random"):
+        for mode in ("old", "random", "norm"):
             module.zero_grad()
             loss = conflict_subspace_loss(module, mode)
             self.assertTrue(torch.isfinite(loss))
@@ -72,3 +72,19 @@ class InputSubspaceTests(unittest.TestCase):
         loss.backward()
         self.assertTrue(torch.isfinite(module.P_lora[1].B.weight.grad).all())
         self.assertIsNone(conflict_subspace_loss(module, "baseline"))
+
+    def test_norm_matches_random_subspace_expected_scale_without_basis(self):
+        module = make_attention()
+        module.before_task(0); module.after_task(0); module.before_task(1)
+        module.general_mask.zero_()
+        with torch.no_grad():
+            module.P_lora[1].A.weight.normal_(0, .1)
+            module.P_lora[1].B.weight.normal_(0, .1)
+        loss = conflict_subspace_loss(module, "norm", rank=2)
+        unit = module.P_lora[1]
+        raw = unit.B_weight @ unit.A_weight
+        ratio, _ = module._conflict_parameters()
+        _, mask = module._merge_base_and_conflict(raw, isolated=True, conflict_ratio=ratio)
+        component = module.plora_gamma * module._safe_delta(raw, isolated=True) * mask
+        torch.testing.assert_close(loss, .5 * component.square().sum())
+        self.assertFalse(hasattr(module, "_p_input_basis"))

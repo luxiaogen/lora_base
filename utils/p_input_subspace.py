@@ -48,8 +48,10 @@ def collect_input_bases(network, modules, loader, device, rank=32, seed=1993):
             logging.info("P-input basis layer=%d rank=%d tokens=%d cumulative_energy=%.6f source=current_train", i, module._p_input_basis.shape[1], counts[i], coverage)
 
 
-def conflict_subspace_loss(module, mode):
-    if mode in ("none", "baseline") or module.cur_task == 0 or not hasattr(module, "_p_input_basis"):
+def conflict_subspace_loss(module, mode, rank=32):
+    if mode in ("none", "baseline") or module.cur_task == 0:
+        return None
+    if mode in ("old", "random") and not hasattr(module, "_p_input_basis"):
         return None
     unit = module.P_lora[module.cur_task]
     if unit is None:
@@ -59,6 +61,10 @@ def conflict_subspace_loss(module, mode):
     _, mask = module._merge_base_and_conflict(raw, isolated=True, conflict_ratio=ratio)
     # Match the training forward: gamma is applied AFTER masking the unscaled BA.
     component = module.plora_gamma * module._safe_delta(raw, isolated=True) * mask.detach()
+    if mode == "norm":
+        # Match the expected scale of ||C U||^2 for a random rank-r subspace.
+        fraction = min(rank, component.shape[1]) / component.shape[1]
+        return fraction * component.square().sum()
     basis = module._p_input_basis if mode == "old" else module._p_random_basis
     # Frobenius sum per layer; learner averages layers. No adaptive normalization.
     return (component @ basis.to(component)).square().sum()
