@@ -8,6 +8,8 @@ import subprocess
 import sys
 import time
 
+sys.dont_write_bytecode = True
+
 ROOT = Path(__file__).resolve().parents[2]
 HOSTS = {
     "cl": ("https://github.com/JiangpengHe/CL-LoRA.git", "df4e74efe589ca1aa872d3843315ab6851192cf3", "exps/inr.json"),
@@ -25,7 +27,10 @@ def source(host, setup=False):
     actual = subprocess.check_output(["git", "-C", str(path), "rev-parse", "HEAD"], text=True).strip()
     if actual != revision:
         raise RuntimeError(f"{path}: expected {revision}, found {actual}; do not overwrite an existing checkout")
-    if subprocess.check_output(["git", "-C", str(path), "status", "--porcelain", "--untracked-files=no"], text=True).strip():
+    status = subprocess.check_output(["git", "-C", str(path), "status", "--porcelain", "--untracked-files=no"], text=True)
+    # Upstream tracks Python bytecode; Python 3.9 rewrites it during imports.
+    edits = [line for line in status.splitlines() if not ("__pycache__/" in line[3:] and line.endswith(".pyc"))]
+    if edits:
         raise RuntimeError(f"Official source has local tracked edits: {path}")
     return path
 
@@ -39,7 +44,12 @@ def main():
     parser.add_argument("--setup", action="store_true")
     parser.add_argument("--smoke", action="store_true", help="Original T10 partition, first two tasks, one epoch each")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--cl-protection-strength", type=float, default=0.5)
+    parser.add_argument("--sd-checkpoint", action="store_true")
+    parser.add_argument("--smoke-tasks", type=int, default=2)
     cli = parser.parse_args()
+    if not 0 <= cli.cl_protection_strength <= 1 or not 1 <= cli.smoke_tasks <= 10:
+        parser.error("Protection strength must be [0,1], smoke tasks must be [1,10]")
     repo = source(cli.host, cli.setup)
     if cli.setup:
         print(f"Pinned {cli.host}: {HOSTS[cli.host][1]} at {repo}")
@@ -56,13 +66,19 @@ def main():
             if key in args:
                 args[key] = 1
     tag = f"{cli.host}_dualmask_{cli.mode}_seed{cli.seed}_{'smoke' if cli.smoke else 't10'}"
+    if cli.host == "cl" and cli.mode == "on":
+        tag += f"_protect{cli.cl_protection_strength}"
+    if cli.sd_checkpoint:
+        tag += "_checkpoint"
     work = ROOT / "logs" / "dualmask_transfer" / f"{tag}_{time.time_ns()}"
     args["prefix"] = tag
     # SD filepath means factor CHECKPOINT output, not its dataset path.
     args["filepath"] = str(work / "factors") + "/"
     fingerprint = {name: hashlib.sha256((Path(__file__).parent / name).read_bytes()).hexdigest()
                    for name in ("core.py", "hosts.py", "run.py")}
-    record = {"official_commit": HOSTS[cli.host][1], "mode": cli.mode, "plugin_sha256": fingerprint, "args": args}
+    record = {"official_commit": HOSTS[cli.host][1], "mode": cli.mode, "plugin_sha256": fingerprint, "args": args,
+              "cl_protection_strength": cli.cl_protection_strength, "sd_checkpoint": cli.sd_checkpoint,
+              "smoke_tasks": cli.smoke_tasks if cli.smoke else None}
     print(json.dumps(record, indent=2), flush=True)
     if cli.dry_run:
         return
@@ -113,13 +129,19 @@ def main():
         torch.load = load
     if cli.mode == "on":
         from dualmask_transfer.hosts import install_cl, install_sd
-        (install_cl if cli.host == "cl" else install_sd)()
+        if cli.host == "cl":
+            install_cl(cli.cl_protection_strength)
+        else:
+            install_sd()
+    if cli.host == "sd" and cli.sd_checkpoint:
+        from dualmask_transfer.hosts import install_sd_checkpoint
+        install_sd_checkpoint()
     if cli.smoke:
         from utils.data_manager import DataManager
         original_manager = DataManager.__init__
         def init_manager(self, *pos, **kw):
             original_manager(self, *pos, **kw)
-            self._increments = self._increments[:2]
+            self._increments = self._increments[:cli.smoke_tasks]
         DataManager.__init__ = init_manager
 
     from utils import factory

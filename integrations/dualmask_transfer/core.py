@@ -24,11 +24,14 @@ def select(score, coverage, floor=0.0):
 
 class DualMask(nn.Module):
     """Immutable spectral importance and complementary masks per projection."""
-    def __init__(self, pretrained, role):
+    def __init__(self, pretrained, role, protection_strength=0.5):
         super().__init__()
         if role not in {"shared", "private", "single"}:
             raise ValueError(role)
         self.role = role
+        if not 0 <= protection_strength <= 1:
+            raise ValueError("protection_strength must be in [0, 1]")
+        self.protection_strength = protection_strength
         with torch.no_grad():
             u, s, vh = torch.linalg.svd(pretrained.detach().float(), full_matrices=False)
             k = min(32, len(s))
@@ -41,5 +44,5 @@ class DualMask(nn.Module):
     def forward(self, delta):
         conflict = select(normalize(self.importance * normalize(delta.detach().abs())), 0.5, 0.1)
         # single = protected part + complementary plastic part, with tied factors.
-        gate = 1 - self.protect if self.role == "private" else 1 - 0.5 * self.protect
+        gate = 1 - self.protect if self.role == "private" else 1 - self.protection_strength * self.protect
         return delta * gate.to(delta) * (1 - 0.5 * conflict.to(delta))

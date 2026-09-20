@@ -16,7 +16,7 @@ def cl_effective(adapter):
     return adapter.dm_effective_start + adapter.dm_gate(raw - adapter.dm_raw_start)
 
 
-def install_cl():
+def install_cl(protection_strength=0.5):
     from backbone.vit_cllora import Adapter_lora, VisionTransformer
     from models.cllora import Learner
 
@@ -34,7 +34,7 @@ def install_cl():
                     continue
                 if not hasattr(adapter, "dm_gate"):
                     weight = getattr(backbone.blocks[layer].attn, projection).weight
-                    adapter.dm_gate = DualMask(weight, role).to(weight.device)
+                    adapter.dm_gate = DualMask(weight, role, protection_strength).to(weight.device)
                     adapter.register_buffer("dm_raw_start", torch.zeros_like(weight))
                     adapter.register_buffer("dm_effective_start", torch.zeros_like(weight))
                 adapter.dm_active = task > 0
@@ -124,4 +124,18 @@ def install_sd():
         return qkv + torch.cat((updates[0], torch.zeros_like(updates[0]), updates[1]), dim=-1)
 
     _LoRA_qkv_timm_train.__init__ = init
+    _LoRA_qkv_timm_train.forward = forward
+
+
+def install_sd_checkpoint():
+    """Recompute QKV activations on backward; do not change official equations/batch."""
+    from backbone.lora import _LoRA_qkv_timm_train
+    from torch.utils.checkpoint import checkpoint
+    original = _LoRA_qkv_timm_train.forward
+
+    def forward(self, x):
+        if self.training and torch.is_grad_enabled() and self.task_id > 0:
+            return checkpoint(original, self, x, use_reentrant=False, preserve_rng_state=True)
+        return original(self, x)
+
     _LoRA_qkv_timm_train.forward = forward
