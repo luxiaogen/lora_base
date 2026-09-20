@@ -607,6 +607,16 @@ class Learner(BaseLearner):
             for module in self._iter_lora_modules():
                 module._p_region_removals = None
 
+        if bool(self.args.get("dual_mask_p_functional_oracle_diagnostic", False)):
+            try:
+                if self._cur_task in (1, 2):
+                    self._diagnose_p_functional_oracle(self.test_loader.dataset)
+                elif self._cur_task == 0:
+                    logging.info("P functional oracle task=0: no private P contribution")
+            finally:
+                for module in self._iter_lora_modules():
+                    module._p_conflict_functional_state = None
+
     def _diagnose_p_regions(self, loader, source, per_layer):
         from utils.p_region_diagnostic import compare_regions
         modules = list(self._iter_lora_modules())
@@ -620,6 +630,60 @@ class Learner(BaseLearner):
             report = compare_regions(self._network, group, loader, self._device, self.task_sizes)
             logging.info("P-region diagnostic %s", json.dumps({"task": self._cur_task, "source": source,
                          "layer": name, "current_task_component_only": True, "metrics": report}, allow_nan=False))
+
+    def _diagnose_p_functional_oracle(self, dataset):
+        from torch.utils.data import Subset
+        from utils.p_conflict_functional_oracle import (
+            balanced_holdout_indices,
+            compare_functional_components,
+        )
+
+        per_class = int(self.args.get("dual_mask_p_functional_samples_per_class", 4))
+        selector_indices, evaluator_indices = balanced_holdout_indices(
+            dataset.labels,
+            per_class=per_class,
+        )
+        selector_loader = DataLoader(
+            Subset(dataset, selector_indices),
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=0,
+            pin_memory=True,
+        )
+        evaluator_loader = DataLoader(
+            Subset(dataset, evaluator_indices),
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=0,
+            pin_memory=True,
+        )
+        modules = list(self._iter_lora_modules())
+        report = compare_functional_components(
+            self._network,
+            modules,
+            selector_loader,
+            evaluator_loader,
+            self._device,
+            self.task_sizes,
+            random_seed=int(self.args["seed"]) + self._cur_task,
+        )
+        fingerprint = {
+            "task": self._cur_task,
+            "source": "post_ca_test_disjoint_label_diagnostic",
+            "formal_cil_score": False,
+            "seed": int(self.args["seed"]),
+            "rank": int(self.args["rank"]),
+            "rank_groups": int(self.args.get("dual_mask_p_functional_rank_groups", 8)),
+            "samples_per_class": per_class,
+            "conflict_ratio": float(self.args.get("dual_mask_conflict_ratio", 0.1)),
+            "conflict_strength": float(self.args.get("dual_mask_conflict_strength", 0.5)),
+            "merge_mode": str(self.args.get("dual_mask_conflict_merge_mode", "suppress")),
+            "metrics": report,
+        }
+        logging.info(
+            "P-conflict functional oracle %s",
+            json.dumps(fingerprint, allow_nan=False),
+        )
 
     def _train(self, train_loader, test_loader):
         try:

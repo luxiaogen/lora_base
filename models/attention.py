@@ -326,6 +326,13 @@ class Attention_LoRA(nn.Module):
 
     def _init_params(self, args):
         self.p_region_diagnostic = bool(args.get("dual_mask_p_region_diagnostic", False))
+        self.p_conflict_functional_oracle_diagnostic = bool(
+            args.get("dual_mask_p_functional_oracle_diagnostic", False)
+        )
+        self.p_conflict_functional_rank_groups = int(
+            args.get("dual_mask_p_functional_rank_groups", 8)
+        )
+        self._p_conflict_functional_state = None
         self.args = args
         self.use_slora: bool = args["use_slora"]
         self.use_plora: bool = args["use_plora"]
@@ -1319,11 +1326,13 @@ class Attention_LoRA(nn.Module):
         t = int(task)
         device = next(self.parameters()).device
         dtype = self.qkv.weight.dtype
+        self._p_conflict_functional_state = None
         # s=0.5 p=0.75
         def raw_delta(name: str, unit, gamma: float, isolated: bool):
             delta = gamma * (unit.B_weight.detach() @ unit.A_weight.detach())
             return {
                 "name": name,
+                "unit": unit,
                 "isolated": isolated,
                 "gamma": gamma,
                 "raw_delta": delta,
@@ -1358,6 +1367,44 @@ class Attention_LoRA(nn.Module):
                         _, mask = self._merge_base_and_conflict(item["raw_delta"], True, conflict_ratio)
                         self._p_region_removals, norms = matched_removals(item["safe_delta"], mask)
                         logging.info("P-region norms task=%s layer=%s %s", t, self.layer_idx, norms)
+
+            if getattr(self, "p_conflict_functional_oracle_diagnostic", False):
+                for item in branch_deltas:
+                    if not item["isolated"]:
+                        continue
+                    _, conflict_mask = self._merge_base_and_conflict(
+                        item["raw_delta"], True, conflict_ratio
+                    )
+                    plastic_mask = 1.0 - self.general_mask.to(
+                        device=item["raw_delta"].device,
+                        dtype=item["raw_delta"].dtype,
+                    )
+                    gate = plastic_mask
+                    if self.dual_mask_conflict_merge_mode == "suppress":
+                        gate = gate * (1.0 - conflict_strength * conflict_mask)
+                    gate = gate * conflict_mask
+                    reconstructed = item["raw_delta"] * gate
+                    target = item["safe_delta"] * conflict_mask
+                    max_diff = float((reconstructed - target).abs().max().item())
+                    if torch.allclose(reconstructed, target, atol=1e-6, rtol=1e-5):
+                        unit = item["unit"]
+                        self._p_conflict_functional_state = {
+                            "task": t,
+                            "A": unit.A_weight.detach().float().cpu().clone(),
+                            "B": unit.B_weight.detach().float().cpu().clone(),
+                            "gate": gate.detach().float().cpu().clone(),
+                            "gamma": float(item["gamma"]),
+                            "rank_groups": self.p_conflict_functional_rank_groups,
+                            "reconstruction_max_abs_diff": max_diff,
+                        }
+                    else:
+                        logging.warning(
+                            "P functional diagnostic disabled for task=%s layer=%s: "
+                            "rank reconstruction max_abs_diff=%g",
+                            t,
+                            self.layer_idx,
+                            max_diff,
+                        )
 
             self._save_dual_mask_snapshot(t, branch_deltas, conflict_ratio=conflict_ratio, conflict_strength=conflict_strength)
 
