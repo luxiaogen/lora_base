@@ -268,7 +268,9 @@ def _train(args, experiment_tracker=None):
 
     cnn_curve, cnn_curve_with_task, nme_curve, cnn_curve_task = {'top1': []}, {'top1': []}, {'top1': []}, {'top1': []}
     w0_curve = []
-    for task_id in range(data_manager.nb_tasks):
+    task_limit = min(data_manager.nb_tasks, int(args.get("max_tasks", data_manager.nb_tasks)))
+    logging.info("Training %d/%d tasks; original class partition unchanged", task_limit, data_manager.nb_tasks)
+    for task_id in range(task_limit):
         logging.info('All params: {}'.format(count_parameters(model._network)))
         time_start = time.time()
         model.incremental_train(data_manager)
@@ -319,7 +321,7 @@ def _train(args, experiment_tracker=None):
             result_str = "Forgetting: {:.4f}\tBackward: {:.4f}".format(forgetting, backward)
             logging.info(result_str)
 
-        if bool(args.get('dual_mask_p_conflict_group_diagnostic', False)):
+        if bool(args.get('dual_mask_p_conflict_group_diagnostic', False)) or args.get('dual_mask_p_input_subspace', 'none') != 'none':
             acquired = np.diag(model.acc_matrix)[:task_id+1]
             current = model.acc_matrix[:task_id+1, task_id]
             peak = np.max(model.acc_matrix[:task_id+1, :task_id+1], axis=1)

@@ -171,8 +171,10 @@ class Learner(BaseLearner):
         )
 
         self._last_training_loss_metrics = {}
+        subspace_mode = self.args.get("dual_mask_p_input_subspace", "none")
+        subspace_applies = subspace_mode in ("old", "random") and self._cur_task > 0
         if (reg_weight <= 0.0
-                and not anchor_applies and not safe_residual_applies and not selective_anchor_applies):
+                and not anchor_applies and not safe_residual_applies and not selective_anchor_applies and not subspace_applies):
             return None
 
         modules = [
@@ -181,6 +183,15 @@ class Learner(BaseLearner):
             if self._cur_task >= 0 and module.S_lora[self._cur_task] is not None
         ]
         weighted_losses = []
+        if subspace_applies:
+            from utils.p_input_subspace import conflict_subspace_loss
+            losses = [conflict_subspace_loss(module, subspace_mode) for module in modules]
+            losses = [loss for loss in losses if loss is not None]
+            if losses:
+                subspace_loss = torch.stack(losses).mean()
+                weighted = float(self.args.get("dual_mask_p_input_weight", 1.0)) * subspace_loss
+                weighted_losses.append(weighted)
+                self._last_training_loss_metrics.update(p_input_loss=subspace_loss.detach(), p_input_weighted=weighted.detach())
 
         if reg_weight > 0.0:
             conflict_losses = []
@@ -612,6 +623,18 @@ class Learner(BaseLearner):
             self._diagnose_p_regions(self.test_loader, "post_ca_test", per_layer=False)
             for module in self._iter_lora_modules():
                 module._p_region_removals = None
+
+        subspace_mode = self.args.get("dual_mask_p_input_subspace", "none")
+        if subspace_mode not in ("none", "baseline", "old", "random"):
+            raise ValueError("Unknown dual_mask_p_input_subspace")
+        if subspace_mode != "none":
+            from torch.utils.data import Subset
+            from utils.p_conflict_groups import balanced_indices
+            from utils.p_input_subspace import collect_input_bases
+            dataset = data_manager.get_dataset(np.arange(self._known_classes, self._total_classes), source="train", mode="test")
+            loader = DataLoader(Subset(dataset, balanced_indices(dataset.labels, per_class=8)), batch_size=self.batch_size, shuffle=False, num_workers=0)
+            collect_input_bases(self._network, list(self._iter_lora_modules()), loader, self._device,
+                                rank=int(self.args.get("dual_mask_p_input_rank", 32)), seed=int(self.args["seed"]))
 
     def _diagnose_p_conflict_groups(self, dataset, source):
         from torch.utils.data import Subset
