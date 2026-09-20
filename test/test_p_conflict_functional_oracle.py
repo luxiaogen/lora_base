@@ -15,7 +15,9 @@ from utils.p_conflict_functional_oracle import (
     energy_matched_plan,
     materialize_component,
     plan_energy,
+    prepare_svd_components,
     reconstruct_conflict_component,
+    svd_energy_slices,
     temporary_plan,
 )
 
@@ -73,6 +75,39 @@ class FunctionalOracleTests(unittest.TestCase):
         self.assertAlmostEqual(plan_energy(plan, norms), 5.0, places=6)
         self.assertTrue(all(0.0 < scale <= 1.0 for scale in plan.values()))
 
+    def test_svd_energy_groups_are_nonempty_and_cover_rank(self):
+        values = torch.tensor([8., 4., 2., 1., 0.5, 0.25])
+        slices = svd_energy_slices(values, groups=4)
+        covered = [index for ranks in slices for index in range(ranks.start, ranks.stop)]
+        self.assertEqual(covered, list(range(values.numel())))
+        self.assertTrue(all(ranks.stop > ranks.start for ranks in slices))
+
+    def test_svd_components_are_orthogonal_and_reconstruct(self):
+        module = nn.Module()
+        module.qkv = nn.Linear(2, 6, bias=False)
+        conflict = torch.tensor([
+            [3., 0.], [0., 1.],
+            [2., 0.], [0., 0.5],
+            [1., 0.], [0., 0.25],
+        ])
+        module._p_conflict_functional_state = {
+            "decomposition": "svd",
+            "conflict_component": conflict,
+            "rank_groups": 2,
+            "private_rank": 2,
+        }
+        prepare_svd_components([module])
+        self.assertTrue(torch.allclose(reconstruct_conflict_component(module), conflict, atol=1e-6))
+        for projection in ("q", "k", "v"):
+            first = materialize_component(module, (0, projection, 0)).flatten()
+            second = materialize_component(module, (0, projection, 1)).flatten()
+            self.assertAlmostEqual(float(torch.dot(first, second)), 0.0, places=6)
+            self.assertAlmostEqual(
+                sum(module._p_conflict_functional_state["svd_energy_fractions"][projection]),
+                1.0,
+                places=6,
+            )
+
     def test_temporary_plan_restores_exact_rows(self):
         module = TinyAttention()
         original = module.qkv.weight.detach().clone()
@@ -104,32 +139,36 @@ class FunctionalOracleTests(unittest.TestCase):
             self.assertTrue(torch.equal(value, net.state_dict()[key]))
 
     def test_attention_capture_reconstructs_retained_conflict(self):
-        torch.manual_seed(11)
-        module = Attention_LoRA(dim=4, num_heads=1, r=2, n_tasks=2)
-        module._init_params(dict(
-            use_slora=True, use_plora=True, lora_A_init="kaiming",
-            slora_gamma=0.5, plora_gamma=0.75,
-            dual_mask_conflict_energy_adaptive=True,
-            dual_mask_conflict_energy_ratio_floor=True,
-            dual_mask_p_functional_oracle_diagnostic=True,
-            dual_mask_p_functional_rank_groups=2,
-        ))
-        module.before_task(0)
-        module.after_task(0)
-        module.before_task(1)
-        with torch.no_grad():
-            module.P_lora[1].B.weight.normal_(0, 0.1)
-            module.S_lora[1].B.weight.normal_(0, 0.1)
-        raw = module.plora_gamma * (module.P_lora[1].B_weight @ module.P_lora[1].A_weight)
-        ratio, strength = module._conflict_parameters()
-        safe = module._compose_merge_delta(raw, True, ratio, strength)
-        _, conflict = module._merge_base_and_conflict(raw, True, ratio)
-        expected = (safe * conflict).float()
-        module.after_task(1)
-        self.assertIsNotNone(module._p_conflict_functional_state)
-        self.assertEqual(len(component_specs([module])), 6)
-        self.assertTrue(torch.allclose(reconstruct_conflict_component(module), expected, atol=1e-6))
-        self.assertIsNone(module.P_lora[1])
+        for decomposition in ("rank", "svd"):
+            with self.subTest(decomposition=decomposition):
+                torch.manual_seed(11)
+                module = Attention_LoRA(dim=4, num_heads=1, r=2, n_tasks=2)
+                module._init_params(dict(
+                    use_slora=True, use_plora=True, lora_A_init="kaiming",
+                    slora_gamma=0.5, plora_gamma=0.75,
+                    dual_mask_conflict_energy_adaptive=True,
+                    dual_mask_conflict_energy_ratio_floor=True,
+                    dual_mask_p_functional_oracle_diagnostic=True,
+                    dual_mask_p_functional_rank_groups=2,
+                    dual_mask_p_functional_decomposition=decomposition,
+                ))
+                module.before_task(0)
+                module.after_task(0)
+                module.before_task(1)
+                with torch.no_grad():
+                    module.P_lora[1].B.weight.normal_(0, 0.1)
+                    module.S_lora[1].B.weight.normal_(0, 0.1)
+                raw = module.plora_gamma * (module.P_lora[1].B_weight @ module.P_lora[1].A_weight)
+                ratio, strength = module._conflict_parameters()
+                safe = module._compose_merge_delta(raw, True, ratio, strength)
+                _, conflict = module._merge_base_and_conflict(raw, True, ratio)
+                expected = (safe * conflict).float()
+                module.after_task(1)
+                self.assertIsNotNone(module._p_conflict_functional_state)
+                prepare_svd_components([module])
+                self.assertEqual(len(component_specs([module])), 6)
+                self.assertTrue(torch.allclose(reconstruct_conflict_component(module), expected, atol=1e-6))
+                self.assertIsNone(module.P_lora[1])
 
 
 if __name__ == "__main__":

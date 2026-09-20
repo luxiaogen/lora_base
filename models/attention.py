@@ -332,6 +332,9 @@ class Attention_LoRA(nn.Module):
         self.p_conflict_functional_rank_groups = int(
             args.get("dual_mask_p_functional_rank_groups", 8)
         )
+        self.p_conflict_functional_decomposition = str(
+            args.get("dual_mask_p_functional_decomposition", "rank")
+        ).lower()
         self._p_conflict_functional_state = None
         self.args = args
         self.use_slora: bool = args["use_slora"]
@@ -1388,15 +1391,29 @@ class Attention_LoRA(nn.Module):
                     max_diff = float((reconstructed - target).abs().max().item())
                     if torch.allclose(reconstructed, target, atol=1e-6, rtol=1e-5):
                         unit = item["unit"]
-                        self._p_conflict_functional_state = {
+                        state = {
                             "task": t,
-                            "A": unit.A_weight.detach().float().cpu().clone(),
-                            "B": unit.B_weight.detach().float().cpu().clone(),
-                            "gate": gate.detach().float().cpu().clone(),
                             "gamma": float(item["gamma"]),
                             "rank_groups": self.p_conflict_functional_rank_groups,
+                            "private_rank": int(unit.A_weight.shape[0]),
+                            "decomposition": self.p_conflict_functional_decomposition,
                             "reconstruction_max_abs_diff": max_diff,
                         }
+                        if self.p_conflict_functional_decomposition == "svd":
+                            state["conflict_component"] = target.detach().float().cpu().clone()
+                        elif self.p_conflict_functional_decomposition == "rank":
+                            state.update({
+                                "A": unit.A_weight.detach().float().cpu().clone(),
+                                "B": unit.B_weight.detach().float().cpu().clone(),
+                                "gate": gate.detach().float().cpu().clone(),
+                            })
+                        else:
+                            logging.warning(
+                                "Unknown P functional decomposition %s; diagnostic disabled",
+                                self.p_conflict_functional_decomposition,
+                            )
+                            state = None
+                        self._p_conflict_functional_state = state
                     else:
                         logging.warning(
                             "P functional diagnostic disabled for task=%s layer=%s: "

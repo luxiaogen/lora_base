@@ -674,6 +674,7 @@ class Learner(BaseLearner):
             "seed": int(self.args["seed"]),
             "rank": int(self.args["rank"]),
             "rank_groups": int(self.args.get("dual_mask_p_functional_rank_groups", 8)),
+            "decomposition": str(self.args.get("dual_mask_p_functional_decomposition", "rank")),
             "samples_per_class": per_class,
             "conflict_ratio": float(self.args.get("dual_mask_conflict_ratio", 0.1)),
             "conflict_strength": float(self.args.get("dual_mask_conflict_strength", 0.5)),

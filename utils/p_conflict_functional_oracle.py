@@ -1,4 +1,4 @@
-"""Read-only functional diagnosis for rank-grouped P-conflict updates."""
+"""Read-only functional diagnosis for grouped P-conflict updates."""
 from contextlib import contextmanager
 import math
 import random
@@ -21,6 +21,62 @@ def rank_slices(rank, groups):
         result.append(slice(start, stop))
         start = stop
     return result
+
+
+def svd_energy_slices(singular_values, groups):
+    """Split ordered singular directions into non-empty, near-equal energy groups."""
+    rank = int(singular_values.numel())
+    groups = max(1, min(int(groups), rank))
+    energy = singular_values.detach().float().pow(2)
+    total = float(energy.sum().item())
+    if total == 0.0:
+        return rank_slices(rank, groups)
+
+    cumulative = torch.cumsum(energy, dim=0)
+    boundaries = [0]
+    for group in range(1, groups):
+        target = group * total / groups
+        boundary = int(torch.searchsorted(cumulative, target).item()) + 1
+        boundary = max(boundaries[-1] + 1, boundary)
+        boundary = min(rank - (groups - group), boundary)
+        boundaries.append(boundary)
+    boundaries.append(rank)
+    return [slice(boundaries[i], boundaries[i + 1]) for i in range(groups)]
+
+
+def prepare_svd_components(modules):
+    """Create orthogonal SVD groups from the retained masked conflict update."""
+    for module in modules:
+        state = getattr(module, "_p_conflict_functional_state", None)
+        if state is None or state.get("decomposition", "rank") != "svd":
+            continue
+        if "svd_components" in state:
+            continue
+
+        dim = module.qkv.weight.shape[1]
+        components, energy_fractions = {}, {}
+        max_diff = 0.0
+        for projection_index, projection in enumerate(PROJECTIONS):
+            rows = slice(projection_index * dim, (projection_index + 1) * dim)
+            conflict = state["conflict_component"][rows].to(module.qkv.weight.device)
+            u, singular_values, vh = torch.linalg.svd(conflict, full_matrices=False)
+            slices = svd_energy_slices(singular_values, state["rank_groups"])
+            projection_components = []
+            total_energy = singular_values.float().pow(2).sum().clamp_min(1e-30)
+            fractions = []
+            for ranks in slices:
+                component = (u[:, ranks] * singular_values[ranks]) @ vh[ranks]
+                projection_components.append(component.detach().float().cpu())
+                fractions.append(float(singular_values[ranks].float().pow(2).sum().div(total_energy).item()))
+            reconstructed = torch.stack(
+                [component.to(conflict.device) for component in projection_components]
+            ).sum(dim=0)
+            max_diff = max(max_diff, float((reconstructed - conflict.float()).abs().max().item()))
+            components[projection] = projection_components
+            energy_fractions[projection] = fractions
+        state["svd_components"] = components
+        state["svd_energy_fractions"] = energy_fractions
+        state["svd_reconstruction_max_abs_diff"] = max_diff
 
 
 def balanced_holdout_indices(labels, per_class=4):
@@ -46,8 +102,11 @@ def component_specs(modules):
         state = getattr(module, "_p_conflict_functional_state", None)
         if state is None:
             continue
-        groups = len(rank_slices(state["A"].shape[0], state["rank_groups"]))
         for projection in PROJECTIONS:
+            if state.get("decomposition", "rank") == "svd":
+                groups = len(state["svd_components"][projection])
+            else:
+                groups = len(rank_slices(state["A"].shape[0], state["rank_groups"]))
             specs.extend((layer, projection, group) for group in range(groups))
     return specs
 
@@ -56,6 +115,9 @@ def materialize_component(module, spec):
     """Materialize one retained P-conflict contribution on the weight device."""
     _, projection, group = spec
     state = module._p_conflict_functional_state
+    if state.get("decomposition", "rank") == "svd":
+        return state["svd_components"][projection][group].to(module.qkv.weight.device)
+
     dim = module.qkv.weight.shape[1]
     projection_index = PROJECTIONS.index(projection)
     rows = slice(projection_index * dim, (projection_index + 1) * dim)
@@ -68,7 +130,7 @@ def materialize_component(module, spec):
 
 
 def reconstruct_conflict_component(module):
-    state = module._p_conflict_functional_state
+    prepare_svd_components([module])
     result = torch.zeros_like(module.qkv.weight, dtype=torch.float32)
     for spec in component_specs([module]):
         _, projection, _ = spec
@@ -159,6 +221,7 @@ def _component_record(spec, gain, old, norm):
     return {
         "layer": spec[0],
         "projection": spec[1],
+        "component_group": spec[2],
         "rank_group": spec[2],
         "component_norm": norm,
         "old_margin_gain": old_gain,
@@ -179,8 +242,9 @@ def compare_functional_components(
         random_seed=1993,
 ):
     """Select with labeled selector samples and evaluate on disjoint samples."""
-    specs = component_specs(modules)
     with preserve_diagnostic_state(network):
+        prepare_svd_components(modules)
+        specs = component_specs(modules)
         selector_base, selector_labels, selector_indices = collect_logits(network, selector_loader, device)
         evaluator_base, evaluator_labels, evaluator_indices = collect_logits(network, evaluator_loader, device)
         selector_margin = class_margin(selector_base, selector_labels)
@@ -196,7 +260,7 @@ def compare_functional_components(
             records.append(_component_record(spec, class_margin(candidate, labels) - selector_margin, old, norm))
 
         selected = [
-            (record["layer"], record["projection"], record["rank_group"])
+            (record["layer"], record["projection"], record["component_group"])
             for record in records
             if record["quadrant"] == "removal_helps_old_and_new"
         ]
@@ -238,9 +302,17 @@ def compare_functional_components(
             "diagnostic_only": True,
             "uses_true_labels_for_selection": True,
             "selector_and_evaluator_disjoint": True,
+            "decomposition": next(
+                (
+                    module._p_conflict_functional_state.get("decomposition", "rank")
+                    for module in modules
+                    if getattr(module, "_p_conflict_functional_state", None) is not None
+                ),
+                None,
+            ),
             "components_total": len(specs),
             "layer_private_ranks": [
-                int(module._p_conflict_functional_state["A"].shape[0])
+                int(module._p_conflict_functional_state.get("private_rank", 0))
                 for module in modules
                 if getattr(module, "_p_conflict_functional_state", None) is not None
             ],
@@ -249,6 +321,18 @@ def compare_functional_components(
                 for module in modules
                 if getattr(module, "_p_conflict_functional_state", None) is not None
                 and "reconstruction_max_abs_diff" in module._p_conflict_functional_state
+            ],
+            "layer_svd_reconstruction_max_abs_diff": [
+                float(module._p_conflict_functional_state["svd_reconstruction_max_abs_diff"])
+                for module in modules
+                if getattr(module, "_p_conflict_functional_state", None) is not None
+                and "svd_reconstruction_max_abs_diff" in module._p_conflict_functional_state
+            ],
+            "svd_energy_fractions": [
+                module._p_conflict_functional_state["svd_energy_fractions"]
+                for module in modules
+                if getattr(module, "_p_conflict_functional_state", None) is not None
+                and "svd_energy_fractions" in module._p_conflict_functional_state
             ],
             "quadrants": quadrants,
             "selected_components": [list(spec) for spec in selected],
