@@ -64,6 +64,7 @@ _BALANCED_STRENGTH_SPAN = 0.60
 _BALANCED_PRIVATE_MIN_RATIO = 0.25
 _BALANCED_STATIC_STRENGTH = 0.70
 _CONFLICT_ENERGY_COVERAGE = 0.50
+_LORI_STYLE_RETAIN_RATIO = 0.10
 
 
 
@@ -86,6 +87,20 @@ def _top_ratio_mask(score: torch.Tensor, ratio: float) -> torch.Tensor:
     k = max(1, int(flat.numel() * ratio))  # k = int(1,769,472 × 0.5)= 884,736
     threshold = torch.topk(flat, k, largest=True).values.min()  # 最大的 k 个分数里面，最小的那个就是第 k 大分数，也就是选择阈值 | 选这50%中要保护的区域的最小值
     return (score >= threshold).to(score.dtype)  # 大于这个阈值的就是要保护的区域
+
+
+def _global_top_ratio_threshold(tensors, ratio: float) -> torch.Tensor:
+    """Return one magnitude threshold shared by all provided tensors."""
+    ratio = min(max(float(ratio), 0.0), 1.0)
+    flat = torch.cat([tensor.detach().float().abs().flatten() for tensor in tensors])
+    if flat.numel() == 0:
+        raise ValueError("at least one non-empty tensor is required")
+    if ratio <= 0.0:
+        return flat.new_tensor(float("inf"))
+    if ratio >= 1.0:
+        return flat.min()
+    k = max(1, int(flat.numel() * ratio))
+    return torch.topk(flat, k, largest=True).values[-1]
 
 
 def _masked_top_ratio_mask(
@@ -259,7 +274,9 @@ class Attention_LoRA(nn.Module):
 
 
         # 先判断 W0 哪里重要，再决定 LoRA 的 BA 哪里能加、哪里不能加。
+        self.dual_mask_enabled = True
         self.dual_mask_importance = "svd"
+        self.global_magnitude_threshold = None
         self.dual_mask_general_ratio = 0.5  # 决定 W0 保护区多大
         self.dual_mask_layerwise_ratio_mode = "none"
 
@@ -328,6 +345,7 @@ class Attention_LoRA(nn.Module):
         self.args = args
         self.use_slora: bool = args["use_slora"]
         self.use_plora: bool = args["use_plora"]
+        self.dual_mask_enabled = bool(args.get("dual_mask_enabled", True))
         # msg = f'Use slora:{self.use_slora} and Use plora:{self.use_plora}'
         # print(msg)
         # logging.info(msg)
@@ -387,7 +405,7 @@ class Attention_LoRA(nn.Module):
         self.dual_mask_vis_save_weight = bool(args.get("dual_mask_vis_save_weight", False))
         self.lora_A_init = str(args.get("lora_A_init", "orthogonal")).lower()
         logging.info(
-            "Dual-mask branch: importance=%(importance)s, "
+            "Dual-mask branch: enabled=%(enabled)s, importance=%(importance)s, "
             "protect_ratio=%(protect_ratio).3f, svd_rank=%(svd_rank)s, "
             "conflict_strength=%(conflict_strength).3f, "
             "conflict_energy_adaptive=%(conflict_energy_adaptive)s, "
@@ -400,6 +418,7 @@ class Attention_LoRA(nn.Module):
             "conflict_merge_mode=%(conflict_merge_mode)s, "
             "A_init=%(a_init)s",
             {
+                "enabled": self.dual_mask_enabled,
                 "importance": self.dual_mask_importance,
                 "protect_ratio": self.dual_mask_general_ratio,
                 "svd_rank": self.dual_mask_svd_rank,
@@ -418,6 +437,9 @@ class Attention_LoRA(nn.Module):
                 "a_init": self.lora_A_init,
             },
         )
+
+    def set_global_magnitude_threshold(self, threshold: float):
+        self.global_magnitude_threshold = float(threshold)
 
     def capture_pretrained_anchor(self, force: bool = False):
         if bool(self.pretrained_anchor_captured.item()) and not force:
@@ -733,6 +755,8 @@ class Attention_LoRA(nn.Module):
         weight = self.pretrained_weight.detach() # 永远不变的 W_pre
 
         mode = self.dual_mask_importance  # "dual_mask_importance": "svd"
+        if mode == "lori_global_magnitude":
+            return weight.abs()
         if mode == "soft_svd":
             svd_score = self._soft_svd_importance(weight)
         else:
@@ -741,6 +765,15 @@ class Attention_LoRA(nn.Module):
 
     def rebuild_dual_masks(self):
         with torch.no_grad():
+            if not self.dual_mask_enabled:
+                self.w0_importance.zero_()
+                self.general_mask.zero_()
+                self.isolated_mask.fill_(1.0)
+                self.last_svd_rank = 0
+                self.last_svd_energy_coverage = 0.0
+                logging.info("DualMask disabled: layer %s uses raw S/P updates", self.layer_idx)
+                return
+
             # SVD-only 的 W_pre 分数跨任务不变，可以复用；但每个任务仍按
             # 当前 competence 重新阈值化，使 adaptive coverage 真正生效
             reuse_w0_score = (self.cur_task > 0
@@ -756,9 +789,21 @@ class Attention_LoRA(nn.Module):
             ## score 最高的 50% 位置 -> protect = 1 | 1 表示这个位置是 W0 重要位置，不希望 LoRA 改
             ## score 剩下的 50% 位置 -> protect = 0 | 0 表示这个位置可以改
             coverage_mode = str(self.args.get("dual_mask_coverage_mode", "energy")).strip().lower()
-            use_adaptive_coverage = (self.dual_mask_competence_adaptive and coverage_mode == "energy")
+            use_global_magnitude = self.dual_mask_importance == "lori_global_magnitude"
+            use_adaptive_coverage = (
+                self.dual_mask_competence_adaptive
+                and coverage_mode == "energy"
+                and not use_global_magnitude
+            )
 
-            if use_adaptive_coverage:
+            if use_global_magnitude:
+                if self.global_magnitude_threshold is None:
+                    raise RuntimeError("global magnitude threshold must be configured before rebuilding masks")
+                mask_coverage = 0.0
+                protect = (
+                    self.pretrained_weight.detach().abs() >= self.global_magnitude_threshold
+                ).to(score.dtype)
+            elif use_adaptive_coverage:
                 # 使用能量覆盖，而不是固定 top ratio
                 ## M_g = general_mask = Task 0 时 W_pre 的重要保护区
                 mask_coverage = self.effective_energy_coverage
@@ -867,6 +912,9 @@ class Attention_LoRA(nn.Module):
             conflict_strength: Optional[float] = None,
     ) -> torch.Tensor:
 
+        if not self.dual_mask_enabled:
+            return delta
+
         gate_mode = self._effective_gate_mode()
         if gate_mode == "unmasked":
             return delta
@@ -947,6 +995,8 @@ class Attention_LoRA(nn.Module):
             conflict_strength: float,
     ) -> torch.Tensor:
         """Compose one branch update according to the merge-only ablation."""
+        if not self.dual_mask_enabled:
+            return raw_delta
         mode = self.dual_mask_conflict_merge_mode
         if mode == "suppress":
             return self._safe_delta(raw_delta, isolated=isolated, conflict_ratio=conflict_ratio, conflict_strength=conflict_strength)
@@ -965,7 +1015,8 @@ class Attention_LoRA(nn.Module):
         ## isolated=True: safe_delta_p = BA_p * plastic_mask * conflict_gate
         ## isolated=False: safe_delta_s = BA_s * protect_gate * conflict_gate
         safe_delta = self._safe_delta(raw_delta, isolated=isolated)
-        if self.dual_mask_safe_residual_enabled and self.training and torch.is_grad_enabled():
+        if (self.dual_mask_enabled and self.dual_mask_safe_residual_enabled
+                and self.training and torch.is_grad_enabled()):
             base_delta, _ = self._merge_base_and_conflict(raw_delta, isolated=isolated, conflict_ratio=self._conflict_parameters()[0], compute_conflict=False)
             self._pending_safe_residual_deltas.append(residual_scale * (base_delta - safe_delta))
         return F.linear(x, safe_delta)  # 输出 = x @ safe_delta.T

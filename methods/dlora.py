@@ -12,7 +12,11 @@ from tqdm import tqdm
 from methods.base import BaseLearner
 from utils.toolkit import tensor2numpy
 from models.network import MANet
-from models.attention import Attention_LoRA
+from models.attention import (
+    Attention_LoRA,
+    _global_top_ratio_threshold,
+    _LORI_STYLE_RETAIN_RATIO,
+)
 
 from utils.schedulers import CosineSchedule
 from torch.distributions.multivariate_normal import MultivariateNormal
@@ -66,6 +70,27 @@ class Learner(BaseLearner):
         for module in self._network.modules():
             if isinstance(module, Attention_LoRA):
                 module._init_params(args)
+
+        lora_modules = list(self._iter_lora_modules())
+        if str(args.get("dual_mask_importance", "svd")).lower() == "lori_global_magnitude":
+            threshold = _global_top_ratio_threshold(
+                [module.pretrained_weight for module in lora_modules],
+                _LORI_STYLE_RETAIN_RATIO,
+            )
+            for module in lora_modules:
+                module.set_global_magnitude_threshold(threshold.item())
+            selected = sum(
+                int((module.pretrained_weight.detach().abs() >= threshold).sum().item())
+                for module in lora_modules
+            )
+            total = sum(module.pretrained_weight.numel() for module in lora_modules)
+            logging.info(
+                "LoRI-style global magnitude selector: threshold=%.6e, retained=%s/%s (%.4f)",
+                threshold.item(),
+                selected,
+                total,
+                selected / total,
+            )
 
 
         self.args = args
@@ -124,6 +149,8 @@ class Learner(BaseLearner):
                 yield module
 
     def _extra_training_context(self, inputs, targets, epoch):
+        if not bool(self.args.get("dual_mask_enabled", True)):
+            return {}
         enabled = bool(self.args.get("dual_mask_selective_anchor_enabled", False))
         weight = float(self.args.get("dual_mask_selective_anchor_weight", 0.0))
         start_epoch = int(self.args.get("dual_mask_selective_anchor_start_epoch", 0))
@@ -140,6 +167,10 @@ class Learner(BaseLearner):
         return {"selective_anchor_w0_features": w0_features}
 
     def _extra_training_loss(self,output=None,inputs=None,targets=None,epoch=None,batch_context=None,):
+        if not bool(self.args.get("dual_mask_enabled", True)):
+            self._last_training_loss_metrics = {}
+            return None
+
         reg_weight = float(self.args.get("dual_mask_reg_weight", 0.1)) # 0.01
 
         anchor_enabled = bool(self.args.get("dual_mask_anchor_reg_enabled", True))
@@ -557,18 +588,19 @@ class Learner(BaseLearner):
         self.test_loader = DataLoader(test_dataset, batch_size=self.batch_size, shuffle=False,
                                       num_workers=self.num_workers, pin_memory=True)
 
-        track_w0 = bool(self.args.get("dual_mask_track_w0_metrics", False))
+        dual_mask_enabled = bool(self.args.get("dual_mask_enabled", True))
+        track_w0 = dual_mask_enabled and bool(self.args.get("dual_mask_track_w0_metrics", False))
         # 开启参数自适应 --- 也就是使用训练集测试W0原型的能力
-        competence_adaptive = bool(self.args.get("dual_mask_competence_adaptive", False))
+        competence_adaptive = dual_mask_enabled and bool(self.args.get("dual_mask_competence_adaptive", False))
 
-        plasticity_adaptive = bool(self.args.get("dual_mask_plasticity_adaptive", False))
+        plasticity_adaptive = dual_mask_enabled and bool(self.args.get("dual_mask_plasticity_adaptive", False))
 
-        all_seen_competence = bool(self.args.get("dual_mask_competence_all_seen", False))
-        old_overlap_conflict = bool(self.args.get("dual_mask_conflict_old_overlap_adaptive", False))
+        all_seen_competence = dual_mask_enabled and bool(self.args.get("dual_mask_competence_all_seen", False))
+        old_overlap_conflict = dual_mask_enabled and bool(self.args.get("dual_mask_conflict_old_overlap_adaptive", False))
 
-        functional_merge_calibration = bool(self.args.get("dual_mask_functional_merge_calibration", False))
+        functional_merge_calibration = dual_mask_enabled and bool(self.args.get("dual_mask_functional_merge_calibration", False))
 
-        selective_anchor_enabled = bool(self.args.get("dual_mask_selective_anchor_enabled", False))
+        selective_anchor_enabled = dual_mask_enabled and bool(self.args.get("dual_mask_selective_anchor_enabled", False))
 
         if (track_w0 or competence_adaptive or plasticity_adaptive or all_seen_competence
                 or old_overlap_conflict or functional_merge_calibration or selective_anchor_enabled
@@ -673,7 +705,8 @@ class Learner(BaseLearner):
             self._network = self._network.module
 
         lora_modules = list(self._iter_lora_modules())
-        if bool(self.args.get("dual_mask_functional_merge_calibration", False)):
+        if (bool(self.args.get("dual_mask_enabled", True))
+                and bool(self.args.get("dual_mask_functional_merge_calibration", False))):
             calibration_loader = getattr(self, "w0_loader", train_loader)
             self._calibrate_functional_merge(calibration_loader)
             
