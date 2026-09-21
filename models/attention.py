@@ -31,15 +31,35 @@ class FrozenA_TrainableB(nn.Module):
             p.requires_grad_(False)
         for p in self.B.parameters():
             p.requires_grad_(True)
+        self.register_buffer("lori_mask", torch.empty(0, dtype=torch.bool), persistent=False)
+        self.lori_sparse_active = False
 
     @property
     def A_weight(self): return self.A.weight
 
     @property
-    def B_weight(self): return self.B.weight
+    def B_weight(self):
+        if not self.lori_sparse_active:
+            return self.B.weight
+        return self.B.weight * self.lori_mask.to(dtype=self.B.weight.dtype)
+
+    def set_lori_mask(self, mask: torch.Tensor):
+        if mask.shape != self.B.weight.shape:
+            raise ValueError("LoRI mask shape must match B")
+        self.lori_mask = mask.detach().to(device=self.B.weight.device, dtype=torch.bool)
+        self.lori_sparse_active = True
+
+    def reset_for_lori_sparse(self, mask: torch.Tensor):
+        self.set_lori_mask(mask)
+        with torch.no_grad():
+            self.B.weight.zero_()
+
+    def apply_lori_gradient_mask(self):
+        if self.lori_sparse_active and self.B.weight.grad is not None:
+            self.B.weight.grad.mul_(self.lori_mask)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.B(self.A(x))  # (..., dim)
+        return F.linear(self.A(x), self.B_weight)  # (..., dim)
 
 
 
@@ -285,6 +305,8 @@ class Attention_LoRA(nn.Module):
         self.dual_mask_s_protect_enabled = True
 
         self.dual_mask_conflict_merge_mode = "suppress"
+        self.dual_mask_enabled = True
+        self.lori_s_enabled = False
 
         self._functional_merge_strength_override = None
         self.last_functional_merge_strength = float("nan")
@@ -328,6 +350,8 @@ class Attention_LoRA(nn.Module):
         self.args = args
         self.use_slora: bool = args["use_slora"]
         self.use_plora: bool = args["use_plora"]
+        self.dual_mask_enabled = bool(args.get("dual_mask_enabled", True))
+        self.lori_s_enabled = bool(args.get("lori_s_enabled", False))
         # msg = f'Use slora:{self.use_slora} and Use plora:{self.use_plora}'
         # print(msg)
         # logging.info(msg)
@@ -673,6 +697,13 @@ class Attention_LoRA(nn.Module):
             unit.A.weight.requires_grad_(False)
             unit.B.weight.requires_grad_(False)
 
+        if self.lori_s_enabled:
+            if self.use_slora or task == 0 or (not self.use_slora and not self.use_plora):
+                self.S_lora[task].B.weight.requires_grad_(True)
+            if task > 0 and self.use_plora and self.P_lora[task] is not None:
+                self.P_lora[task].B.weight.requires_grad_(True)
+            return
+
         if not self.use_slora and not self.use_plora:
             self.S_lora[task].A.weight.requires_grad_(True)
             self.S_lora[task].B.weight.requires_grad_(True)
@@ -867,6 +898,9 @@ class Attention_LoRA(nn.Module):
             conflict_strength: Optional[float] = None,
     ) -> torch.Tensor:
 
+        if not self.dual_mask_enabled:
+            return delta
+
         gate_mode = self._effective_gate_mode()
         if gate_mode == "unmasked":
             return delta
@@ -915,6 +949,8 @@ class Attention_LoRA(nn.Module):
             compute_conflict: bool = True,
     ):
         """Return the pre-conflict update and its conflict mask."""
+        if not self.dual_mask_enabled:
+            return delta, torch.zeros_like(delta)
         gate_mode = self._effective_gate_mode()
         if gate_mode == "unmasked":
             return delta, torch.zeros_like(delta)
@@ -947,6 +983,8 @@ class Attention_LoRA(nn.Module):
             conflict_strength: float,
     ) -> torch.Tensor:
         """Compose one branch update according to the merge-only ablation."""
+        if not self.dual_mask_enabled:
+            return raw_delta
         mode = self.dual_mask_conflict_merge_mode
         if mode == "suppress":
             return self._safe_delta(raw_delta, isolated=isolated, conflict_ratio=conflict_ratio, conflict_strength=conflict_strength)

@@ -19,6 +19,7 @@ from torch.distributions.multivariate_normal import MultivariateNormal
 from utils.toolkit import count_parameters
 from models.losses import AngularPenaltySMLoss
 from contextlib import ExitStack
+from utils.lori import global_topk_masks
 
 
 class Learner(BaseLearner):
@@ -124,7 +125,8 @@ class Learner(BaseLearner):
                 yield module
 
     def _extra_training_context(self, inputs, targets, epoch):
-        enabled = bool(self.args.get("dual_mask_selective_anchor_enabled", False))
+        enabled = (bool(self.args.get("dual_mask_enabled", True))
+                   and bool(self.args.get("dual_mask_selective_anchor_enabled", False)))
         weight = float(self.args.get("dual_mask_selective_anchor_weight", 0.0))
         start_epoch = int(self.args.get("dual_mask_selective_anchor_start_epoch", 0))
         if (not enabled or weight <= 0.0 or self._cur_task != 0 or int(epoch) < start_epoch):
@@ -140,6 +142,9 @@ class Learner(BaseLearner):
         return {"selective_anchor_w0_features": w0_features}
 
     def _extra_training_loss(self,output=None,inputs=None,targets=None,epoch=None,batch_context=None,):
+        if not bool(self.args.get("dual_mask_enabled", True)):
+            self._last_training_loss_metrics = {}
+            return None
         reg_weight = float(self.args.get("dual_mask_reg_weight", 0.1)) # 0.01
 
         anchor_enabled = bool(self.args.get("dual_mask_anchor_reg_enabled", True))
@@ -243,8 +248,73 @@ class Learner(BaseLearner):
         loss = task_loss if extra_loss is None else task_loss + extra_loss
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
+        if bool(self.args.get("lori_s_enabled", False)):
+            for _, unit in self._current_lori_units():
+                unit.apply_lori_gradient_mask()
         optimizer.step()
         return loss
+
+    def _current_lori_units(self):
+        units = []
+        task = int(self._cur_task)
+        for layer_idx, module in enumerate(self._iter_lora_modules()):
+            if self.args.get("use_slora", True) or task == 0 or (
+                    not self.args.get("use_slora", True)
+                    and not self.args.get("use_plora", True)):
+                units.append(("layer{}.S".format(layer_idx), module.S_lora[task]))
+            if task > 0 and self.args.get("use_plora", True):
+                units.append(("layer{}.P".format(layer_idx), module.P_lora[task]))
+        return [(name, unit) for name, unit in units if unit is not None]
+
+    @staticmethod
+    def _capture_rng_state():
+        state = {
+            "python": random.getstate(),
+            "numpy": np.random.get_state(),
+            "torch": torch.get_rng_state(),
+        }
+        if torch.cuda.is_available():
+            state["cuda"] = torch.cuda.get_rng_state_all()
+        return state
+
+    @staticmethod
+    def _restore_rng_state(state):
+        random.setstate(state["python"])
+        np.random.set_state(state["numpy"])
+        torch.set_rng_state(state["torch"])
+        if "cuda" in state and torch.cuda.is_available():
+            torch.cuda.set_rng_state_all(state["cuda"])
+
+    def _current_classifier(self):
+        network = self._network.module if hasattr(self._network, "module") else self._network
+        return network.classifier_pool[int(self._cur_task)]
+
+    def _prepare_lori_sparse_stage(self, retain_ratio):
+        named_units = self._current_lori_units()
+        masks = global_topk_masks(
+            [unit.B.weight for _, unit in named_units],
+            retain_ratio=retain_ratio,
+        )
+        total = sum(mask.numel() for mask in masks)
+        retained = sum(mask.sum().item() for mask in masks)
+        for (name, unit), mask in zip(named_units, masks):
+            unit.reset_for_lori_sparse(mask)
+            logging.info(
+                "Task %s LoRI-S mask %s: retained=%s/%s (%.4f)",
+                self._cur_task,
+                name,
+                int(mask.sum().item()),
+                mask.numel(),
+                float(mask.float().mean().item()),
+            )
+        logging.info(
+            "Task %s LoRI-S global mask: retained=%s/%s (%.4f)",
+            self._cur_task,
+            retained,
+            total,
+            0.0 if total == 0 else retained / total,
+        )
+        return retained, total
     # 临时把所有 LoRA Attention 层切回原始预训练权重 W_pre，提取一份不受增量学习影响的参考特征，使用完后再恢复当前模型
     def _pretrained_anchor_context(self):
         """Temporarily switch every LoRA attention layer to immutable W_pre."""
@@ -557,18 +627,26 @@ class Learner(BaseLearner):
         self.test_loader = DataLoader(test_dataset, batch_size=self.batch_size, shuffle=False,
                                       num_workers=self.num_workers, pin_memory=True)
 
-        track_w0 = bool(self.args.get("dual_mask_track_w0_metrics", False))
+        dual_mask_enabled = bool(self.args.get("dual_mask_enabled", True))
+        track_w0 = (dual_mask_enabled
+                    and bool(self.args.get("dual_mask_track_w0_metrics", False)))
         # 开启参数自适应 --- 也就是使用训练集测试W0原型的能力
-        competence_adaptive = bool(self.args.get("dual_mask_competence_adaptive", False))
+        competence_adaptive = (dual_mask_enabled
+                               and bool(self.args.get("dual_mask_competence_adaptive", False)))
 
-        plasticity_adaptive = bool(self.args.get("dual_mask_plasticity_adaptive", False))
+        plasticity_adaptive = (dual_mask_enabled
+                               and bool(self.args.get("dual_mask_plasticity_adaptive", False)))
 
-        all_seen_competence = bool(self.args.get("dual_mask_competence_all_seen", False))
-        old_overlap_conflict = bool(self.args.get("dual_mask_conflict_old_overlap_adaptive", False))
+        all_seen_competence = (dual_mask_enabled
+                               and bool(self.args.get("dual_mask_competence_all_seen", False)))
+        old_overlap_conflict = (dual_mask_enabled
+                                and bool(self.args.get("dual_mask_conflict_old_overlap_adaptive", False)))
 
-        functional_merge_calibration = bool(self.args.get("dual_mask_functional_merge_calibration", False))
+        functional_merge_calibration = (dual_mask_enabled
+                                        and bool(self.args.get("dual_mask_functional_merge_calibration", False)))
 
-        selective_anchor_enabled = bool(self.args.get("dual_mask_selective_anchor_enabled", False))
+        selective_anchor_enabled = (dual_mask_enabled
+                                    and bool(self.args.get("dual_mask_selective_anchor_enabled", False)))
 
         if (track_w0 or competence_adaptive or plasticity_adaptive or all_seen_competence
                 or old_overlap_conflict or functional_merge_calibration or selective_anchor_enabled
@@ -641,39 +719,71 @@ class Learner(BaseLearner):
 
         lr = self.init_lr if self._cur_task == 0 else self.lrate
         weight_decay = self.init_weight_decay if self._cur_task == 0 else self.weight_decay
-        param_groups = [
-            {'params': flora_params, 'lr': lr, 'momentum': 0.9, 'weight_decay': weight_decay},
-            {'params': other_params, 'lr': lr, 'momentum': 0.9, 'weight_decay': weight_decay}
-        ]
-        ############################## set learning rates ##################################
 
-        if self._cur_task == 0:
+        def build_optimizer(stage_epochs):
+            param_groups = [
+                {'params': flora_params, 'lr': lr, 'momentum': 0.9, 'weight_decay': weight_decay},
+                {'params': other_params, 'lr': lr, 'momentum': 0.9, 'weight_decay': weight_decay}
+            ]
             if self.optim == 'sgd':
                 optimizer = optim.SGD(params=param_groups)
-                scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer=optimizer, T_max=self.init_epoch)
+                scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                    optimizer=optimizer,
+                    T_max=stage_epochs,
+                )
             elif self.optim == 'adam':
-                optimizer = optim.Adam(params=param_groups, weight_decay=self.init_weight_decay, betas=(0.9, 0.999))
-                scheduler = CosineSchedule(optimizer=optimizer, K=self.init_epoch)
+                optimizer = optim.Adam(
+                    params=param_groups,
+                    weight_decay=weight_decay,
+                    betas=(0.9, 0.999),
+                )
+                scheduler = CosineSchedule(optimizer=optimizer, K=stage_epochs)
             else:
                 raise Exception
-            self.run_epoch = self.init_epoch
+            return optimizer, scheduler
+
+        base_epochs = self.init_epoch if self._cur_task == 0 else self.epochs
+        lori_enabled = bool(self.args.get("lori_s_enabled", False))
+        if lori_enabled:
+            calibration_epochs = max(1, int(self.args.get("lori_calibration_epochs", base_epochs)))
+            sparse_epochs = max(1, int(self.args.get("lori_sparse_epochs", base_epochs)))
+            retain_ratio = float(self.args.get("lori_retain_ratio", 0.1))
+            if not 0.0 < retain_ratio <= 1.0:
+                raise ValueError("lori_retain_ratio must be in (0, 1]")
+
+            classifier_state = copy.deepcopy(self._current_classifier().state_dict())
+            rng_state = self._capture_rng_state()
+            logging.info(
+                "Task %s LoRI-S dense calibration: epochs=%s, retain_ratio=%.4f",
+                self._cur_task,
+                calibration_epochs,
+                retain_ratio,
+            )
+            optimizer, scheduler = build_optimizer(calibration_epochs)
+            self.run_epoch = calibration_epochs
+            self.train_function(train_loader, test_loader, optimizer, scheduler)
+
+            self._prepare_lori_sparse_stage(retain_ratio)
+            self._current_classifier().load_state_dict(classifier_state)
+            self._restore_rng_state(rng_state)
+            logging.info(
+                "Task %s LoRI-S sparse retraining: epochs=%s",
+                self._cur_task,
+                sparse_epochs,
+            )
+            optimizer, scheduler = build_optimizer(sparse_epochs)
+            self.run_epoch = sparse_epochs
             self.train_function(train_loader, test_loader, optimizer, scheduler)
         else:
-            if self.optim == 'sgd':
-                optimizer = optim.SGD(params=param_groups)
-                scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer=optimizer, T_max=self.epochs)
-            elif self.optim == 'adam':
-                optimizer = optim.Adam(params=param_groups, weight_decay=self.weight_decay, betas=(0.9, 0.999))
-                scheduler = CosineSchedule(optimizer=optimizer, K=self.epochs)
-            else:
-                raise Exception
-            self.run_epoch = self.epochs
+            optimizer, scheduler = build_optimizer(base_epochs)
+            self.run_epoch = base_epochs
             self.train_function(train_loader, test_loader, optimizer, scheduler)
         if len(self._multiple_gpus) > 1:
             self._network = self._network.module
 
         lora_modules = list(self._iter_lora_modules())
-        if bool(self.args.get("dual_mask_functional_merge_calibration", False)):
+        if (bool(self.args.get("dual_mask_enabled", True))
+                and bool(self.args.get("dual_mask_functional_merge_calibration", False))):
             calibration_loader = getattr(self, "w0_loader", train_loader)
             self._calibrate_functional_merge(calibration_loader)
             
