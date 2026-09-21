@@ -9,7 +9,9 @@ fi
 PYTHON_BIN="${PYTHON_BIN:-python}"
 RUN_MODE="${LORI_CD_RUN_MODE:-smoke}"
 TASKS="${LORI_CD_TASKS:-3}"
-STAGE_EPOCHS="${LORI_CD_STAGE_EPOCHS:-2}"
+LEGACY_STAGE_EPOCHS="${LORI_CD_STAGE_EPOCHS:-}"
+CALIBRATION_EPOCHS="${LORI_CD_CALIBRATION_EPOCHS:-${LEGACY_STAGE_EPOCHS:-2}}"
+SPARSE_EPOCHS="${LORI_CD_SPARSE_EPOCHS:-${LEGACY_STAGE_EPOCHS:-2}}"
 CA_EPOCHS="${LORI_CD_CA_EPOCHS:-1}"
 export PYTHONUNBUFFERED=1
 "$PYTHON_BIN" -m py_compile models/attention.py methods/dlora.py utils/lori.py trainer.py || exit 1
@@ -26,15 +28,15 @@ COMMON_ARGS=(
     --config exps/dlora/imgr10.json
     --set 'seed=[1993]'
     --set max_tasks="$TASKS"
-    --set init_epoch="$STAGE_EPOCHS"
-    --set epochs="$STAGE_EPOCHS"
+    --set init_epoch="$SPARSE_EPOCHS"
+    --set epochs="$SPARSE_EPOCHS"
     --set rank=64
     --set ca=true
     --set ca_epochs="$CA_EPOCHS"
     --set lori_s_enabled=true
     --set lori_retain_ratio=0.1
-    --set lori_calibration_epochs="$STAGE_EPOCHS"
-    --set lori_sparse_epochs="$STAGE_EPOCHS"
+    --set lori_calibration_epochs="$CALIBRATION_EPOCHS"
+    --set lori_sparse_epochs="$SPARSE_EPOCHS"
     --set lora_type=lori_s
     --set dual_mask_competence_adaptive=true
     --set dual_mask_plasticity_adaptive=true
@@ -68,7 +70,8 @@ run_case() {
     echo "============================================================"
     echo "Starting $name"
     echo "Changed between C/D: dual_mask_enabled=$dual_mask_enabled"
-    echo "Shared: LoRI-S dense $STAGE_EPOCHS epochs + global B Top-10% + reset + sparse $STAGE_EPOCHS epochs"
+    echo "Shared: LoRI-S dense $CALIBRATION_EPOCHS epochs + global B Top-10% + reset + sparse $SPARSE_EPOCHS epochs"
+    echo "Optimization budget: $((CALIBRATION_EPOCHS + SPARSE_EPOCHS)) epochs per task; only the sparse stage produces the merged LoRA update"
     echo "Protocol: ImageNet-R T10 split, run $TASKS tasks"
     echo "Log: $run_log"
     echo "============================================================"
@@ -117,9 +120,9 @@ verify_log() {
         FAILED=1
     fi
 
-    verify_count "$TASKS" "LoRI-S dense calibration" "$run_log"
+    verify_count "$TASKS" "LoRI-S dense calibration: epochs=$CALIBRATION_EPOCHS," "$run_log"
     verify_count "$TASKS" "LoRI-S global mask:.*(0.1000)" "$run_log"
-    verify_count "$TASKS" "LoRI-S sparse retraining" "$run_log"
+    verify_count "$TASKS" "LoRI-S sparse retraining: epochs=$SPARSE_EPOCHS" "$run_log"
     verify_count "$TASKS" "Extrace features for merging shared component" "$run_log"
     if [[ "$expect_w0_metrics" == "true" ]]; then
         verify_count "$TASKS" "W_pre train-only competence" "$run_log"
