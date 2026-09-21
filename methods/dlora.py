@@ -14,8 +14,9 @@ from utils.toolkit import tensor2numpy
 from models.network import MANet
 from models.attention import (
     Attention_LoRA,
-    _global_top_ratio_threshold,
+    _global_top_ratio_masks,
     _LORI_STYLE_RETAIN_RATIO,
+    _normalize_score,
 )
 
 from utils.schedulers import CosineSchedule
@@ -70,28 +71,7 @@ class Learner(BaseLearner):
         for module in self._network.modules():
             if isinstance(module, Attention_LoRA):
                 module._init_params(args)
-
-        lora_modules = list(self._iter_lora_modules())
-        if str(args.get("dual_mask_importance", "svd")).lower() == "lori_global_magnitude":
-            threshold = _global_top_ratio_threshold(
-                [module.pretrained_weight for module in lora_modules],
-                _LORI_STYLE_RETAIN_RATIO,
-            )
-            for module in lora_modules:
-                module.set_global_magnitude_threshold(threshold.item())
-            selected = sum(
-                int((module.pretrained_weight.detach().abs() >= threshold).sum().item())
-                for module in lora_modules
-            )
-            total = sum(module.pretrained_weight.numel() for module in lora_modules)
-            logging.info(
-                "LoRI-style global magnitude selector: threshold=%.6e, retained=%s/%s (%.4f)",
-                threshold.item(),
-                selected,
-                total,
-                selected / total,
-            )
-
+        self._global_importance_masks_configured = False
 
         self.args = args
         self.optim = args["optim"]  # sgd
@@ -142,6 +122,42 @@ class Learner(BaseLearner):
 
         for layer_idx, module in enumerate(self._iter_lora_modules()):
             module.layer_idx = layer_idx
+
+    def _configure_global_importance_masks(self):
+        if self._global_importance_masks_configured:
+            return
+
+        importance_mode = str(self.args.get("dual_mask_importance", "svd")).lower()
+        if importance_mode not in (
+            "lori_global_magnitude",
+            "magnitude_global_top10",
+            "svd_global_top10",
+        ):
+            self._global_importance_masks_configured = True
+            return
+
+        lora_modules = list(self._iter_lora_modules())
+        raw_scores = [module._combined_importance() for module in lora_modules]
+        if importance_mode == "lori_global_magnitude":
+            scores = raw_scores
+        else:
+            scores = [_normalize_score(score) for score in raw_scores]
+        masks = _global_top_ratio_masks(scores, _LORI_STYLE_RETAIN_RATIO)
+        for module, score, mask in zip(lora_modules, scores, masks):
+            module.set_global_protect_mask(mask, score=score)
+
+        selected_by_layer = [int(mask.count_nonzero().item()) for mask in masks]
+        selected = sum(selected_by_layer)
+        total = sum(module.pretrained_weight.numel() for module in lora_modules)
+        logging.info(
+            "Global Top-10 importance selector: mode=%s, retained=%s/%s (%.4f), per_layer=%s",
+            importance_mode,
+            selected,
+            total,
+            selected / total,
+            selected_by_layer,
+        )
+        self._global_importance_masks_configured = True
 
     def _iter_lora_modules(self):
         for module in self._network.modules():
@@ -639,6 +655,7 @@ class Learner(BaseLearner):
         current_classifier = "classifier_pool" + "." + str(current_task) + "."
 
         self._network.to(self._device)
+        self._configure_global_importance_masks()
         for name, param in self._network.named_parameters():
             param.requires_grad_(False)  # 1. 先把主干 (ViT Backbone) 所有参数全部冻结
             if name.startswith(current_classifier):

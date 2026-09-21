@@ -89,18 +89,29 @@ def _top_ratio_mask(score: torch.Tensor, ratio: float) -> torch.Tensor:
     return (score >= threshold).to(score.dtype)  # 大于这个阈值的就是要保护的区域
 
 
-def _global_top_ratio_threshold(tensors, ratio: float) -> torch.Tensor:
-    """Return one magnitude threshold shared by all provided tensors."""
+def _global_top_ratio_masks(scores, ratio: float):
+    """Select an exact global Top-r budget and return one mask per score tensor."""
     ratio = min(max(float(ratio), 0.0), 1.0)
-    flat = torch.cat([tensor.detach().float().abs().flatten() for tensor in tensors])
-    if flat.numel() == 0:
-        raise ValueError("at least one non-empty tensor is required")
-    if ratio <= 0.0:
-        return flat.new_tensor(float("inf"))
+    flat_scores = [score.detach().float().flatten() for score in scores]
+    if not flat_scores or sum(score.numel() for score in flat_scores) == 0:
+        raise ValueError("at least one non-empty score tensor is required")
+
+    flat = torch.cat(flat_scores)
+    selected = torch.zeros_like(flat)
     if ratio >= 1.0:
-        return flat.min()
-    k = max(1, int(flat.numel() * ratio))
-    return torch.topk(flat, k, largest=True).values[-1]
+        selected.fill_(1.0)
+    elif ratio > 0.0:
+        k = max(1, int(flat.numel() * ratio))
+        indices = torch.topk(flat, k, largest=True).indices
+        selected[indices] = 1.0
+
+    masks = []
+    offset = 0
+    for score in scores:
+        count = score.numel()
+        masks.append(selected[offset:offset + count].reshape_as(score).to(score.dtype))
+        offset += count
+    return masks
 
 
 def _masked_top_ratio_mask(
@@ -252,6 +263,8 @@ class Attention_LoRA(nn.Module):
         self.register_buffer("general_mask", torch.ones(shape), persistent=False)
         # isolated_mask[i, j] = 1  表示这个位置不太重要，可以给 isolated branch 改 | isolated_mask[i, j] = 0  表示这个位置重要，不给 P_lora 改  可塑区域
         self.register_buffer("isolated_mask", torch.ones(shape), persistent=False)
+        self.register_buffer("global_protect_mask", torch.zeros(shape), persistent=False)
+        self.register_buffer("global_protect_mask_ready", torch.tensor(False, dtype=torch.bool), persistent=False)
 
         # Final per-task conflict-distribution diagnostics.  They are populated
         # at merge time and never participate in forward/backward computation.
@@ -276,7 +289,6 @@ class Attention_LoRA(nn.Module):
         # 先判断 W0 哪里重要，再决定 LoRA 的 BA 哪里能加、哪里不能加。
         self.dual_mask_enabled = True
         self.dual_mask_importance = "svd"
-        self.global_magnitude_threshold = None
         self.dual_mask_general_ratio = 0.5  # 决定 W0 保护区多大
         self.dual_mask_layerwise_ratio_mode = "none"
 
@@ -438,8 +450,21 @@ class Attention_LoRA(nn.Module):
             },
         )
 
-    def set_global_magnitude_threshold(self, threshold: float):
-        self.global_magnitude_threshold = float(threshold)
+    def set_global_protect_mask(self, mask: torch.Tensor, score: torch.Tensor = None):
+        if mask.shape != self.global_protect_mask.shape:
+            raise ValueError("global protect mask must match the QKV weight shape")
+        self.global_protect_mask.copy_(mask.to(
+            device=self.global_protect_mask.device,
+            dtype=self.global_protect_mask.dtype,
+        ))
+        if score is not None:
+            if score.shape != self.w0_importance.shape:
+                raise ValueError("global importance score must match the QKV weight shape")
+            self.w0_importance.copy_(score.to(
+                device=self.w0_importance.device,
+                dtype=self.w0_importance.dtype,
+            ))
+        self.global_protect_mask_ready.fill_(True)
 
     def capture_pretrained_anchor(self, force: bool = False):
         if bool(self.pretrained_anchor_captured.item()) and not force:
@@ -755,7 +780,7 @@ class Attention_LoRA(nn.Module):
         weight = self.pretrained_weight.detach() # 永远不变的 W_pre
 
         mode = self.dual_mask_importance  # "dual_mask_importance": "svd"
-        if mode == "lori_global_magnitude":
+        if mode in ("lori_global_magnitude", "magnitude_global_top10"):
             return weight.abs()
         if mode == "soft_svd":
             svd_score = self._soft_svd_importance(weight)
@@ -776,9 +801,16 @@ class Attention_LoRA(nn.Module):
 
             # SVD-only 的 W_pre 分数跨任务不变，可以复用；但每个任务仍按
             # 当前 competence 重新阈值化，使 adaptive coverage 真正生效
-            reuse_w0_score = (self.cur_task > 0
-                and self.dual_mask_importance in ("svd","soft_svd",)
-                and bool(torch.count_nonzero(self.w0_importance).item())
+            use_global_selector = self.dual_mask_importance in (
+                "lori_global_magnitude",
+                "magnitude_global_top10",
+                "svd_global_top10",
+            )
+            reuse_w0_score = (
+                (use_global_selector and bool(self.global_protect_mask_ready.item()))
+                or (self.cur_task > 0
+                    and self.dual_mask_importance in ("svd", "soft_svd")
+                    and bool(torch.count_nonzero(self.w0_importance).item()))
             )
             if reuse_w0_score:
                 score = self.w0_importance.detach().clone()
@@ -789,20 +821,17 @@ class Attention_LoRA(nn.Module):
             ## score 最高的 50% 位置 -> protect = 1 | 1 表示这个位置是 W0 重要位置，不希望 LoRA 改
             ## score 剩下的 50% 位置 -> protect = 0 | 0 表示这个位置可以改
             coverage_mode = str(self.args.get("dual_mask_coverage_mode", "energy")).strip().lower()
-            use_global_magnitude = self.dual_mask_importance == "lori_global_magnitude"
             use_adaptive_coverage = (
                 self.dual_mask_competence_adaptive
                 and coverage_mode == "energy"
-                and not use_global_magnitude
+                and not use_global_selector
             )
 
-            if use_global_magnitude:
-                if self.global_magnitude_threshold is None:
-                    raise RuntimeError("global magnitude threshold must be configured before rebuilding masks")
+            if use_global_selector:
+                if not bool(self.global_protect_mask_ready.item()):
+                    raise RuntimeError("global protect mask must be configured before rebuilding masks")
                 mask_coverage = 0.0
-                protect = (
-                    self.pretrained_weight.detach().abs() >= self.global_magnitude_threshold
-                ).to(score.dtype)
+                protect = self.global_protect_mask.to(score.dtype)
             elif use_adaptive_coverage:
                 # 使用能量覆盖，而不是固定 top ratio
                 ## M_g = general_mask = Task 0 时 W_pre 的重要保护区
