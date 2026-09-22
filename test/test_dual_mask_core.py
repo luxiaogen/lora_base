@@ -595,6 +595,72 @@ class PretrainedAnchorTests(unittest.TestCase):
 
 class LoRALifecycleTests(unittest.TestCase):
 
+    def test_private_conflict_strength_changes_only_private_branch(self):
+        module = Attention_LoRA(dim=4, num_heads=1, r=2, n_tasks=2)
+        module._init_params(
+            make_args(
+                dual_mask_conflict_ratio=1.0,
+                dual_mask_conflict_strength=0.5,
+                dual_mask_private_conflict_strength=0.25,
+            )
+        )
+        module.cur_task = 1
+        module.general_mask.zero_()
+        module.w0_importance.fill_(1.0)
+        delta = (
+            torch.arange(module.qkv.weight.numel(), dtype=module.qkv.weight.dtype)
+            .reshape_as(module.qkv.weight)
+            .add_(1.0)
+        )
+
+        shared = module._safe_delta(delta, isolated=False)
+        private = module._safe_delta(delta, isolated=True)
+        _, shared_strength = module._conflict_parameters(isolated=False)
+        _, private_strength = module._conflict_parameters(isolated=True)
+
+        self.assertEqual(shared_strength, 0.5)
+        self.assertEqual(private_strength, 0.25)
+        self.assertTrue(torch.equal(shared, delta * 0.5))
+        self.assertTrue(torch.equal(private, delta * 0.75))
+
+    def test_private_conflict_strength_defaults_to_shared_strength(self):
+        module = Attention_LoRA(dim=4, num_heads=1, r=2, n_tasks=2)
+        module._init_params(
+            make_args(
+                dual_mask_conflict_ratio=1.0,
+                dual_mask_conflict_strength=0.5,
+            )
+        )
+
+        self.assertEqual(module._conflict_parameters(isolated=False), (1.0, 0.5))
+        self.assertEqual(module._conflict_parameters(isolated=True), (1.0, 0.5))
+
+    def test_after_task_routes_shared_and_private_merge_strengths_once(self):
+        module = Attention_LoRA(dim=4, num_heads=1, r=2, n_tasks=2)
+        module._init_params(
+            make_args(
+                dual_mask_conflict_strength=0.5,
+                dual_mask_private_conflict_strength=0.25,
+            )
+        )
+        module.before_task(1)
+        original_weight = module.qkv.weight.detach().clone()
+        observed = []
+
+        def record(raw_delta, isolated, conflict_ratio, conflict_strength):
+            observed.append((isolated, conflict_strength))
+            return raw_delta
+
+        module._compose_merge_delta = record
+        module._save_dual_mask_snapshot = lambda *args, **kwargs: None
+        module._log_merge_stats = lambda *args, **kwargs: None
+        module.after_task(1)
+
+        self.assertEqual(observed, [(False, 0.5), (True, 0.25)])
+        self.assertTrue(torch.equal(module.qkv.weight, original_weight))
+        self.assertIsNone(module.S_lora[1])
+        self.assertIsNone(module.P_lora[1])
+
     def test_functional_merge_strength_overrides_forward_and_merge(self):
         module = Attention_LoRA(dim=2, num_heads=1, r=2, n_tasks=1)
         module._init_params(

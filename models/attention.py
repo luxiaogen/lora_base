@@ -249,6 +249,7 @@ class Attention_LoRA(nn.Module):
 
         self.register_buffer("last_effective_conflict_ratio", torch.tensor(0.0), persistent=False)
         self.register_buffer("last_effective_conflict_strength", torch.tensor(0.0), persistent=False)
+        self.register_buffer("last_effective_private_conflict_strength", torch.tensor(0.0), persistent=False)
 
         self.register_buffer("last_private_conflict_mask_overlap", torch.tensor(0.0), persistent=False)
         self.register_buffer("last_private_conflict_energy_overlap", torch.tensor(0.0), persistent=False)
@@ -270,6 +271,7 @@ class Attention_LoRA(nn.Module):
 
         self.dual_mask_conflict_ratio = 0.25  # 决定 BA-W0 冲突区多大
         self.dual_mask_conflict_strength = 1.0  # 决定冲突区压制多强
+        self.dual_mask_private_conflict_strength = 1.0
 
         self.dual_mask_conflict_reg_enabled = True
 
@@ -351,6 +353,12 @@ class Attention_LoRA(nn.Module):
 
         self.dual_mask_conflict_ratio = float(args.get("dual_mask_conflict_ratio", 0.25)) # Top-k 的比例参数  0.1
         self.dual_mask_conflict_strength = float(args.get("dual_mask_conflict_strength", 1.0))  # 冲突区压制多强  也就是beta
+        private_conflict_strength = args.get("dual_mask_private_conflict_strength")
+        self.dual_mask_private_conflict_strength = (
+            self.dual_mask_conflict_strength
+            if private_conflict_strength is None
+            else float(private_conflict_strength)
+        )
 
         self.dual_mask_conflict_reg_enabled = bool(args.get("dual_mask_conflict_reg_enabled", True))
 
@@ -390,6 +398,7 @@ class Attention_LoRA(nn.Module):
             "Dual-mask branch: importance=%(importance)s, "
             "protect_ratio=%(protect_ratio).3f, svd_rank=%(svd_rank)s, "
             "conflict_strength=%(conflict_strength).3f, "
+            "private_conflict_strength=%(private_conflict_strength).3f, "
             "conflict_energy_adaptive=%(conflict_energy_adaptive)s, "
             "conflict_energy_ratio_floor=%(conflict_energy_ratio_floor)s, "
             "task0_gate_mode=%(task0_gate_mode)s, "
@@ -405,6 +414,7 @@ class Attention_LoRA(nn.Module):
                 "svd_rank": self.dual_mask_svd_rank,
                 "conflict_ratio": self.dual_mask_conflict_ratio,
                 "conflict_strength": self.dual_mask_conflict_strength,
+                "private_conflict_strength": self.dual_mask_private_conflict_strength,
                 "conflict_energy_adaptive": self.dual_mask_conflict_energy_adaptive,
                 "conflict_energy_ratio_floor": self.dual_mask_conflict_energy_ratio_floor,
                 "private_conflict_mode": self.dual_mask_private_conflict_mode,
@@ -532,6 +542,7 @@ class Attention_LoRA(nn.Module):
             branch_deltas,
             conflict_ratio: Optional[float] = None,
             conflict_strength: Optional[float] = None,
+            private_conflict_strength: Optional[float] = None,
     ):
         if not self._should_save_dual_mask_snapshot(task):
             return
@@ -547,6 +558,8 @@ class Attention_LoRA(nn.Module):
             conflict_ratio = self.dual_mask_conflict_ratio
         if conflict_strength is None:
             conflict_strength = self.dual_mask_conflict_strength
+        if private_conflict_strength is None:
+            private_conflict_strength = self.dual_mask_private_conflict_strength
 
         seed = self.args.get("seed", "unknown")
         task_dir = os.path.join(
@@ -567,6 +580,7 @@ class Attention_LoRA(nn.Module):
             "effective_conflict_ratio": float(conflict_mask.float().mean().item()),
             "protect_strength": float(self.effective_protect_strength),
             "conflict_strength": float(conflict_strength),
+            "private_conflict_strength": float(private_conflict_strength),
 
             "pretrained_competence": float(self.pretrained_competence),
             "pretrained_plasticity_demand": float(self.pretrained_plasticity_demand),
@@ -587,6 +601,7 @@ class Attention_LoRA(nn.Module):
                     "name": item["name"],
                     "isolated": bool(item["isolated"]),
                     "gamma": float(item["gamma"]),
+                    "conflict_strength": float(item["conflict_strength"]),
                     "raw_delta": item["raw_delta"].detach().cpu().float(),
                     "safe_delta": item["safe_delta"].detach().cpu().float(),
                 }
@@ -799,14 +814,19 @@ class Attention_LoRA(nn.Module):
                 self.last_svd_energy_coverage, # 表示选出的前 k 个奇异方向，实际覆盖了多少谱能量
             )
     # 负责为冲突门控返回两个参数 """Return the fixed conflict range and optional old-overlap strength."""
-    def _conflict_parameters(self):
+    def _conflict_parameters(self, isolated: bool = False):
         # --set dual_mask_conflict_ratio=0.1
         base_ratio = min(max(self.dual_mask_conflict_ratio, 0.0), 1.0)
 
         if self._functional_merge_strength_override is not None:
             return base_ratio, self._functional_merge_strength_override
         # 基础抑制强度
-        base_strength = min(max(self.dual_mask_conflict_strength, 0.0), 1.0)
+        configured_strength = (
+            self.dual_mask_private_conflict_strength
+            if isolated
+            else self.dual_mask_conflict_strength
+        )
+        base_strength = min(max(configured_strength, 0.0), 1.0)
         if self.dual_mask_conflict_old_overlap_adaptive: # 是否使用R_old
             base_strength = min(base_strength * (1.0 + self.pretrained_old_overlap_risk),1.0,)
         return base_ratio, base_strength # 多大范围被划为冲突区 \ 冲突区中的 LoRA 更新被抑制多强
@@ -894,7 +914,7 @@ class Attention_LoRA(nn.Module):
                 conflict_ratio=conflict_ratio,
                 valid_mask=(plastic_mask if isolated and self.dual_mask_private_conflict_mode == "plastic" else None),)
             if conflict_strength is None:
-                _, conflict_strength = self._conflict_parameters()
+                _, conflict_strength = self._conflict_parameters(isolated=isolated)
             conflict_strength = min(max(conflict_strength, 0.0), 1.0)
             # 高冲突区域按 conflict_strength 压制；其余区域保持不变。
             conflict_gate = 1.0 - conflict_strength * conflict_mask.to(delta.dtype)
@@ -1133,6 +1153,7 @@ class Attention_LoRA(nn.Module):
             branch_deltas,
             conflict_ratio: Optional[float] = None,
             conflict_strength: Optional[float] = None,
+            private_conflict_strength: Optional[float] = None,
     ):
         raw_total = torch.stack([item["raw_delta"] for item in branch_deltas]).sum(dim=0)
         safe_total = torch.stack([item["safe_delta"] for item in branch_deltas]).sum(dim=0)
@@ -1157,8 +1178,11 @@ class Attention_LoRA(nn.Module):
         if conflict_ratio is None:
             conflict_ratio = self.dual_mask_conflict_ratio
         if conflict_strength is None:
-            conflict_strength = self.dual_mask_conflict_strength
+            _, conflict_strength = self._conflict_parameters(isolated=False)
         conflict_strength = min(max(conflict_strength, 0.0), 1.0)
+        if private_conflict_strength is None:
+            _, private_conflict_strength = self._conflict_parameters(isolated=True)
+        private_conflict_strength = min(max(private_conflict_strength, 0.0), 1.0)
         # 总分支的冲突门削弱程度  把raw_total = S_raw + P_raw作为整体，估算只施加冲突门后，整体增量范数下降多少
         conflict_gate_suppression = self._conflict_gate_suppression(raw_total,conflict_mask,conflict_strength,)
         # 初始化 P 分支统计量
@@ -1191,7 +1215,11 @@ class Attention_LoRA(nn.Module):
             else:
                 actual_private_mask = global_private_mask
             private_plastic_delta = private_raw * plastic_mask
-            private_gate_suppression = self._conflict_gate_suppression(private_plastic_delta,actual_private_mask,conflict_strength,)
+            private_gate_suppression = self._conflict_gate_suppression(
+                private_plastic_delta,
+                actual_private_mask,
+                private_conflict_strength,
+            )
 
 
         with torch.no_grad():
@@ -1203,6 +1231,7 @@ class Attention_LoRA(nn.Module):
 
             self.last_effective_conflict_ratio.fill_(effective_conflict_ratio)
             self.last_effective_conflict_strength.fill_(conflict_strength)
+            self.last_effective_private_conflict_strength.fill_(private_conflict_strength)
 
             self.last_private_conflict_mask_overlap.copy_(private_mask_overlap)
             self.last_private_conflict_energy_overlap.copy_(private_energy_overlap)
@@ -1229,6 +1258,7 @@ class Attention_LoRA(nn.Module):
             "conflict_gate_suppressed=%.2f%%, " #  # 只模拟冲突门时，总增量范数下降多少
             "effective_conflict_ratio=%.4f, " # 当前实际冲突 mask 的坐标比例
             "effective_conflict_strength=%.4f, " # 本次 merge 实际使用的冲突抑制强度 β
+            "effective_private_conflict_strength=%.4f, "
             "private_conflict_mode=%s, "
             "private_conflict_mask_overlap=%.4f, " # 全局 P 冲突坐标中有多少位于 plastic 区
             "private_conflict_energy_overlap=%.4f, " # 全局 P 冲突分数中有多少位于 plastic 区
@@ -1252,6 +1282,7 @@ class Attention_LoRA(nn.Module):
             # float(conflict_ratio),
             effective_conflict_ratio,
             conflict_strength,
+            private_conflict_strength,
             self.dual_mask_private_conflict_mode,
             private_mask_overlap.item(),
             private_energy_overlap.item(),
@@ -1331,6 +1362,7 @@ class Attention_LoRA(nn.Module):
         def mask_delta(item, conflict_ratio: float, conflict_strength: float):
             safe_delta = self._compose_merge_delta(item["raw_delta"], isolated=item["isolated"], conflict_ratio=conflict_ratio, conflict_strength=conflict_strength)
             item["safe_delta"] = safe_delta
+            item["conflict_strength"] = float(conflict_strength)
 
         branch_deltas = []
         if not self.use_slora and not self.use_plora: # isolated=False：走共享分支的保护路径
@@ -1342,17 +1374,31 @@ class Attention_LoRA(nn.Module):
                 branch_deltas.append(raw_delta("P",self.P_lora[t],float(self.plora_gamma),isolated=True,))
 
         if branch_deltas: # 如果lora产生了更新
-            conflict_ratio, conflict_strength = self._conflict_parameters() # 0.1 0.5(task0)
+            conflict_ratio, conflict_strength = self._conflict_parameters(isolated=False)
+            _, private_conflict_strength = self._conflict_parameters(isolated=True)
 
             self.last_functional_merge_strength = float(conflict_strength)
 
             for item in branch_deltas:
-                mask_delta(item, conflict_ratio, conflict_strength)
+                branch_strength = private_conflict_strength if item["isolated"] else conflict_strength
+                mask_delta(item, conflict_ratio, branch_strength)
 
-            self._save_dual_mask_snapshot(t, branch_deltas, conflict_ratio=conflict_ratio, conflict_strength=conflict_strength)
+            self._save_dual_mask_snapshot(
+                t,
+                branch_deltas,
+                conflict_ratio=conflict_ratio,
+                conflict_strength=conflict_strength,
+                private_conflict_strength=private_conflict_strength,
+            )
 
             #########################
-            self._log_merge_stats(t, branch_deltas, conflict_ratio=conflict_ratio, conflict_strength=conflict_strength)
+            self._log_merge_stats(
+                t,
+                branch_deltas,
+                conflict_ratio=conflict_ratio,
+                conflict_strength=conflict_strength,
+                private_conflict_strength=private_conflict_strength,
+            )
             with torch.no_grad():
                 delta = torch.stack([item["safe_delta"] for item in branch_deltas]).sum(dim=0)
                 self.qkv.weight.add_(delta.to(device, dtype))
