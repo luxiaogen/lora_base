@@ -371,8 +371,10 @@ class Attention_LoRA(nn.Module):
         self.dual_mask_conflict_granularity = str(
             args.get("dual_mask_conflict_granularity", "layer")
         ).lower()
-        if self.dual_mask_conflict_granularity not in {"layer", "model"}:
-            raise ValueError("dual_mask_conflict_granularity must be layer or model")
+        if self.dual_mask_conflict_granularity not in {"layer", "model", "projection"}:
+            raise ValueError(
+                "dual_mask_conflict_granularity must be layer, model, or projection"
+            )
 
         self.dual_mask_task0_gate_mode = str(args.get("dual_mask_task0_gate_mode", "full")).lower()
         self.dual_mask_s_protect_enabled = bool(args.get("dual_mask_s_protect_enabled", True))

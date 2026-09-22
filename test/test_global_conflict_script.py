@@ -71,6 +71,32 @@ class GlobalConflictScriptTests(unittest.TestCase):
         self.assertEqual(run["dual_mask_conflict_granularity"], "model")
         self.assertNotIn("data_path", run)
 
+    def test_projection_script_is_a_matched_task0_to_task2_pair(self):
+        script = ROOT / "scripts/9_22_imgr10_projection_conflict_screen_3090.sh"
+        source = script.read_text()
+        subprocess.run(["bash", "-n", str(script)], check=True)
+        self.assertEqual(source.count("\nrun_variant \\\n"), 2)
+        self.assertIn("imgr10_layer_budget_seed1993_3090", source)
+        self.assertIn("imgr10_projection_budget_seed1993_3090", source)
+        self.assertIn("--set 'seed=[1993]'", source)
+        self.assertIn("--set max_tasks=3", source)
+        self.assertIn("--set total_sessions=10", source)
+        self.assertNotIn("--set data_path=", source)
+
+    def test_projection_spec_has_one_seed_and_one_changed_factor(self):
+        spec = json.loads(
+            (ROOT / "scripts/sweeps/imgr10_projection_conflict_screen_3090.json").read_text()
+        )
+        self.assertEqual(spec["seeds"], [1993])
+        self.assertEqual(len(spec["variants"]), 2)
+        self.assertEqual(
+            {
+                variant["overrides"]["dual_mask_conflict_granularity"]
+                for variant in spec["variants"]
+            },
+            {"layer", "projection"},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

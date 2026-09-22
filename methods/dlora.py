@@ -19,7 +19,10 @@ from torch.distributions.multivariate_normal import MultivariateNormal
 from utils.toolkit import count_parameters
 from models.losses import AngularPenaltySMLoss
 from contextlib import ExitStack
-from utils.dual_mask_budget import select_global_budget_masks
+from utils.dual_mask_budget import (
+    select_global_budget_masks,
+    select_projection_budget_masks,
+)
 
 
 class Learner(BaseLearner):
@@ -125,7 +128,10 @@ class Learner(BaseLearner):
                 yield module
 
     def _global_conflict_enabled(self):
-        return str(self.args.get("dual_mask_conflict_granularity", "layer")).lower() == "model"
+        return str(self.args.get("dual_mask_conflict_granularity", "layer")).lower() in {
+            "model",
+            "projection",
+        }
 
     @torch.no_grad()
     def _refresh_global_conflict_masks(self, log_summary=False):
@@ -133,18 +139,44 @@ class Learner(BaseLearner):
         if not modules or self._cur_task <= 0:
             return
 
+        granularity = str(
+            self.args.get("dual_mask_conflict_granularity", "layer")
+        ).lower()
+
         branch_masks = {}
         branch_stats = {}
         for branch, isolated in (("S", False), ("P", True)):
             candidates = [module.global_conflict_candidate(self._cur_task, isolated) for module in modules]
             if any(candidate is None for candidate in candidates):
                 branch_masks[branch] = [torch.zeros_like(module.qkv.weight) for module in modules]
-                branch_stats[branch] = (0, 0, [])
+                branch_stats[branch] = {
+                    "local_budget": 0,
+                    "global_budget": 0,
+                    "layer_densities": [0.0 for _ in modules],
+                    "projection_reference_budgets": [0, 0, 0],
+                    "projection_budgets": [0, 0, 0],
+                    "projection_densities": [0.0, 0.0, 0.0],
+                    "layer_projection_densities": [
+                        [0.0, 0.0, 0.0] for _ in modules
+                    ],
+                    "mask_jaccard": 0.0,
+                }
                 continue
             scores = [candidate[0] for candidate in candidates]
             local_masks = [candidate[1] for candidate in candidates]
             valid_masks = [candidate[2] for candidate in candidates]
-            global_masks = select_global_budget_masks(scores, local_masks, valid_masks)
+            if granularity == "projection":
+                global_masks = select_projection_budget_masks(
+                    scores,
+                    local_masks,
+                    valid_masks,
+                )
+            else:
+                global_masks = select_global_budget_masks(
+                    scores,
+                    local_masks,
+                    valid_masks,
+                )
             local_budget = sum(int(mask.bool().sum().item()) for mask in local_masks)
             global_budget = sum(int(mask.bool().sum().item()) for mask in global_masks)
             if global_budget != local_budget:
@@ -153,11 +185,56 @@ class Learner(BaseLearner):
                     f"expected {local_budget}, selected {global_budget}"
                 )
             branch_masks[branch] = global_masks
-            branch_stats[branch] = (
-                local_budget,
-                global_budget,
-                [float(mask.float().mean().item()) for mask in global_masks],
+            intersection = sum(
+                int((local.bool() & selected.bool()).sum().item())
+                for local, selected in zip(local_masks, global_masks)
             )
+            union = sum(
+                int((local.bool() | selected.bool()).sum().item())
+                for local, selected in zip(local_masks, global_masks)
+            )
+            projection_reference_budgets = []
+            projection_budgets = []
+            projection_densities = []
+            for projection in range(3):
+                reference = sum(
+                    int(mask.chunk(3, dim=0)[projection].bool().sum().item())
+                    for mask in local_masks
+                )
+                selected = sum(
+                    int(mask.chunk(3, dim=0)[projection].bool().sum().item())
+                    for mask in global_masks
+                )
+                if granularity == "projection" and selected != reference:
+                    raise RuntimeError(
+                        f"Projection conflict budget mismatch for {branch}/{projection}: "
+                        f"expected {reference}, selected {selected}"
+                    )
+                coordinates = sum(
+                    mask.chunk(3, dim=0)[projection].numel()
+                    for mask in global_masks
+                )
+                projection_reference_budgets.append(reference)
+                projection_budgets.append(selected)
+                projection_densities.append(selected / max(coordinates, 1))
+            branch_stats[branch] = {
+                "local_budget": local_budget,
+                "global_budget": global_budget,
+                "layer_densities": [
+                    float(mask.float().mean().item()) for mask in global_masks
+                ],
+                "projection_reference_budgets": projection_reference_budgets,
+                "projection_budgets": projection_budgets,
+                "projection_densities": projection_densities,
+                "layer_projection_densities": [
+                    [
+                        float(part.float().mean().item())
+                        for part in mask.chunk(3, dim=0)
+                    ]
+                    for mask in global_masks
+                ],
+                "mask_jaccard": intersection / max(union, 1),
+            }
 
         for index, module in enumerate(modules):
             module.set_global_conflict_masks(
@@ -167,14 +244,27 @@ class Learner(BaseLearner):
 
         if log_summary:
             for branch in ("S", "P"):
-                local_budget, global_budget, densities = branch_stats[branch]
+                stats = branch_stats[branch]
                 logging.info(
-                    "Task %s global conflict budget branch=%s local_budget=%s global_budget=%s layer_densities=%s",
+                    "Task %s global conflict budget granularity=%s branch=%s "
+                    "local_reference_budget=%s global_budget=%s "
+                    "layer_densities=%s projection_reference_budgets=%s "
+                    "projection_budgets=%s projection_densities=%s "
+                    "layer_projection_densities=%s mask_jaccard=%.6f",
                     self._cur_task,
+                    granularity,
                     branch,
-                    local_budget,
-                    global_budget,
-                    [round(value, 6) for value in densities],
+                    stats["local_budget"],
+                    stats["global_budget"],
+                    [round(value, 6) for value in stats["layer_densities"]],
+                    stats["projection_reference_budgets"],
+                    stats["projection_budgets"],
+                    [round(value, 6) for value in stats["projection_densities"]],
+                    [
+                        [round(value, 6) for value in row]
+                        for row in stats["layer_projection_densities"]
+                    ],
+                    stats["mask_jaccard"],
                 )
 
     def _extra_training_context(self, inputs, targets, epoch):

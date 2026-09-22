@@ -52,3 +52,43 @@ def select_global_budget_masks(
         )
         offset += count
     return masks
+
+
+def select_projection_budget_masks(
+    scores: Sequence[torch.Tensor],
+    reference_masks: Sequence[torch.Tensor],
+    valid_masks: Optional[Sequence[torch.Tensor]] = None,
+) -> list[torch.Tensor]:
+    """Select Q/K/V budgets independently while sharing each budget across layers."""
+    if not scores or len(scores) != len(reference_masks):
+        raise ValueError("scores and reference_masks must be non-empty and aligned")
+    if valid_masks is not None and len(valid_masks) != len(scores):
+        raise ValueError("valid_masks must align with scores")
+    if any(score.ndim < 1 or score.shape[0] % 3 != 0 for score in scores):
+        raise ValueError("QKV score rows must be divisible by 3")
+
+    score_parts = [score.chunk(3, dim=0) for score in scores]
+    reference_parts = [mask.chunk(3, dim=0) for mask in reference_masks]
+    valid_parts = (
+        [mask.chunk(3, dim=0) for mask in valid_masks]
+        if valid_masks is not None
+        else None
+    )
+    selected_parts = [[] for _ in scores]
+    for projection in range(3):
+        projection_scores = [parts[projection] for parts in score_parts]
+        projection_references = [parts[projection] for parts in reference_parts]
+        projection_valid = (
+            [parts[projection] for parts in valid_parts]
+            if valid_parts is not None
+            else None
+        )
+        projection_masks = select_global_budget_masks(
+            projection_scores,
+            projection_references,
+            projection_valid,
+        )
+        for layer, mask in enumerate(projection_masks):
+            selected_parts[layer].append(mask)
+
+    return [torch.cat(parts, dim=0) for parts in selected_parts]

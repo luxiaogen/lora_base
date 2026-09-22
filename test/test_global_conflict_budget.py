@@ -9,7 +9,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from models.attention import Attention_LoRA  # noqa: E402
-from utils.dual_mask_budget import select_global_budget_masks  # noqa: E402
+from utils.dual_mask_budget import (  # noqa: E402
+    select_global_budget_masks,
+    select_projection_budget_masks,
+)
 
 
 class GlobalBudgetSelectionTests(unittest.TestCase):
@@ -61,6 +64,31 @@ class GlobalBudgetSelectionTests(unittest.TestCase):
 
         self.assertEqual(int(masks[0].sum()), 2)
         self.assertEqual(masks[0][0, 0].item(), 0.0)
+
+    def test_projection_selection_matches_each_projection_reference_budget(self):
+        scores = [
+            torch.tensor([[9.0], [8.0], [1.0], [2.0], [3.0], [4.0]]),
+            torch.tensor([[7.0], [6.0], [5.0], [4.0], [3.0], [2.0]]),
+        ]
+        references = [
+            torch.tensor([[1.0], [0.0], [1.0], [0.0], [0.0], [1.0]]),
+            torch.tensor([[0.0], [1.0], [0.0], [0.0], [1.0], [0.0]]),
+        ]
+
+        masks = select_projection_budget_masks(scores, references)
+
+        for projection in range(3):
+            selected = sum(int(mask.chunk(3, dim=0)[projection].sum()) for mask in masks)
+            reference = sum(int(mask.chunk(3, dim=0)[projection].sum()) for mask in references)
+            self.assertEqual(selected, reference)
+        self.assertEqual(sum(int(mask.sum()) for mask in masks), 5)
+
+    def test_projection_selection_rejects_non_qkv_rows(self):
+        with self.assertRaisesRegex(ValueError, "divisible by 3"):
+            select_projection_budget_masks(
+                [torch.ones(4, 2)],
+                [torch.ones(4, 2)],
+            )
 
     def test_attention_uses_branch_specific_global_mask(self):
         module = self._make_attention()
@@ -118,6 +146,10 @@ class GlobalBudgetSelectionTests(unittest.TestCase):
 
         self.assertTrue(torch.equal(actual_score, expected_score))
         self.assertTrue(torch.equal(actual_mask, expected_mask))
+
+    def test_projection_mode_is_accepted(self):
+        module = self._make_attention(granularity="projection")
+        self.assertEqual(module.dual_mask_conflict_granularity, "projection")
 
     def test_after_task_merges_global_gated_update_once_and_releases_masks(self):
         module = self._make_attention()
