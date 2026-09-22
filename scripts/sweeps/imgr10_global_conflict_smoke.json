@@ -1,0 +1,32 @@
+{
+  "name": "imgr10_global_conflict_smoke",
+  "log_dir": "logs/shell_logs/imgr10_global_conflict_smoke",
+  "datasets": [
+    {
+      "name": "imgr10",
+      "config": "exps/dlora/imgr10.json"
+    }
+  ],
+  "seeds": [1993],
+  "common_overrides": {
+    "max_tasks": 2,
+    "total_sessions": 10,
+    "init_cls": 20,
+    "increment": 20,
+    "init_epoch": 1,
+    "epochs": 1,
+    "ca": false,
+    "task0_checkpoint_resume": "",
+    "task0_checkpoint_save": "",
+    "experiment_tracker": "none"
+  },
+  "variants": [
+    {
+      "name": "model_budget_smoke",
+      "description": "One-epoch Task0-1 route smoke for model-wide conflict budgets",
+      "overrides": {
+        "dual_mask_conflict_granularity": "model"
+      }
+    }
+  ]
+}

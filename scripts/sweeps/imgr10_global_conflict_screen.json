@@ -1,0 +1,41 @@
+{
+  "name": "imgr10_global_conflict_screen_seed1993",
+  "log_dir": "logs/shell_logs/imgr10_global_conflict_screen_seed1993",
+  "datasets": [
+    {
+      "name": "imgr10",
+      "config": "exps/dlora/imgr10.json"
+    }
+  ],
+  "seeds": [1993],
+  "common_overrides": {
+    "max_tasks": 3,
+    "total_sessions": 10,
+    "init_cls": 20,
+    "increment": 20,
+    "task0_checkpoint_resume": "",
+    "task0_checkpoint_save": "",
+    "experiment_tracker": "wandb",
+    "wandb_project": "LoDA_ICML2026",
+    "wandb_mode": "online",
+    "wandb_group": "imgr10_global_conflict_screen_seed1993"
+  },
+  "variants": [
+    {
+      "name": "layer_budget",
+      "description": "Baseline: each attention layer selects its own conflict mask",
+      "overrides": {
+        "dual_mask_conflict_granularity": "layer",
+        "wandb_tags": "imgr10,t10,task0-2,seed1993,conflict_budget_layer"
+      }
+    },
+    {
+      "name": "model_budget",
+      "description": "Global-budget: S and P each share one budget across all attention layers",
+      "overrides": {
+        "dual_mask_conflict_granularity": "model",
+        "wandb_tags": "imgr10,t10,task0-2,seed1993,conflict_budget_model"
+      }
+    }
+  ]
+}

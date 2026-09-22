@@ -268,7 +268,11 @@ def _train(args, experiment_tracker=None):
 
     cnn_curve, cnn_curve_with_task, nme_curve, cnn_curve_task = {'top1': []}, {'top1': []}, {'top1': []}, {'top1': []}
     w0_curve = []
-    for task_id in range(data_manager.nb_tasks):
+    max_tasks = int(args.get('max_tasks', data_manager.nb_tasks))
+    if not 1 <= max_tasks <= data_manager.nb_tasks:
+        raise ValueError('max_tasks must be between 1 and {}'.format(data_manager.nb_tasks))
+    logging.info('Task execution limit: %s/%s', max_tasks, data_manager.nb_tasks)
+    for task_id in range(max_tasks):
         logging.info('All params: {}'.format(count_parameters(model._network)))
         time_start = time.time()
         model.incremental_train(data_manager)

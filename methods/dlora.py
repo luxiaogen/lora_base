@@ -19,6 +19,7 @@ from torch.distributions.multivariate_normal import MultivariateNormal
 from utils.toolkit import count_parameters
 from models.losses import AngularPenaltySMLoss
 from contextlib import ExitStack
+from utils.dual_mask_budget import select_global_budget_masks
 
 
 class Learner(BaseLearner):
@@ -122,6 +123,59 @@ class Learner(BaseLearner):
         for module in self._network.modules():
             if isinstance(module, Attention_LoRA):
                 yield module
+
+    def _global_conflict_enabled(self):
+        return str(self.args.get("dual_mask_conflict_granularity", "layer")).lower() == "model"
+
+    @torch.no_grad()
+    def _refresh_global_conflict_masks(self, log_summary=False):
+        modules = list(self._iter_lora_modules())
+        if not modules or self._cur_task <= 0:
+            return
+
+        branch_masks = {}
+        branch_stats = {}
+        for branch, isolated in (("S", False), ("P", True)):
+            candidates = [module.global_conflict_candidate(self._cur_task, isolated) for module in modules]
+            if any(candidate is None for candidate in candidates):
+                branch_masks[branch] = [torch.zeros_like(module.qkv.weight) for module in modules]
+                branch_stats[branch] = (0, 0, [])
+                continue
+            scores = [candidate[0] for candidate in candidates]
+            local_masks = [candidate[1] for candidate in candidates]
+            valid_masks = [candidate[2] for candidate in candidates]
+            global_masks = select_global_budget_masks(scores, local_masks, valid_masks)
+            local_budget = sum(int(mask.bool().sum().item()) for mask in local_masks)
+            global_budget = sum(int(mask.bool().sum().item()) for mask in global_masks)
+            if global_budget != local_budget:
+                raise RuntimeError(
+                    f"Global conflict budget mismatch for {branch}: "
+                    f"expected {local_budget}, selected {global_budget}"
+                )
+            branch_masks[branch] = global_masks
+            branch_stats[branch] = (
+                local_budget,
+                global_budget,
+                [float(mask.float().mean().item()) for mask in global_masks],
+            )
+
+        for index, module in enumerate(modules):
+            module.set_global_conflict_masks(
+                branch_masks["S"][index],
+                branch_masks["P"][index],
+            )
+
+        if log_summary:
+            for branch in ("S", "P"):
+                local_budget, global_budget, densities = branch_stats[branch]
+                logging.info(
+                    "Task %s global conflict budget branch=%s local_budget=%s global_budget=%s layer_densities=%s",
+                    self._cur_task,
+                    branch,
+                    local_budget,
+                    global_budget,
+                    [round(value, 6) for value in densities],
+                )
 
     def _extra_training_context(self, inputs, targets, epoch):
         enabled = bool(self.args.get("dual_mask_selective_anchor_enabled", False))
@@ -713,6 +767,9 @@ class Learner(BaseLearner):
                 inputs = torch.index_select(inputs, 0, mask)
                 targets = torch.index_select(targets, 0, mask) - self._known_classes
 
+                if self._global_conflict_enabled():
+                    self._refresh_global_conflict_masks(log_summary=(i == 0))
+
                 batch_context = self._extra_training_context(
                     inputs,
                     targets,
@@ -774,6 +831,9 @@ class Learner(BaseLearner):
                 train_acc
             ) + metric_info
             prog_bar.set_description(info)
+
+        if self._global_conflict_enabled():
+            self._refresh_global_conflict_masks(log_summary=True)
 
         # test train finished  当前任务 LoRA 训练完成→ LoRA 尚未 merge→ CA 分类器校准尚未执行
         test_acc = self._compute_accuracy(self._network, test_loader)

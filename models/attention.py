@@ -254,6 +254,12 @@ class Attention_LoRA(nn.Module):
         self.register_buffer("last_private_conflict_energy_overlap", torch.tensor(0.0), persistent=False)
         self.register_buffer("last_private_conflict_gate_suppression", torch.tensor(0.0), persistent=False)
 
+        # Allocate the dense boolean masks only in model-budget mode. The
+        # default layer mode therefore keeps its original memory footprint.
+        self.register_buffer("global_s_conflict_mask", torch.empty(0, dtype=torch.bool), persistent=False)
+        self.register_buffer("global_p_conflict_mask", torch.empty(0, dtype=torch.bool), persistent=False)
+        self.global_conflict_masks_active = False
+
         self.register_buffer("pretrained_weight", torch.zeros(shape), persistent=True)
         self.register_buffer("pretrained_anchor_captured", torch.tensor(False, dtype=torch.bool), persistent=True)
 
@@ -279,6 +285,7 @@ class Attention_LoRA(nn.Module):
         self.dual_mask_conflict_old_overlap_adaptive = False
 
         self.dual_mask_private_conflict_mode = "global"
+        self.dual_mask_conflict_granularity = "layer"
 
         # task0的学习方式 放开学/没有冲突部分/正常
         self.dual_mask_task0_gate_mode = "full"
@@ -361,6 +368,11 @@ class Attention_LoRA(nn.Module):
         self.dual_mask_conflict_old_overlap_adaptive = bool(args.get("dual_mask_conflict_old_overlap_adaptive", False))
 
         self.dual_mask_private_conflict_mode = str(args.get("dual_mask_private_conflict_mode", "global")).lower()
+        self.dual_mask_conflict_granularity = str(
+            args.get("dual_mask_conflict_granularity", "layer")
+        ).lower()
+        if self.dual_mask_conflict_granularity not in {"layer", "model"}:
+            raise ValueError("dual_mask_conflict_granularity must be layer or model")
 
         self.dual_mask_task0_gate_mode = str(args.get("dual_mask_task0_gate_mode", "full")).lower()
         self.dual_mask_s_protect_enabled = bool(args.get("dual_mask_s_protect_enabled", True))
@@ -394,6 +406,7 @@ class Attention_LoRA(nn.Module):
             "conflict_energy_ratio_floor=%(conflict_energy_ratio_floor)s, "
             "task0_gate_mode=%(task0_gate_mode)s, "
             "private_conflict_mode=%(private_conflict_mode)s, "
+            "conflict_granularity=%(conflict_granularity)s, "
             "old_overlap_conflict_adaptive=%(old_overlap_conflict_adaptive)s, "
             "plasticity_adaptive=%(plasticity_adaptive)s, "
             "protect_strength_mode=%(protect_strength_mode)s, "
@@ -408,6 +421,7 @@ class Attention_LoRA(nn.Module):
                 "conflict_energy_adaptive": self.dual_mask_conflict_energy_adaptive,
                 "conflict_energy_ratio_floor": self.dual_mask_conflict_energy_ratio_floor,
                 "private_conflict_mode": self.dual_mask_private_conflict_mode,
+                "conflict_granularity": self.dual_mask_conflict_granularity,
                 "task0_gate_mode": self.dual_mask_task0_gate_mode,
                 "s_protect_enabled": self.dual_mask_s_protect_enabled,
                 "layerwise_ratio_mode": self.dual_mask_layerwise_ratio_mode,
@@ -580,6 +594,10 @@ class Attention_LoRA(nn.Module):
             "isolated_mask": self.isolated_mask.detach().cpu().float(),
             "conflict_score": conflict_score.detach().cpu().float(),
             "conflict_mask": conflict_mask.detach().cpu().float(),
+            "conflict_granularity": self.dual_mask_conflict_granularity,
+            "global_conflict_masks_active": bool(self.global_conflict_masks_active),
+            "global_s_conflict_mask": self.global_s_conflict_mask.detach().cpu().float(),
+            "global_p_conflict_mask": self.global_p_conflict_mask.detach().cpu().float(),
             "raw_delta": raw_delta.detach().cpu().float(),
             "safe_delta": safe_delta.detach().cpu().float(),
             "branches": [
@@ -608,6 +626,8 @@ class Attention_LoRA(nn.Module):
         return _random_fixed_A_init(dim, rank, device, dtype)
 
     def before_task(self, task: int):
+
+        self.clear_global_conflict_masks()
 
         t = int(task)
         self.cur_task = t
@@ -854,6 +874,80 @@ class Attention_LoRA(nn.Module):
             )
         return conflict_score, conflict_mask
 
+    def clear_global_conflict_masks(self):
+        self.global_conflict_masks_active = False
+        self.global_s_conflict_mask = self.global_s_conflict_mask.new_empty(0)
+        self.global_p_conflict_mask = self.global_p_conflict_mask.new_empty(0)
+
+    def set_global_conflict_masks(
+            self,
+            shared_mask: torch.Tensor,
+            private_mask: torch.Tensor,
+    ):
+        if shared_mask.shape != self.qkv.weight.shape or private_mask.shape != self.qkv.weight.shape:
+            raise ValueError("global conflict masks must match qkv.weight")
+        self.global_s_conflict_mask = shared_mask.detach().to(
+            device=self.qkv.weight.device,
+            dtype=torch.bool,
+        ).clone()
+        self.global_p_conflict_mask = private_mask.detach().to(
+            device=self.qkv.weight.device,
+            dtype=torch.bool,
+        ).clone()
+        self.global_conflict_masks_active = True
+
+    def global_conflict_candidate(self, task: int, isolated: bool):
+        """Return cross-layer score, local reference mask, and valid coordinates."""
+        task = int(task)
+        if self._effective_gate_mode() in {"unmasked", "protect_only"}:
+            return None
+        if isolated:
+            if task <= 0 or not self.use_plora or self.P_lora[task] is None:
+                return None
+            if self.dual_mask_private_conflict_mode == "none":
+                return None
+            unit = self.P_lora[task]
+            gamma = float(self.plora_gamma)
+        else:
+            if self.S_lora[task] is None:
+                return None
+            unit = self.S_lora[task]
+            gamma = float(self.slora_gamma)
+
+        delta = gamma * (unit.B_weight.detach() @ unit.A_weight.detach())
+        valid_mask = torch.ones_like(delta)
+        if isolated and self.dual_mask_private_conflict_mode == "plastic":
+            valid_mask = 1.0 - self.general_mask.to(delta)
+        _, local_mask = self._joint_conflict(
+            delta,
+            valid_mask=(valid_mask if isolated and self.dual_mask_private_conflict_mode == "plastic" else None),
+        )
+        # Both factors already lie in [0, 1]. Do not normalize their product
+        # per layer: its amplitude is the evidence used to move a fixed budget
+        # between layers.
+        ba_importance = _normalize_score(delta.detach().abs())
+        w0_importance = self.w0_importance.to(device=delta.device, dtype=delta.dtype)
+        score = w0_importance * ba_importance
+        return score, local_mask, valid_mask
+
+    def _branch_conflict(
+            self,
+            delta: torch.Tensor,
+            isolated: bool,
+            conflict_ratio: Optional[float] = None,
+            valid_mask: Optional[torch.Tensor] = None,
+    ):
+        if self.global_conflict_masks_active:
+            ba_importance = _normalize_score(delta.detach().abs())
+            w0_importance = self.w0_importance.to(device=delta.device, dtype=delta.dtype)
+            score = w0_importance * ba_importance
+            mask = self.global_p_conflict_mask if isolated else self.global_s_conflict_mask
+            mask = mask.to(device=delta.device, dtype=delta.dtype)
+            if valid_mask is not None:
+                mask = mask * valid_mask.to(mask)
+            return score, mask
+        return self._joint_conflict(delta, conflict_ratio=conflict_ratio, valid_mask=valid_mask)
+
     def _effective_gate_mode(self) -> str:
         if self.cur_task == 0:
             return self.dual_mask_task0_gate_mode
@@ -890,7 +984,7 @@ class Attention_LoRA(nn.Module):
             conflict_gate = torch.ones_like(protect_gate)
         else:
             # conflict 高表示,W0 很重要，而且 LoRA 也想大幅修改这个位置
-            _, conflict_mask = self._joint_conflict(delta,
+            _, conflict_mask = self._branch_conflict(delta, isolated=isolated,
                 conflict_ratio=conflict_ratio,
                 valid_mask=(plastic_mask if isolated and self.dual_mask_private_conflict_mode == "plastic" else None),)
             if conflict_strength is None:
@@ -933,8 +1027,9 @@ class Attention_LoRA(nn.Module):
         if gate_mode == "protect_only" or private_conflict_disabled:
             return base_delta, torch.zeros_like(delta)
 
-        _, conflict_mask = self._joint_conflict(
+        _, conflict_mask = self._branch_conflict(
             delta,
+            isolated=isolated,
             conflict_ratio=conflict_ratio,
             valid_mask=(plastic_mask if isolated and self.dual_mask_private_conflict_mode == "plastic" else None),)
         return base_delta, conflict_mask.to(dtype=delta.dtype)
@@ -1229,6 +1324,7 @@ class Attention_LoRA(nn.Module):
             "conflict_gate_suppressed=%.2f%%, " #  # 只模拟冲突门时，总增量范数下降多少
             "effective_conflict_ratio=%.4f, " # 当前实际冲突 mask 的坐标比例
             "effective_conflict_strength=%.4f, " # 本次 merge 实际使用的冲突抑制强度 β
+            "conflict_granularity=%s, global_S_density=%.4f, global_P_density=%.4f, "
             "private_conflict_mode=%s, "
             "private_conflict_mask_overlap=%.4f, " # 全局 P 冲突坐标中有多少位于 plastic 区
             "private_conflict_energy_overlap=%.4f, " # 全局 P 冲突分数中有多少位于 plastic 区
@@ -1252,6 +1348,11 @@ class Attention_LoRA(nn.Module):
             # float(conflict_ratio),
             effective_conflict_ratio,
             conflict_strength,
+            self.dual_mask_conflict_granularity,
+            self.global_s_conflict_mask.detach().float().mean().item()
+            if self.global_conflict_masks_active else 0.0,
+            self.global_p_conflict_mask.detach().float().mean().item()
+            if self.global_conflict_masks_active else 0.0,
             self.dual_mask_private_conflict_mode,
             private_mask_overlap.item(),
             private_energy_overlap.item(),
@@ -1361,5 +1462,7 @@ class Attention_LoRA(nn.Module):
             self.S_lora[t] = None
             self.P_lora[t] = None
             self._functional_merge_strength_override = None
+
+        self.clear_global_conflict_masks()
 
         return None
