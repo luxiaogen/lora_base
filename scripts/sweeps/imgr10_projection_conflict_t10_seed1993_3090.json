@@ -4,6 +4,7 @@
   "datasets": [{"name": "imgr10", "config": "exps/dlora/imgr10.json"}],
   "seeds": [1993],
   "common_overrides": {
+    "ca_epochs": 5,
     "max_tasks": 10,
     "total_sessions": 10,
     "init_cls": 20,

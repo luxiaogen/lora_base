@@ -22,6 +22,7 @@ if
     python main.py --config exps/dlora/imgr10.json \
         --set 'seed=[1993]' \
         --set prefix=imgr10_layer_budget_seed1993 \
+        --set ca_epochs=5 \
         --set max_tasks=10 \
         --set total_sessions=10 \
         --set init_cls=20 \
@@ -51,6 +52,7 @@ if
     python main.py --config exps/dlora/imgr10.json \
         --set 'seed=[1993]' \
         --set prefix=imgr10_projection_budget_seed1993 \
+        --set ca_epochs=5 \
         --set max_tasks=10 \
         --set total_sessions=10 \
         --set init_cls=20 \

@@ -30,7 +30,7 @@
     "ca": true,
     "ca_lrate": 0.01,
     "logit_norm": 0.2,
-    "ca_epochs": 10,
+    "ca_epochs": 5,
     "lora_A_init": "kaiming",
     "slora_gamma": 0.5,
     "plora_gamma": 1.0,
