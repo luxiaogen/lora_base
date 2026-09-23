@@ -162,6 +162,78 @@ class BranchGateSweepTests(unittest.TestCase):
 
         self.assertEqual(strength, 0.0)
 
+    def test_two_machine_specs_preserve_paired_comparisons(self):
+        spec_3090 = self._load("9_23_imgr10_branch_gate_3090.json")
+        spec_5090_diag = self._load("9_23_imgr10_branch_gate_5090_diag.json")
+        spec_5090_b = self._load("9_23_imgr10_branch_gate_5090_b1997.json")
+
+        self.assertEqual(spec_3090["seeds"], [1993, 1996])
+        self.assertEqual(
+            [variant["name"] for variant in spec_3090["variants"]],
+            ["a_baseline", "b_p_conflict_off"],
+        )
+        self.assertEqual(spec_5090_diag["seeds"], [1993])
+        self.assertEqual(
+            [variant["name"] for variant in spec_5090_diag["variants"]],
+            ["a_baseline", "c_all_conflict_off", "d_s_protect_off"],
+        )
+        self.assertEqual(spec_5090_b["seeds"], [1997])
+        self.assertEqual(
+            [variant["name"] for variant in spec_5090_b["variants"]],
+            ["a_baseline", "b_p_conflict_off"],
+        )
+
+    def test_two_machine_generated_order_and_paths(self):
+        script_3090 = (SCRIPT_DIR / "9_23_imgr10_branch_gate_3090_runs.sh").read_text()
+        script_5090_diag = (SCRIPT_DIR / "9_23_imgr10_branch_gate_5090_diag_runs.sh").read_text()
+        script_5090_b = (SCRIPT_DIR / "9_23_imgr10_branch_gate_5090_b1997_runs.sh").read_text()
+        smoke_5090 = (SCRIPT_DIR / "9_23_imgr10_all_conflict_off_smoke_5090.sh").read_text()
+
+        order_3090 = [
+            "Starting imgr10_a_baseline_seed1993",
+            "Starting imgr10_b_p_conflict_off_seed1993",
+            "Starting imgr10_a_baseline_seed1996",
+            "Starting imgr10_b_p_conflict_off_seed1996",
+        ]
+        positions_3090 = [script_3090.index(item) for item in order_3090]
+        self.assertEqual(positions_3090, sorted(positions_3090))
+
+        order_5090_diag = [
+            "Starting imgr10_a_baseline_seed1993",
+            "Starting imgr10_c_all_conflict_off_seed1993",
+            "Starting imgr10_d_s_protect_off_seed1993",
+        ]
+        positions_5090_diag = [script_5090_diag.index(item) for item in order_5090_diag]
+        self.assertEqual(positions_5090_diag, sorted(positions_5090_diag))
+
+        self.assertLess(
+            script_5090_b.index("Starting imgr10_a_baseline_seed1997"),
+            script_5090_b.index("Starting imgr10_b_p_conflict_off_seed1997"),
+        )
+
+        for script in (script_3090, script_5090_diag, script_5090_b, smoke_5090):
+            self.assertIn('cd "$(dirname "$0")/.."', script)
+            self.assertNotIn("data_path=", script)
+            self.assertNotIn("/mnt/", script)
+            self.assertNotIn("/home/", script)
+
+    def test_two_machine_full_runs_keep_reference_protocol(self):
+        for name in (
+            "9_23_imgr10_branch_gate_3090.json",
+            "9_23_imgr10_branch_gate_5090_diag.json",
+            "9_23_imgr10_branch_gate_5090_b1997.json",
+        ):
+            with self.subTest(name=name):
+                common = self._load(name)["common_overrides"]
+                self.assertEqual(common["init_epoch"], 20)
+                self.assertEqual(common["epochs"], 20)
+                self.assertEqual(common["rank"], 64)
+                self.assertIs(common["ca"], True)
+                self.assertEqual(common["ca_epochs"], 5)
+                self.assertEqual(common["dual_mask_task0_gate_mode"], "unmasked")
+                self.assertEqual(common["dual_mask_anchor_reg_weight"], 10.0)
+                self.assertNotIn("data_path", common)
+
 
 if __name__ == "__main__":
     unittest.main()
