@@ -779,6 +779,12 @@ class Learner(BaseLearner):
                 else:
                     other_params.append(p) # 分类头
         print(f"[Param Group] LoRA params: {len(flora_params)}, Other params: {len(other_params)}")
+        logging.info(
+            "LoRA-stage trainable scalars: LoRA=%s, classifier=%s, total=%s",
+            sum(p.numel() for p in flora_params),
+            sum(p.numel() for p in other_params),
+            sum(p.numel() for p in flora_params + other_params),
+        )
 
         enabled = {name for name, p in self._network.named_parameters() if p.requires_grad}
         print(f"[LoRA-Stage] Parameters to be updated: {enabled}")
@@ -1062,6 +1068,7 @@ class Learner(BaseLearner):
         run_epochs = ca_epochs
         crct_num = self._total_classes
         param_list = [p for p in self._network.classifier_pool.parameters() if p.requires_grad]
+        logging.info("CA-stage optimized classifier scalars: %s", sum(p.numel() for p in param_list))
         classifier_lr = self.args["ca_lrate"]
         network_params = [{'params': param_list, 'lr': classifier_lr,'weight_decay': 0.0005}]
         optimizer = optim.SGD(network_params, lr=classifier_lr, momentum=0.9, weight_decay=0.0005)

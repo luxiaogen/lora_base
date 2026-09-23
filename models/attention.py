@@ -368,6 +368,9 @@ class Attention_LoRA(nn.Module):
         self.dual_mask_conflict_old_overlap_adaptive = bool(args.get("dual_mask_conflict_old_overlap_adaptive", False))
 
         self.dual_mask_private_conflict_mode = str(args.get("dual_mask_private_conflict_mode", "global")).lower()
+        if (self.dual_mask_private_conflict_mode == "plastic_norm_matched"
+                and str(args.get("dual_mask_conflict_granularity", "layer")).lower() != "layer"):
+            raise ValueError("plastic_norm_matched requires layer conflict granularity")
         self.dual_mask_conflict_granularity = str(
             args.get("dual_mask_conflict_granularity", "layer")
         ).lower()
@@ -950,6 +953,29 @@ class Attention_LoRA(nn.Module):
             return score, mask
         return self._joint_conflict(delta, conflict_ratio=conflict_ratio, valid_mask=valid_mask)
 
+    def _private_plastic_norm_matched_conflict(
+            self,
+            delta: torch.Tensor,
+            plastic_mask: torch.Tensor,
+            conflict_ratio: Optional[float],
+            conflict_strength: float,
+    ):
+        """Redistribute the baseline P suppression within plastic coordinates."""
+        _, baseline_mask = self._branch_conflict(
+            delta, isolated=True, conflict_ratio=conflict_ratio,
+        )
+        _, plastic_candidate = self._branch_conflict(
+            delta, isolated=True, conflict_ratio=conflict_ratio,
+            valid_mask=plastic_mask,
+        )
+        active_baseline = baseline_mask.bool() & plastic_mask.bool()
+        candidate = plastic_candidate.bool() | active_baseline
+        detached_delta = delta.detach()
+        baseline_norm = (detached_delta * active_baseline).norm()
+        candidate_norm = (detached_delta * candidate).norm().clamp_min(1e-12)
+        matched_strength = (conflict_strength * baseline_norm / candidate_norm).clamp(0.0, 1.0)
+        return candidate.to(delta.dtype), matched_strength
+
     def _effective_gate_mode(self) -> str:
         if self.cur_task == 0:
             return self.dual_mask_task0_gate_mode
@@ -986,12 +1012,17 @@ class Attention_LoRA(nn.Module):
             conflict_gate = torch.ones_like(protect_gate)
         else:
             # conflict 高表示,W0 很重要，而且 LoRA 也想大幅修改这个位置
-            _, conflict_mask = self._branch_conflict(delta, isolated=isolated,
-                conflict_ratio=conflict_ratio,
-                valid_mask=(plastic_mask if isolated and self.dual_mask_private_conflict_mode == "plastic" else None),)
             if conflict_strength is None:
                 _, conflict_strength = self._conflict_parameters()
             conflict_strength = min(max(conflict_strength, 0.0), 1.0)
+            if isolated and self.dual_mask_private_conflict_mode == "plastic_norm_matched":
+                conflict_mask, conflict_strength = self._private_plastic_norm_matched_conflict(
+                    delta, plastic_mask, conflict_ratio, conflict_strength,
+                )
+            else:
+                _, conflict_mask = self._branch_conflict(delta, isolated=isolated,
+                    conflict_ratio=conflict_ratio,
+                    valid_mask=(plastic_mask if isolated and self.dual_mask_private_conflict_mode == "plastic" else None),)
             # 高冲突区域按 conflict_strength 压制；其余区域保持不变。
             conflict_gate = 1.0 - conflict_strength * conflict_mask.to(delta.dtype)
         # Private LoRA 只使用非保护区；在二值互补 mask 下，
@@ -1029,11 +1060,16 @@ class Attention_LoRA(nn.Module):
         if gate_mode == "protect_only" or private_conflict_disabled:
             return base_delta, torch.zeros_like(delta)
 
-        _, conflict_mask = self._branch_conflict(
-            delta,
-            isolated=isolated,
-            conflict_ratio=conflict_ratio,
-            valid_mask=(plastic_mask if isolated and self.dual_mask_private_conflict_mode == "plastic" else None),)
+        if isolated and self.dual_mask_private_conflict_mode == "plastic_norm_matched":
+            conflict_mask, _ = self._private_plastic_norm_matched_conflict(
+                delta, plastic_mask, conflict_ratio, self._conflict_parameters()[1],
+            )
+        else:
+            _, conflict_mask = self._branch_conflict(
+                delta,
+                isolated=isolated,
+                conflict_ratio=conflict_ratio,
+                valid_mask=(plastic_mask if isolated and self.dual_mask_private_conflict_mode == "plastic" else None),)
         return base_delta, conflict_mask.to(dtype=delta.dtype)
 
     def _compose_merge_delta(
@@ -1235,17 +1271,29 @@ class Attention_LoRA(nn.Module):
         """Measure the P mask actually used by merge, without changing it."""
         plastic = (1.0 - self.general_mask.to(raw_delta)).bool()
         before_conflict = raw_delta * plastic.to(raw_delta)
+        reference_removed_norm = None
         if (
                 self.dual_mask_conflict_merge_mode == "suppress"
                 and self._effective_gate_mode() == "full"
                 and self.dual_mask_private_conflict_mode != "none"
         ):
-            _, applied_mask = self._branch_conflict(
-                raw_delta,
-                isolated=True,
-                conflict_ratio=conflict_ratio,
-                valid_mask=(plastic if self.dual_mask_private_conflict_mode == "plastic" else None),
-            )
+            if self.dual_mask_private_conflict_mode == "plastic_norm_matched":
+                _, baseline_mask = self._branch_conflict(
+                    raw_delta, isolated=True, conflict_ratio=conflict_ratio,
+                )
+                reference_removed_norm = float(
+                    (before_conflict * baseline_mask * conflict_strength).norm().item()
+                )
+                applied_mask, conflict_strength = self._private_plastic_norm_matched_conflict(
+                    raw_delta, plastic, conflict_ratio, conflict_strength,
+                )
+            else:
+                _, applied_mask = self._branch_conflict(
+                    raw_delta,
+                    isolated=True,
+                    conflict_ratio=conflict_ratio,
+                    valid_mask=(plastic if self.dual_mask_private_conflict_mode == "plastic" else None),
+                )
         else:
             applied_mask = torch.zeros_like(raw_delta)
         applied_mask = applied_mask.bool()
@@ -1261,6 +1309,7 @@ class Attention_LoRA(nn.Module):
         selected = int(applied_mask.sum().item())
         plastic_count = int(selected_plastic.sum().item())
         before_norm = float(before_conflict.norm().item())
+        removed_norm = float(removed.norm().item())
         qkv_selected = []
         qkv_overlap = []
         qkv_removed_ratio = []
@@ -1281,8 +1330,10 @@ class Attention_LoRA(nn.Module):
             "selected_plastic": plastic_count,
             "selected_active": int((selected_plastic & (raw_delta != 0)).sum().item()),
             "plastic_overlap": ratio(plastic_count, selected),
-            "removed_norm": float(removed.norm().item()),
-            "removed_ratio": ratio(float(removed.norm().item()), before_norm),
+            "removed_norm": removed_norm,
+            "removed_ratio": ratio(removed_norm, before_norm),
+            "reference_removed_norm": reference_removed_norm,
+            "applied_strength": float(conflict_strength),
             "qkv_selected": tuple(qkv_selected),
             "qkv_plastic_overlap": tuple(qkv_overlap),
             "qkv_removed_ratio": tuple(qkv_removed_ratio),
@@ -1340,8 +1391,8 @@ class Attention_LoRA(nn.Module):
             logging.info(
                 "Task %s layer %s P applied merge diagnostic: "
                 "selected=%s, selected_plastic=%s, selected_active=%s, "
-                "plastic_overlap=%.4f, removed_norm=%.6f, removed_ratio=%.4f, "
-                "qkv_selected=%s, qkv_plastic_overlap=%s, "
+                "plastic_overlap=%.4f, removed_norm=%.6f, removed_ratio=%.4f, applied_strength=%.4f, "
+                "reference_removed_norm=%s, qkv_selected=%s, qkv_plastic_overlap=%s, "
                 "qkv_removed_ratio=%s, merge_error=%.3e",
                 int(task),
                 int(self.layer_idx),
@@ -1351,6 +1402,8 @@ class Attention_LoRA(nn.Module):
                 applied["plastic_overlap"],
                 applied["removed_norm"],
                 applied["removed_ratio"],
+                applied["applied_strength"],
+                applied["reference_removed_norm"],
                 applied["qkv_selected"],
                 applied["qkv_plastic_overlap"],
                 applied["qkv_removed_ratio"],
@@ -1370,6 +1423,10 @@ class Attention_LoRA(nn.Module):
 
             if self.dual_mask_private_conflict_mode == "none":
                 actual_private_mask = torch.zeros_like(global_private_mask)
+            elif self.dual_mask_private_conflict_mode == "plastic_norm_matched":
+                actual_private_mask, actual_private_strength = self._private_plastic_norm_matched_conflict(
+                    private_raw, plastic_mask, conflict_ratio, conflict_strength,
+                )
             elif self.dual_mask_private_conflict_mode == "plastic":
                 _, actual_private_mask = self._joint_conflict(
                     private_raw,
@@ -1378,8 +1435,10 @@ class Attention_LoRA(nn.Module):
                 )
             else:
                 actual_private_mask = global_private_mask
+            if self.dual_mask_private_conflict_mode != "plastic_norm_matched":
+                actual_private_strength = conflict_strength
             private_plastic_delta = private_raw * plastic_mask
-            private_gate_suppression = self._conflict_gate_suppression(private_plastic_delta,actual_private_mask,conflict_strength,)
+            private_gate_suppression = self._conflict_gate_suppression(private_plastic_delta,actual_private_mask,actual_private_strength,)
 
 
         with torch.no_grad():

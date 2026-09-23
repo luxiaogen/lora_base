@@ -352,6 +352,43 @@ class MaskSelectionTests(unittest.TestCase):
             int(torch.count_nonzero(1.0 - module.general_mask).item() * 0.5),
         )
 
+    def test_private_plastic_norm_matched_keeps_baseline_suppression_budget(self):
+        module = Attention_LoRA(dim=4, num_heads=1, r=2, n_tasks=2)
+        module._init_params(make_args(
+            dual_mask_private_conflict_mode="plastic_norm_matched",
+            dual_mask_conflict_ratio=0.25,
+            dual_mask_conflict_strength=0.5,
+        ))
+        module.cur_task = 1
+        module.general_mask.zero_()
+        module.general_mask[:, :2] = 1.0
+        module.w0_importance.fill_(1.0)
+        module.w0_importance[:, :2] = 1.5
+        delta = torch.arange(1, module.qkv.weight.numel() + 1,
+                             dtype=module.qkv.weight.dtype).reshape_as(module.qkv.weight)
+        plastic = 1.0 - module.general_mask
+        _, baseline_mask = module._branch_conflict(delta, isolated=True)
+        baseline_removed = 0.5 * delta * plastic * baseline_mask
+
+        selected, matched_strength = module._private_plastic_norm_matched_conflict(
+            delta, plastic, None, 0.5,
+        )
+        safe = module._safe_delta(delta, isolated=True, conflict_strength=0.5)
+        removed = delta * plastic - safe
+
+        self.assertEqual(torch.count_nonzero(selected * module.general_mask).item(), 0)
+        self.assertGreater(torch.count_nonzero(selected).item(),
+                           torch.count_nonzero(baseline_mask * plastic).item())
+        self.assertLessEqual(float(matched_strength), 0.5)
+        self.assertTrue(torch.allclose(removed.norm(), baseline_removed.norm(), atol=1e-5))
+        self.assertTrue(torch.allclose(safe, module._compose_merge_delta(
+            delta, isolated=True, conflict_ratio=0.25, conflict_strength=0.5,
+        )))
+        diagnostic = module._private_merge_diagnostic(delta, safe, 0.25, 0.5)
+        self.assertLess(diagnostic["merge_error"], 1e-5)
+        self.assertAlmostEqual(diagnostic["removed_norm"],
+                               diagnostic["reference_removed_norm"], places=5)
+
     def test_svd_rank_is_selected_by_energy_coverage(self):
         singular_values = torch.tensor([4.0, 3.0, 1.0])
 
