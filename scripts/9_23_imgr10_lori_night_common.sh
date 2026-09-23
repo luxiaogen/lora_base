@@ -14,7 +14,7 @@ esac
 
 if [[ "$DRY_RUN" != "--dry-run" ]]; then
     python -m unittest test.test_dual_mask_core test.test_global_conflict_budget test.test_lori_night_script
-    python -c 'import json, pathlib; p=pathlib.Path(json.load(open("exps/dlora/imgr10.json"))["data_path"]); print("Dataset:", p); assert (p/"train").is_dir() and (p/"test").is_dir(), "Missing train/ or test/"'
+    python -c 'import json, pathlib; c=json.load(open("exps/dlora/imgr10.json")); p=pathlib.Path(c["data_path"]); print("Dataset:", p); assert (p/"train").is_dir() and (p/"test").is_dir(), "Missing train/ or test/"; expected={"rank":64,"epochs":20,"init_epoch":20,"lora_A_init":"kaiming","dual_mask_importance":"svd","dual_mask_svd_energy_coverage":0.95,"dual_mask_task0_gate_mode":"unmasked","use_slora":True,"use_plora":True}; bad={k:(c.get(k),v) for k,v in expected.items() if c.get(k)!=v}; assert not bad, f"Unexpected base config: {bad}"'
 fi
 
 echo "Code revision: $(git rev-parse --short HEAD)"
