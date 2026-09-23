@@ -1,0 +1,36 @@
+{
+  "name": "imgr10_projection_conflict_t10_seeds1996_1997_5090",
+  "log_dir": "logs/shell_logs/imgr10_projection_conflict_t10_seeds1996_1997_5090",
+  "datasets": [{"name": "imgr10", "config": "exps/dlora/imgr10.json"}],
+  "seeds": [1996, 1997],
+  "common_overrides": {
+    "max_tasks": 10,
+    "total_sessions": 10,
+    "init_cls": 20,
+    "increment": 20,
+    "task0_checkpoint_resume": "",
+    "task0_checkpoint_save": "",
+    "experiment_tracker": "wandb",
+    "wandb_project": "LoDA_ICML2026",
+    "wandb_mode": "online",
+    "wandb_group": "imgr10_projection_conflict_t10_seeds1996_1997_5090"
+  },
+  "variants": [
+    {
+      "name": "layer_budget",
+      "description": "G0 baseline: each attention layer selects its own conflict mask",
+      "overrides": {
+        "dual_mask_conflict_granularity": "layer",
+        "wandb_tags": "imgr10,t10,full,conflict_budget_layer"
+      }
+    },
+    {
+      "name": "projection_budget",
+      "description": "G2: Q, K, and V each share one cross-layer conflict budget",
+      "overrides": {
+        "dual_mask_conflict_granularity": "projection",
+        "wandb_tags": "imgr10,t10,full,conflict_budget_projection"
+      }
+    }
+  ]
+}

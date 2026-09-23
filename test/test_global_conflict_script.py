@@ -97,6 +97,79 @@ class GlobalConflictScriptTests(unittest.TestCase):
             {"layer", "projection"},
         )
 
+    def test_projection_t10_scripts_keep_each_seed_pair_on_one_machine(self):
+        cases = [
+            (
+                ROOT / "scripts/9_23_imgr10_projection_conflict_t10_seed1993_3090.sh",
+                [("[1993]", "layer"), ("[1993]", "projection")],
+            ),
+            (
+                ROOT
+                / "scripts/9_23_imgr10_projection_conflict_t10_seeds1996_1997_5090.sh",
+                [
+                    ("[1996]", "layer"),
+                    ("[1996]", "projection"),
+                    ("[1997]", "layer"),
+                    ("[1997]", "projection"),
+                ],
+            ),
+        ]
+        for script, expected_order in cases:
+            with self.subTest(script=script.name):
+                source, runs = commands(script)
+                subprocess.run(["bash", "-n", str(script)], check=True)
+                self.assertNotIn('\ncd "$(dirname "$0")"\n', source)
+                self.assertEqual(
+                    [
+                        (run["seed"], run["dual_mask_conflict_granularity"])
+                        for run in runs
+                    ],
+                    expected_order,
+                )
+                ignored = {
+                    "seed",
+                    "prefix",
+                    "dual_mask_conflict_granularity",
+                    "wandb_group",
+                    "wandb_tags",
+                }
+                reference = {
+                    key: value for key, value in runs[0].items() if key not in ignored
+                }
+                for run in runs:
+                    self.assertEqual(
+                        {key: value for key, value in run.items() if key not in ignored},
+                        reference,
+                    )
+                    self.assertEqual(run["max_tasks"], "10")
+                    self.assertEqual(run["total_sessions"], "10")
+                    self.assertEqual(run["task0_checkpoint_resume"], "")
+                    self.assertNotIn("data_path", run)
+
+    def test_projection_t10_specs_cover_three_seeds_with_two_variants(self):
+        spec_3090 = json.loads(
+            (
+                ROOT
+                / "scripts/sweeps/imgr10_projection_conflict_t10_seed1993_3090.json"
+            ).read_text()
+        )
+        spec_5090 = json.loads(
+            (
+                ROOT
+                / "scripts/sweeps/imgr10_projection_conflict_t10_seeds1996_1997_5090.json"
+            ).read_text()
+        )
+        self.assertEqual(spec_3090["seeds"], [1993])
+        self.assertEqual(spec_5090["seeds"], [1996, 1997])
+        for spec in (spec_3090, spec_5090):
+            self.assertEqual(
+                [
+                    variant["overrides"]["dual_mask_conflict_granularity"]
+                    for variant in spec["variants"]
+                ],
+                ["layer", "projection"],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
