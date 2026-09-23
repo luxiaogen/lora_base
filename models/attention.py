@@ -1223,6 +1223,72 @@ class Attention_LoRA(nn.Module):
         cumulative = torch.cumsum(values, dim=0)
         k = int(torch.searchsorted(cumulative, 0.5 * total).item()) + 1
         return flat_score.new_tensor(k / flat_score.numel())
+
+    @torch.no_grad()
+    def _private_merge_diagnostic(
+            self,
+            raw_delta: torch.Tensor,
+            safe_delta: torch.Tensor,
+            conflict_ratio: float,
+            conflict_strength: float,
+    ):
+        """Measure the P mask actually used by merge, without changing it."""
+        plastic = (1.0 - self.general_mask.to(raw_delta)).bool()
+        before_conflict = raw_delta * plastic.to(raw_delta)
+        if (
+                self.dual_mask_conflict_merge_mode == "suppress"
+                and self._effective_gate_mode() == "full"
+                and self.dual_mask_private_conflict_mode != "none"
+        ):
+            _, applied_mask = self._branch_conflict(
+                raw_delta,
+                isolated=True,
+                conflict_ratio=conflict_ratio,
+                valid_mask=(plastic if self.dual_mask_private_conflict_mode == "plastic" else None),
+            )
+        else:
+            applied_mask = torch.zeros_like(raw_delta)
+        applied_mask = applied_mask.bool()
+        selected_plastic = applied_mask & plastic
+        removed = before_conflict - safe_delta
+        expected_safe = before_conflict * (
+            1.0 - conflict_strength * applied_mask.to(raw_delta)
+        )
+
+        def ratio(part, whole):
+            return float(part / whole) if whole else 0.0
+
+        selected = int(applied_mask.sum().item())
+        plastic_count = int(selected_plastic.sum().item())
+        before_norm = float(before_conflict.norm().item())
+        qkv_selected = []
+        qkv_overlap = []
+        qkv_removed_ratio = []
+        for mask_part, plastic_part, before_part, removed_part in zip(
+                applied_mask.chunk(3, dim=0),
+                plastic.chunk(3, dim=0),
+                before_conflict.chunk(3, dim=0),
+                removed.chunk(3, dim=0),
+        ):
+            count = int(mask_part.sum().item())
+            qkv_selected.append(count)
+            qkv_overlap.append(ratio(int((mask_part & plastic_part).sum().item()), count))
+            qkv_removed_ratio.append(
+                ratio(float(removed_part.norm().item()), float(before_part.norm().item()))
+            )
+        return {
+            "selected": selected,
+            "selected_plastic": plastic_count,
+            "selected_active": int((selected_plastic & (raw_delta != 0)).sum().item()),
+            "plastic_overlap": ratio(plastic_count, selected),
+            "removed_norm": float(removed.norm().item()),
+            "removed_ratio": ratio(float(removed.norm().item()), before_norm),
+            "qkv_selected": tuple(qkv_selected),
+            "qkv_plastic_overlap": tuple(qkv_overlap),
+            "qkv_removed_ratio": tuple(qkv_removed_ratio),
+            "merge_error": float((expected_safe - safe_delta).abs().max().item()),
+        }
+
     # 合并阶段的诊断与日志函数
     def _log_merge_stats(
             self,
@@ -1265,6 +1331,31 @@ class Attention_LoRA(nn.Module):
         private_item = next((item for item in branch_deltas if item["isolated"]),None,)
         if private_item is not None:
             private_raw = private_item["raw_delta"]
+            applied = self._private_merge_diagnostic(
+                private_raw,
+                private_item["safe_delta"],
+                conflict_ratio,
+                conflict_strength,
+            )
+            logging.info(
+                "Task %s layer %s P applied merge diagnostic: "
+                "selected=%s, selected_plastic=%s, selected_active=%s, "
+                "plastic_overlap=%.4f, removed_norm=%.6f, removed_ratio=%.4f, "
+                "qkv_selected=%s, qkv_plastic_overlap=%s, "
+                "qkv_removed_ratio=%s, merge_error=%.3e",
+                int(task),
+                int(self.layer_idx),
+                applied["selected"],
+                applied["selected_plastic"],
+                applied["selected_active"],
+                applied["plastic_overlap"],
+                applied["removed_norm"],
+                applied["removed_ratio"],
+                applied["qkv_selected"],
+                applied["qkv_plastic_overlap"],
+                applied["qkv_removed_ratio"],
+                applied["merge_error"],
+            )
             plastic_mask = (1.0 - protect_mask).to(device=private_raw.device,dtype=private_raw.dtype,)
             private_score, global_private_mask = self._joint_conflict(private_raw,conflict_ratio=conflict_ratio,)
             selected_count = global_private_mask.detach().float().sum()

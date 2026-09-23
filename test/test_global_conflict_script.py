@@ -170,6 +170,28 @@ class GlobalConflictScriptTests(unittest.TestCase):
                 ["layer", "projection"],
             )
 
+    def test_private_applied_mask_diagnostic_is_a_matched_short_pair(self):
+        script = ROOT / "scripts/9_23_imgr10_p_applied_mask_diag_3090.sh"
+        source, runs = commands(script)
+        subprocess.run(["bash", "-n", str(script)], check=True)
+        self.assertEqual(len(runs), 2)
+        self.assertEqual(
+            [run["dual_mask_conflict_granularity"] for run in runs],
+            ["layer", "projection"],
+        )
+        ignored = {"prefix", "dual_mask_conflict_granularity", "wandb_tags"}
+        self.assertEqual(
+            {key: value for key, value in runs[0].items() if key not in ignored},
+            {key: value for key, value in runs[1].items() if key not in ignored},
+        )
+        for run in runs:
+            self.assertEqual(run["seed"], "[1993]")
+            self.assertEqual(run["max_tasks"], "3")
+            self.assertEqual(run["total_sessions"], "10")
+            self.assertEqual(run["ca_epochs"], "5")
+            self.assertNotIn("data_path", run)
+        self.assertIn('json.load(open("exps/dlora/imgr10.json"))["data_path"]', source)
+
 
 if __name__ == "__main__":
     unittest.main()

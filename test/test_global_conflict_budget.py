@@ -151,6 +151,33 @@ class GlobalBudgetSelectionTests(unittest.TestCase):
         module = self._make_attention(granularity="projection")
         self.assertEqual(module.dual_mask_conflict_granularity, "projection")
 
+    def test_private_merge_diagnostic_uses_applied_projection_mask(self):
+        module = self._make_attention(granularity="projection")
+        module.general_mask.zero_()
+        module.general_mask[0, 0] = 1.0
+        shared = torch.zeros_like(module.qkv.weight)
+        private = torch.zeros_like(module.qkv.weight)
+        private[0, 0] = 1.0  # Protected: selected, but P cannot update it.
+        private[1, 0] = 1.0  # Plastic: selected and suppressed.
+        module.set_global_conflict_masks(shared, private)
+        raw = torch.ones_like(module.qkv.weight)
+        safe = module._compose_merge_delta(raw, True, 0.25, 0.5)
+        before = module.qkv.weight.detach().clone()
+
+        stats = module._private_merge_diagnostic(raw, safe, 0.25, 0.5)
+
+        self.assertEqual(stats["selected"], 2)
+        self.assertEqual(stats["selected_plastic"], 1)
+        self.assertEqual(stats["selected_active"], 1)
+        self.assertAlmostEqual(stats["plastic_overlap"], 0.5)
+        self.assertAlmostEqual(stats["removed_norm"], 0.5)
+        self.assertAlmostEqual(stats["removed_ratio"], 0.5 / 47**0.5)
+        self.assertEqual(stats["qkv_plastic_overlap"], (0.5, 0.0, 0.0))
+        self.assertEqual(stats["qkv_selected"], (2, 0, 0))
+        self.assertEqual(stats["merge_error"], 0.0)
+        self.assertTrue(torch.equal(module.qkv.weight, before))
+        self.assertTrue(module.global_conflict_masks_active)
+
     def test_after_task_merges_global_gated_update_once_and_releases_masks(self):
         module = self._make_attention()
         module.before_task(1)
@@ -189,6 +216,29 @@ class GlobalBudgetSelectionTests(unittest.TestCase):
         self.assertIsNone(module.P_lora[1])
         self.assertFalse(module.global_conflict_masks_active)
         self.assertEqual(module.global_s_conflict_mask.numel(), 0)
+
+    def test_after_task_logs_private_applied_mask_before_merge(self):
+        module = self._make_attention(granularity="projection")
+        module.before_task(1)
+        module.general_mask.zero_()
+        module.general_mask[0, 0] = 1.0
+        with torch.no_grad():
+            module.S_lora[1].B.weight.zero_()
+            module.P_lora[1].A.weight.fill_(0.25)
+            module.P_lora[1].B.weight.fill_(1.0)
+        private = torch.zeros_like(module.qkv.weight)
+        private[0, 0] = 1.0
+        private[1, 0] = 1.0
+        module.set_global_conflict_masks(torch.zeros_like(private), private)
+
+        with self.assertLogs(level="INFO") as captured:
+            module.after_task(1)
+
+        diagnostic = next(
+            line for line in captured.output if "P applied merge diagnostic" in line
+        )
+        self.assertIn("selected=2, selected_plastic=1, selected_active=1", diagnostic)
+        self.assertIn("merge_error=0.000e+00", diagnostic)
 
 
 if __name__ == "__main__":

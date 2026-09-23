@@ -1,0 +1,42 @@
+{
+  "name": "imgr10_p_applied_mask_diag_3090",
+  "log_dir": "logs/shell_logs/imgr10_p_applied_mask_diag_3090",
+  "datasets": [
+    {
+      "name": "imgr10",
+      "config": "exps/dlora/imgr10.json"
+    }
+  ],
+  "seeds": [1993],
+  "common_overrides": {
+    "ca_epochs": 5,
+    "max_tasks": 3,
+    "total_sessions": 10,
+    "init_cls": 20,
+    "increment": 20,
+    "task0_checkpoint_resume": "",
+    "task0_checkpoint_save": "",
+    "experiment_tracker": "wandb",
+    "wandb_project": "LoDA_ICML2026",
+    "wandb_mode": "online",
+    "wandb_group": "imgr10_p_applied_mask_diag_3090"
+  },
+  "variants": [
+    {
+      "name": "layer_diag",
+      "description": "Layer baseline, exact applied P-mask diagnostic",
+      "overrides": {
+        "dual_mask_conflict_granularity": "layer",
+        "wandb_tags": "imgr10,t10,task0-2,seed1993,p_applied_mask_diag,layer"
+      }
+    },
+    {
+      "name": "projection_diag",
+      "description": "Projection budget, exact applied P-mask diagnostic",
+      "overrides": {
+        "dual_mask_conflict_granularity": "projection",
+        "wandb_tags": "imgr10,t10,task0-2,seed1993,p_applied_mask_diag,projection"
+      }
+    }
+  ]
+}
