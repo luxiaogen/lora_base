@@ -1,4 +1,5 @@
 import logging
+import json
 import math
 import os
 from contextlib import contextmanager
@@ -280,6 +281,11 @@ class Attention_LoRA(nn.Module):
         self.dual_mask_conflict_strength = 1.0  # 决定冲突区压制多强
 
         self.dual_mask_conflict_reg_enabled = True
+        self.dual_mask_s_conflict_enabled = True
+        self.dual_mask_p_conflict_enabled = True
+        self.dual_mask_update_overlap = False
+        self.dual_mask_applied_budget_log = False
+        self._update_overlap_recorder = None
 
         self.dual_mask_conflict_energy_adaptive = False
 
@@ -364,6 +370,11 @@ class Attention_LoRA(nn.Module):
         self.dual_mask_conflict_strength = float(args.get("dual_mask_conflict_strength", 1.0))  # 冲突区压制多强  也就是beta
 
         self.dual_mask_conflict_reg_enabled = bool(args.get("dual_mask_conflict_reg_enabled", True))
+        self.dual_mask_s_conflict_enabled = bool(args.get("dual_mask_s_conflict_enabled", True))
+        self.dual_mask_p_conflict_enabled = bool(args.get("dual_mask_p_conflict_enabled", True))
+        self.dual_mask_update_overlap = bool(args.get("dual_mask_update_overlap", False))
+        self.dual_mask_applied_budget_log = bool(args.get("dual_mask_applied_budget_log", False))
+        self._update_overlap_dir = os.path.join(args.get("logdir", "logs"), "update_overlap")
 
         self.dual_mask_conflict_energy_adaptive = bool(args.get("dual_mask_conflict_energy_adaptive", False))
 
@@ -378,9 +389,9 @@ class Attention_LoRA(nn.Module):
         self.dual_mask_conflict_granularity = str(
             args.get("dual_mask_conflict_granularity", "layer")
         ).lower()
-        if self.dual_mask_conflict_granularity not in {"layer", "model", "projection"}:
+        if self.dual_mask_conflict_granularity not in {"layer", "model", "projection", "mixed"}:
             raise ValueError(
-                "dual_mask_conflict_granularity must be layer, model, or projection"
+                "dual_mask_conflict_granularity must be layer, model, projection, or mixed"
             )
 
         self.dual_mask_task0_gate_mode = str(args.get("dual_mask_task0_gate_mode", "full")).lower()
@@ -936,7 +947,7 @@ class Attention_LoRA(nn.Module):
     def global_conflict_candidate(self, task: int, isolated: bool):
         """Return cross-layer score, local reference mask, and valid coordinates."""
         task = int(task)
-        if self._effective_gate_mode() in {"unmasked", "protect_only"}:
+        if self._effective_gate_mode() in {"unmasked", "protect_only"} or not self._conflict_gate_enabled(isolated):
             return None
         if isolated:
             if task <= 0 or not self.use_plora or self.P_lora[task] is None:
@@ -1023,6 +1034,9 @@ class Attention_LoRA(nn.Module):
             return self.dual_mask_task0_gate_mode
         return "full"
 
+    def _conflict_gate_enabled(self, isolated):
+        return self.dual_mask_p_conflict_enabled if isolated else self.dual_mask_s_conflict_enabled
+
     def _safe_delta(
             self,
             delta: torch.Tensor,
@@ -1050,7 +1064,7 @@ class Attention_LoRA(nn.Module):
             protect_gate = 1.0 - protect_strength * protect_mask
 
         private_conflict_disabled = (isolated and self.dual_mask_private_conflict_mode == "none")
-        if gate_mode == "protect_only" or private_conflict_disabled:
+        if gate_mode == "protect_only" or private_conflict_disabled or not self._conflict_gate_enabled(isolated):
             conflict_gate = torch.ones_like(protect_gate)
         else:
             # conflict 高表示,W0 很重要，而且 LoRA 也想大幅修改这个位置
@@ -1099,7 +1113,7 @@ class Attention_LoRA(nn.Module):
             base_delta = delta
 
         private_conflict_disabled = (isolated and self.dual_mask_private_conflict_mode == "none")
-        if gate_mode == "protect_only" or private_conflict_disabled:
+        if gate_mode == "protect_only" or private_conflict_disabled or not self._conflict_gate_enabled(isolated):
             return base_delta, torch.zeros_like(delta)
 
         if isolated and self.dual_mask_private_conflict_mode == "plastic_norm_matched":
@@ -1318,6 +1332,7 @@ class Attention_LoRA(nn.Module):
                 self.dual_mask_conflict_merge_mode == "suppress"
                 and self._effective_gate_mode() == "full"
                 and self.dual_mask_private_conflict_mode != "none"
+                and self.dual_mask_p_conflict_enabled
         ):
             if self.dual_mask_private_conflict_mode == "plastic_norm_matched":
                 _, baseline_mask = self._branch_conflict(
@@ -1417,6 +1432,12 @@ class Attention_LoRA(nn.Module):
         conflict_strength = min(max(conflict_strength, 0.0), 1.0)
         # 总分支的冲突门削弱程度  把raw_total = S_raw + P_raw作为整体，估算只施加冲突门后，整体增量范数下降多少
         conflict_gate_suppression = self._conflict_gate_suppression(raw_total,conflict_mask,conflict_strength,)
+        if not (self.dual_mask_s_conflict_enabled and self.dual_mask_p_conflict_enabled):
+            base_total = torch.stack([
+                self._merge_base_and_conflict(item["raw_delta"], item["isolated"], conflict_ratio)[0]
+                for item in branch_deltas
+            ]).sum(dim=0)
+            conflict_gate_suppression = self._delta_stats(base_total, safe_total)["suppressed_ratio"]
         # 初始化 P 分支统计量
         private_mask_overlap = raw_total.new_zeros(())
         private_energy_overlap = raw_total.new_zeros(())
@@ -1463,7 +1484,7 @@ class Attention_LoRA(nn.Module):
             if selected_energy.sum() > 0.0:
                 private_energy_overlap = (selected_energy * plastic_mask.float()).sum() / selected_energy.sum()
 
-            if self.dual_mask_private_conflict_mode == "none":
+            if self.dual_mask_private_conflict_mode == "none" or not self.dual_mask_p_conflict_enabled:
                 actual_private_mask = torch.zeros_like(global_private_mask)
             elif self.dual_mask_private_conflict_mode == "plastic_norm_matched":
                 actual_private_mask, actual_private_strength = self._private_plastic_norm_matched_conflict(
@@ -1643,6 +1664,39 @@ class Attention_LoRA(nn.Module):
 
             for item in branch_deltas:
                 mask_delta(item, conflict_ratio, conflict_strength)
+
+            if self.dual_mask_applied_budget_log:
+                for item in branch_deltas:
+                    raw, safe = item["raw_delta"], item["safe_delta"]
+                    base, applied = self._merge_base_and_conflict(raw, item["isolated"], conflict_ratio)
+                    _, reference = self._joint_conflict(raw, conflict_ratio=conflict_ratio)
+                    if self._effective_gate_mode() == "unmasked":
+                        reference = torch.zeros_like(reference)
+                    error = (safe - base * (1 - conflict_strength * applied)).abs().max()
+                    logging.info("AppliedConflictBudget %s", json.dumps({
+                        "task": t, "layer": self.layer_idx, "branch": item["name"],
+                        "granularity": self.dual_mask_conflict_granularity,
+                        "local_fraction": self.args.get("dual_mask_conflict_local_fraction", None),
+                        "gate_enabled": self._conflict_gate_enabled(item["isolated"]),
+                        "reference_k": int(reference.sum()), "applied_k": int(applied.sum()),
+                        "qkv_density": [float(p.float().mean()) for p in applied.chunk(3, dim=0)],
+                        "removed_norm": float((base - safe).norm()),
+                        "merge_error": float(error),
+                    }))
+
+            if self.dual_mask_update_overlap:
+                from utils.update_overlap import UpdateOverlapRecorder
+                if self._update_overlap_recorder is None:
+                    self._update_overlap_recorder = UpdateOverlapRecorder(
+                        self._update_overlap_dir, self.layer_idx,
+                    )
+                for item in branch_deltas:
+                    self._update_overlap_recorder.record(
+                        t, item["name"], item["raw_delta"], item["safe_delta"],
+                    )
+                if t == len(self.S_lora) - 1:
+                    self._update_overlap_recorder.close()
+                    self._update_overlap_recorder = None
 
             self._save_dual_mask_snapshot(t, branch_deltas, conflict_ratio=conflict_ratio, conflict_strength=conflict_strength)
 

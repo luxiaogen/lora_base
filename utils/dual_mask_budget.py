@@ -5,6 +5,34 @@ from typing import Optional, Sequence
 import torch
 
 
+def select_mixed_budget_masks(scores, reference_masks, valid_masks, rho):
+    """Reserve floor(rho*K_l) locally, then allocate the remaining K globally.
+
+    rho=1 returns the original masks (including their tie behavior); rho=0
+    is exactly the existing model selector. No soft mask or extra budget.
+    """
+    if rho == 1.0:
+        return [mask.detach().clone() for mask in reference_masks]
+    if rho == 0.0:
+        return select_global_budget_masks(scores, reference_masks, valid_masks)
+    local, remaining = [], []
+    for score, reference, valid in zip(scores, reference_masks, valid_masks):
+        indices = (reference.bool() & valid.bool()).flatten().nonzero(as_tuple=True)[0]
+        k = int(rho * indices.numel())
+        chosen = torch.zeros_like(reference).flatten()
+        if k:
+            top = torch.topk(score.detach().flatten()[indices], k, sorted=False).indices
+            chosen[indices[top]] = 1
+        chosen = chosen.reshape_as(reference)
+        local.append(chosen)
+        remaining.append(reference * (1 - chosen))
+    global_masks = select_global_budget_masks(
+        scores, remaining,
+        [valid.bool() & ~chosen.bool() for valid, chosen in zip(valid_masks, local)],
+    )
+    return [chosen + extra for chosen, extra in zip(local, global_masks)]
+
+
 def select_global_budget_masks(
     scores: Sequence[torch.Tensor],
     reference_masks: Sequence[torch.Tensor],

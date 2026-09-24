@@ -24,6 +24,7 @@ from utils.task0_validation import evaluate_task0_holdout
 from utils.dual_mask_budget import (
     select_global_budget_masks,
     select_projection_budget_masks,
+    select_mixed_budget_masks,
 )
 
 
@@ -136,6 +137,7 @@ class Learner(BaseLearner):
         return str(self.args.get("dual_mask_conflict_granularity", "layer")).lower() in {
             "model",
             "projection",
+            "mixed",
         }
 
     @torch.no_grad()
@@ -170,7 +172,12 @@ class Learner(BaseLearner):
             scores = [candidate[0] for candidate in candidates]
             local_masks = [candidate[1] for candidate in candidates]
             valid_masks = [candidate[2] for candidate in candidates]
-            if granularity == "projection":
+            if granularity == "mixed":
+                global_masks = select_mixed_budget_masks(
+                    scores, local_masks, valid_masks,
+                    float(self.args.get("dual_mask_conflict_local_fraction", 0.5)),
+                )
+            elif granularity == "projection":
                 global_masks = select_projection_budget_masks(
                     scores,
                     local_masks,
