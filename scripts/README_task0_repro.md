@@ -47,3 +47,21 @@ bash scripts/9_24_imgr10_task0_batch_repro_3090.sh
 若输入先不同，检查数据加载与增强；若输入相同但更新后的参数不同，
 下一步检查该批前向、反向及 GPU 算子。哈希会让 GPU 参数同步到 CPU；
 这轮只用于定位，不作为性能实验。
+
+## Math-only attention 对照
+
+若上面两次运行的所有批次输入相同，但第 1 次参数更新就不同，
+用相同 seed1993、Task0、1 epoch 和逐批记录再重复两次；唯一算法开关是
+`disable_fused_sdpa=true`，即关闭 flash/memory-efficient SDPA，只允许 math SDPA。
+配置仍读取本机 `exps/dlora/imgr10.json` 的数据路径，不加载历史 checkpoint。
+
+```bash
+bash scripts/9_24_imgr10_task0_math_sdpa_repro_3090.sh
+```
+
+日志在 `logs/shell_logs/imgr10_task0_math_sdpa_repro_3090/`。
+先确认环境记录中的 flash 与 memory-efficient SDPA 都为 false，
+再比较两次运行每个 batch 的输入和更新后参数哈希。
+若两次 math-only 运行一致，而原默认后端的两次运行不一致，
+融合后端是待核查的差异来源；仅凭开关状态还不能断言原运行具体选择了哪个后端。
+若 math-only 仍分叉，就继续查第一次不同的梯度/算子，不能宣称这个开关修复了 Task0。

@@ -1,0 +1,25 @@
+{
+  "name": "imgr10_task0_math_sdpa_repro_3090",
+  "log_dir": "logs/shell_logs/imgr10_task0_math_sdpa_repro_3090",
+  "datasets": [{"name": "imgr10_task0", "config": "exps/dlora/imgr10.json"}],
+  "seeds": [1993],
+  "common_overrides": {
+    "max_tasks": 1,
+    "init_epoch": 1,
+    "epochs": 20,
+    "init_cls": 20,
+    "increment": 20,
+    "total_sessions": 10,
+    "ca_epochs": 5,
+    "dual_mask_reg_weight": 0.01,
+    "dual_mask_conflict_granularity": "layer",
+    "task0_repro_diagnostic": true,
+    "task0_repro_batch_diagnostic": true,
+    "disable_fused_sdpa": true,
+    "wandb_group": "imgr10_task0_math_sdpa_repro_3090"
+  },
+  "variants": [
+    {"name": "repeat1", "description": "Math-only SDPA, Task0 seed1993, batch trace 1", "overrides": {}},
+    {"name": "repeat2", "description": "Math-only SDPA, Task0 seed1993, batch trace 2", "overrides": {}}
+  ]
+}
