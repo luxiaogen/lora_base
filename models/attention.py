@@ -360,11 +360,7 @@ class Attention_LoRA(nn.Module):
 
         self.dual_mask_conflict_ratio = float(args.get("dual_mask_conflict_ratio", 0.25)) # Top-k 的比例参数  0.1
         self.dual_mask_conflict_budget_multiplier = float(args.get("dual_mask_conflict_budget_multiplier", 1.0))
-        if not math.isfinite(self.dual_mask_conflict_budget_multiplier) or self.dual_mask_conflict_budget_multiplier < 0:
-            raise ValueError("dual_mask_conflict_budget_multiplier must be finite and nonnegative")
         self.dual_mask_conflict_score_mode = str(args.get("dual_mask_conflict_score_mode", "conflict")).lower()
-        if self.dual_mask_conflict_score_mode not in {"conflict", "magnitude"}:
-            raise ValueError("dual_mask_conflict_score_mode must be conflict or magnitude")
         self.dual_mask_conflict_strength = float(args.get("dual_mask_conflict_strength", 1.0))  # 冲突区压制多强  也就是beta
 
         self.dual_mask_conflict_reg_enabled = bool(args.get("dual_mask_conflict_reg_enabled", True))
