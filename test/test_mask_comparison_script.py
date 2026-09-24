@@ -1,3 +1,4 @@
+import json
 import subprocess
 import unittest
 from pathlib import Path
@@ -43,6 +44,43 @@ class MaskComparisonScriptTests(unittest.TestCase):
         for command in commands[:3]:
             self.assertIn("dual_mask_conflict_score_mode=conflict", command)
         self.assertIn("dual_mask_conflict_score_mode=magnitude", commands[3])
+
+    def test_5090_fixed_budget_score_comparison_changes_only_score(self):
+        spec = json.loads((
+            ROOT / "scripts" / "sweeps" /
+            "imgr10_conflict_score_t10_seed1993_5090.json"
+        ).read_text())
+        self.assertEqual(spec["seeds"], [1993])
+        self.assertEqual(
+            [variant["name"] for variant in spec["variants"]],
+            ["conflict", "magnitude", "w_pre"],
+        )
+        self.assertEqual(
+            [variant["overrides"]["dual_mask_conflict_score_mode"]
+             for variant in spec["variants"]],
+            ["conflict", "magnitude", "w_pre"],
+        )
+        common = spec["common_overrides"]
+        self.assertEqual(common["dual_mask_conflict_granularity"], "layer")
+        self.assertEqual(common["dual_mask_conflict_ratio"], 0.1)
+        self.assertEqual(common["dual_mask_conflict_budget_multiplier"], 1.0)
+        self.assertFalse(common["dual_mask_conflict_energy_adaptive"])
+        self.assertFalse(common["dual_mask_conflict_reg_enabled"])
+        self.assertFalse(common["dual_mask_conflict_old_overlap_adaptive"])
+        self.assertTrue(common["disable_fused_sdpa"])
+        self.assertNotIn("data_path", common)
+
+        script = (
+            ROOT / "scripts" /
+            "9_24_imgr10_conflict_score_t10_seed1993_5090.sh"
+        ).read_text()
+        self.assertEqual(script.count("python main.py"), 3)
+        self.assertEqual(script.count("--set dual_mask_conflict_ratio=0.1"), 3)
+        self.assertEqual(script.count("--set dual_mask_conflict_energy_adaptive=false"), 3)
+        self.assertEqual(script.count("--set disable_fused_sdpa=true"), 3)
+        self.assertIn("git rev-parse --short HEAD", script)
+        self.assertNotIn("data_path=", script)
+        self.assertIn('cd "$(dirname "$0")/.."', script)
 
 
 if __name__ == "__main__":

@@ -885,7 +885,12 @@ class Attention_LoRA(nn.Module):
                 valid_mask,
                 ratio,
             )
-        selection_score = ba_importance if self.dual_mask_conflict_score_mode == "magnitude" else conflict_score
+        if self.dual_mask_conflict_score_mode == "magnitude":
+            selection_score = ba_importance
+        elif self.dual_mask_conflict_score_mode == "w_pre":
+            selection_score = _normalize_score(w0_importance)
+        else:
+            selection_score = conflict_score
         if self.dual_mask_conflict_budget_multiplier != 1.0 or self.dual_mask_conflict_score_mode != "conflict":
             reference_k = int(conflict_mask.bool().sum().item())
             valid = (
@@ -959,7 +964,12 @@ class Attention_LoRA(nn.Module):
         # between layers.
         ba_importance = _normalize_score(delta.detach().abs())
         w0_importance = self.w0_importance.to(device=delta.device, dtype=delta.dtype)
-        score = ba_importance if self.dual_mask_conflict_score_mode == "magnitude" else w0_importance * ba_importance
+        if self.dual_mask_conflict_score_mode == "magnitude":
+            score = ba_importance
+        elif self.dual_mask_conflict_score_mode == "w_pre":
+            score = _normalize_score(w0_importance)
+        else:
+            score = w0_importance * ba_importance
         return score, local_mask, valid_mask
 
     def _branch_conflict(
@@ -972,7 +982,12 @@ class Attention_LoRA(nn.Module):
         if self.global_conflict_masks_active:
             ba_importance = _normalize_score(delta.detach().abs())
             w0_importance = self.w0_importance.to(device=delta.device, dtype=delta.dtype)
-            score = w0_importance * ba_importance
+            if self.dual_mask_conflict_score_mode == "magnitude":
+                score = ba_importance
+            elif self.dual_mask_conflict_score_mode == "w_pre":
+                score = _normalize_score(w0_importance)
+            else:
+                score = w0_importance * ba_importance
             mask = self.global_p_conflict_mask if isolated else self.global_s_conflict_mask
             mask = mask.to(device=delta.device, dtype=delta.dtype)
             if valid_mask is not None:

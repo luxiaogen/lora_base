@@ -1,0 +1,59 @@
+{
+  "name": "imgr10_conflict_score_t10_seed1993_5090",
+  "log_dir": "logs/shell_logs/imgr10_conflict_score_t10_seed1993_5090",
+  "datasets": [
+    {
+      "name": "imgr10_t10",
+      "config": "exps/dlora/imgr10.json"
+    }
+  ],
+  "seeds": [1993],
+  "common_overrides": {
+    "max_tasks": 10,
+    "init_epoch": 20,
+    "init_lr": 0.02,
+    "epochs": 20,
+    "init_cls": 20,
+    "increment": 20,
+    "total_sessions": 10,
+    "ca_epochs": 5,
+    "dual_mask_reg_weight": 0.01,
+    "dual_mask_conflict_reg_enabled": false,
+    "dual_mask_conflict_energy_adaptive": false,
+    "dual_mask_conflict_old_overlap_adaptive": false,
+    "dual_mask_conflict_ratio": 0.1,
+    "dual_mask_conflict_strength": 0.5,
+    "dual_mask_conflict_granularity": "layer",
+    "dual_mask_conflict_budget_multiplier": 1.0,
+    "dual_mask_private_conflict_mode": "global",
+    "task0_validation_enabled": false,
+    "disable_fused_sdpa": true,
+    "wandb_group": "imgr10_conflict_score_t10_seed1993_5090"
+  },
+  "variants": [
+    {
+      "name": "conflict",
+      "description": "DualMask score: normalized W_pre importance times normalized LoRA update magnitude",
+      "overrides": {
+        "dual_mask_conflict_score_mode": "conflict",
+        "wandb_tags": "imgr10,t10,seed1993,ca5,fixed10,score_conflict"
+      }
+    },
+    {
+      "name": "magnitude",
+      "description": "Magnitude-only score at the same fixed 10 percent coordinate budget",
+      "overrides": {
+        "dual_mask_conflict_score_mode": "magnitude",
+        "wandb_tags": "imgr10,t10,seed1993,ca5,fixed10,score_magnitude"
+      }
+    },
+    {
+      "name": "w_pre",
+      "description": "W_pre-only importance score at the same fixed 10 percent coordinate budget",
+      "overrides": {
+        "dual_mask_conflict_score_mode": "w_pre",
+        "wandb_tags": "imgr10,t10,seed1993,ca5,fixed10,score_w_pre"
+      }
+    }
+  ]
+}

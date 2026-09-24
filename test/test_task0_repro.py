@@ -235,6 +235,38 @@ class Task0ReproTests(unittest.TestCase):
         self.assertTrue(full_common['disable_fused_sdpa'])
         self.assertNotIn('data_path', full_common)
 
+    def test_task0_e30_full_t10_changes_only_initial_epochs(self):
+        root = Path(__file__).resolve().parents[1]
+        sweep_dir = root / 'scripts/sweeps'
+        baseline = json.loads((
+            sweep_dir / 'imgr10_math_sdpa_baseline_t10_seed1993_3090.json'
+        ).read_text())
+        candidate = json.loads((
+            sweep_dir / 'imgr10_task0_e30_t10_seed1993_3090.json'
+        ).read_text())
+
+        self.assertEqual(candidate['datasets'], baseline['datasets'])
+        self.assertEqual(candidate['seeds'], baseline['seeds'])
+        self.assertEqual(len(candidate['variants']), 1)
+        common = dict(candidate['common_overrides'])
+        self.assertEqual(common.pop('init_epoch'), 30)
+        common.pop('wandb_group')
+        baseline_common = dict(baseline['common_overrides'])
+        self.assertEqual(baseline_common.pop('init_epoch'), 20)
+        baseline_common.pop('wandb_group')
+        self.assertEqual(common, baseline_common)
+
+        script = (
+            root / 'scripts/9_24_imgr10_task0_e30_t10_seed1993_3090.sh'
+        ).read_text()
+        self.assertEqual(script.count('python main.py'), 1)
+        self.assertEqual(script.count('--set init_epoch=30'), 1)
+        self.assertEqual(script.count('--set task0_validation_enabled=false'), 1)
+        self.assertEqual(script.count('--set disable_fused_sdpa=true'), 1)
+        self.assertIn('git rev-parse --short HEAD', script)
+        self.assertNotIn('data_path=', script)
+        self.assertIn('cd "$(dirname "$0")/.."', script)
+
 
 if __name__ == '__main__':
     unittest.main()

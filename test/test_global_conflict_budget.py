@@ -193,6 +193,26 @@ class GlobalBudgetSelectionTests(unittest.TestCase):
         self.assertEqual(int(selected.sum().item()), int(reference.sum().item()))
         self.assertFalse(torch.equal(selected, reference))
 
+    def test_w_pre_only_uses_same_budget_and_pretrained_importance_score(self):
+        delta = torch.arange(48, dtype=torch.float32).reshape(12, 4)
+        baseline = self._make_attention(granularity="layer")
+        w_pre_only = self._make_attention(
+            granularity="layer",
+            dual_mask_conflict_score_mode="w_pre",
+        )
+        importance = torch.arange(48, 0, -1, dtype=torch.float32).reshape(12, 4)
+        baseline.w0_importance.copy_(importance)
+        w_pre_only.w0_importance.copy_(importance)
+
+        _, reference = baseline._joint_conflict(delta)
+        score, selected = w_pre_only._joint_conflict(delta)
+
+        expected_score = importance - importance.min()
+        expected_score = expected_score / expected_score.max()
+        self.assertTrue(torch.equal(score, expected_score))
+        self.assertEqual(int(selected.sum().item()), int(reference.sum().item()))
+        self.assertFalse(torch.equal(selected, reference))
+
     def test_scaled_budget_respects_valid_mask_and_unmasked_task0(self):
         module = self._make_attention(
             granularity="layer",
