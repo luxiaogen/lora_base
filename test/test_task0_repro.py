@@ -75,6 +75,24 @@ class Task0ReproTests(unittest.TestCase):
         self.assertNotIn('data_path=', script)
         self.assertIn('cd "$(dirname "$0")/.."', script)
 
+    def test_batch_sweep_changes_only_the_trace_length(self):
+        root = Path(__file__).resolve().parents[1]
+        spec = json.loads((root / 'scripts/sweeps/imgr10_task0_batch_repro_3090.json').read_text())
+        self.assertEqual(spec['seeds'], [1993])
+        self.assertEqual(len(spec['variants']), 2)
+        self.assertTrue(all(v['overrides'] == {} for v in spec['variants']))
+        common = spec['common_overrides']
+        self.assertEqual(common['max_tasks'], 1)
+        self.assertEqual(common['init_epoch'], 1)
+        self.assertEqual(common['dual_mask_reg_weight'], 0.01)
+        self.assertTrue(common['task0_repro_batch_diagnostic'])
+        self.assertNotIn('data_path', common)
+        script = (root / 'scripts/9_24_imgr10_task0_batch_repro_3090.sh').read_text()
+        self.assertEqual(script.count('python main.py'), 2)
+        self.assertEqual(script.count('--set init_epoch=1'), 2)
+        self.assertNotIn('data_path=', script)
+        self.assertIn('cd "$(dirname "$0")/.."', script)
+
 
 if __name__ == '__main__':
     unittest.main()

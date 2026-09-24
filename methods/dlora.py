@@ -855,6 +855,7 @@ class Learner(BaseLearner):
             loss_type='cosface',s=self.scale,m=self.margin,label_smoothing=label_smoothing,)
 
         repro = self._cur_task == 0 and self.args.get('task0_repro_diagnostic', False)
+        batch_repro = repro and self.args.get('task0_repro_batch_diagnostic', False)
         if repro:
             log_record('initial', **model_fingerprint(self._network))
 
@@ -867,6 +868,9 @@ class Learner(BaseLearner):
             training_metric_batches = 0
 
             for i, (sample_indices, inputs, targets) in enumerate(train_loader):
+                if batch_repro:
+                    batch_input_hash = tensor_hash([('inputs', inputs)])
+                    batch_indices_hash = tensor_hash([('indices', sample_indices)])
                 if repro and i == 0:
                     log_record('first_batch', epoch=epoch + 1,
                                indices=sample_indices.tolist(), targets=targets.tolist(),
@@ -912,7 +916,16 @@ class Learner(BaseLearner):
                     targets,
                 )
 
-                losses += loss.item()
+                batch_loss = loss.item()
+                losses += batch_loss
+                if batch_repro:
+                    log_record('batch', epoch=epoch + 1, batch=i + 1,
+                               indices_sha256=batch_indices_hash,
+                               input_sha256=batch_input_hash,
+                               loss=batch_loss,
+                               trainable_sha256=tensor_hash(
+                                   (n, p) for n, p in self._network.named_parameters() if p.requires_grad
+                               ))
 
                 _, preds = torch.max(logits, dim=1)
                 correct += preds.eq(targets.expand_as(preds)).cpu().sum()
