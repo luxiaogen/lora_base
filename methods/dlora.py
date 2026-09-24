@@ -19,6 +19,7 @@ from torch.distributions.multivariate_normal import MultivariateNormal
 from utils.toolkit import count_parameters
 from models.losses import AngularPenaltySMLoss
 from contextlib import ExitStack
+from utils.task0_repro import tensor_hash, model_fingerprint, log_record, log_environment
 from utils.dual_mask_budget import (
     select_global_budget_masks,
     select_projection_budget_masks,
@@ -701,6 +702,10 @@ class Learner(BaseLearner):
         self.test_loader = DataLoader(test_dataset, batch_size=self.batch_size, shuffle=False,
                                       num_workers=self.num_workers, pin_memory=True)
 
+        if self._cur_task == 0 and self.args.get('task0_repro_diagnostic', False):
+            log_environment(self.args, train_dataset, test_dataset)
+            log_record('class_order', classes=list(map(int, data_manager._class_order)))
+
         track_w0 = bool(self.args.get("dual_mask_track_w0_metrics", False))
         # 开启参数自适应 --- 也就是使用训练集测试W0原型的能力
         competence_adaptive = bool(self.args.get("dual_mask_competence_adaptive", False))
@@ -849,6 +854,10 @@ class Learner(BaseLearner):
         loss_cos:AngularPenaltySMLoss = AngularPenaltySMLoss(
             loss_type='cosface',s=self.scale,m=self.margin,label_smoothing=label_smoothing,)
 
+        repro = self._cur_task == 0 and self.args.get('task0_repro_diagnostic', False)
+        if repro:
+            log_record('initial', **model_fingerprint(self._network))
+
         for _, epoch in enumerate(prog_bar):
             self._network.train()
 
@@ -857,7 +866,11 @@ class Learner(BaseLearner):
             training_metric_totals = {}
             training_metric_batches = 0
 
-            for i, (_, inputs, targets) in enumerate(train_loader):
+            for i, (sample_indices, inputs, targets) in enumerate(train_loader):
+                if repro and i == 0:
+                    log_record('first_batch', epoch=epoch + 1,
+                               indices=sample_indices.tolist(), targets=targets.tolist(),
+                               input_sha256=tensor_hash([('inputs', inputs)]))
                 inputs, targets = inputs.to(self._device), targets.to(self._device)
                 mask = (targets >= self._known_classes).nonzero().view(-1)
                 inputs = torch.index_select(inputs, 0, mask)
@@ -928,6 +941,11 @@ class Learner(BaseLearner):
             ) + metric_info
             prog_bar.set_description(info)
 
+            if repro:
+                log_record('epoch', epoch=epoch + 1, loss=losses / len(train_loader),
+                           train_accuracy=float(train_acc),
+                           trainable_sha256=tensor_hash((n, p) for n, p in self._network.named_parameters() if p.requires_grad))
+
         if self._global_conflict_enabled():
             self._refresh_global_conflict_masks(log_summary=True)
 
@@ -982,6 +1000,9 @@ class Learner(BaseLearner):
 
     def eval_task(self):
         result = super().eval_task()
+        if self._cur_task == 0 and self.args.get('task0_repro_diagnostic', False):
+            log_record('final', accuracy=float(result[0]['top1']),
+                       **model_fingerprint(self._network))
         before = getattr(self, "_ca_before_metrics", None)
         if before is not None:
             after = result[0]['grouped']
