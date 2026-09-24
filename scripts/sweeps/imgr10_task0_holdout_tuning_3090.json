@@ -1,0 +1,51 @@
+{
+  "name": "imgr10_task0_holdout_tuning_3090",
+  "log_dir": "logs/shell_logs/imgr10_task0_holdout_tuning_3090",
+  "datasets": [
+    {
+      "name": "imgr10_task0",
+      "config": "exps/dlora/imgr10.json"
+    }
+  ],
+  "seeds": [1993],
+  "common_overrides": {
+    "max_tasks": 1,
+    "epochs": 20,
+    "init_cls": 20,
+    "increment": 20,
+    "total_sessions": 10,
+    "ca_epochs": 5,
+    "dual_mask_reg_weight": 0.01,
+    "dual_mask_conflict_granularity": "layer",
+    "task0_validation_enabled": true,
+    "task0_validation_holdout_mod": 5,
+    "disable_fused_sdpa": true,
+    "wandb_group": "imgr10_task0_holdout_tuning_3090"
+  },
+  "variants": [
+    {
+      "name": "base_e20_lr002",
+      "description": "Task0 train-only holdout baseline: init_epoch=20, init_lr=0.02",
+      "overrides": {
+        "init_epoch": 20,
+        "init_lr": 0.02
+      }
+    },
+    {
+      "name": "e30_lr002",
+      "description": "Task0 train-only holdout epoch check: init_epoch=30, init_lr=0.02",
+      "overrides": {
+        "init_epoch": 30,
+        "init_lr": 0.02
+      }
+    },
+    {
+      "name": "e20_lr001",
+      "description": "Task0 train-only holdout learning-rate check: init_epoch=20, init_lr=0.01",
+      "overrides": {
+        "init_epoch": 20,
+        "init_lr": 0.01
+      }
+    }
+  ]
+}

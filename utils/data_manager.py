@@ -131,6 +131,41 @@ class DataManager(object):
         return DummyDataset(train_data, train_targets, trsf, self.use_path), \
             DummyDataset(val_data, val_targets, trsf, self.use_path)
 
+    def get_dataset_with_deterministic_holdout(self, indices, source, holdout_mod):
+        if source == 'train':
+            x, y = self._train_data, self._train_targets
+        elif source == 'test':
+            x, y = self._test_data, self._test_targets
+        else:
+            raise ValueError('Unknown data source {}.'.format(source))
+
+        train_data, train_targets = [], []
+        holdout_data, holdout_targets = [], []
+        for idx in indices:
+            class_data, class_targets = self._select(x, y, low_range=idx, high_range=idx + 1)
+            holdout = np.arange(len(class_data)) % int(holdout_mod) == 0
+            train_data.append(class_data[~holdout])
+            train_targets.append(class_targets[~holdout])
+            holdout_data.append(class_data[holdout])
+            holdout_targets.append(class_targets[holdout])
+
+        train_trsf = transforms.Compose([*self._train_trsf, *self._common_trsf])
+        holdout_trsf = transforms.Compose([*self._test_trsf, *self._common_trsf])
+        return (
+            DummyDataset(
+                np.concatenate(train_data),
+                np.concatenate(train_targets),
+                train_trsf,
+                self.use_path,
+            ),
+            DummyDataset(
+                np.concatenate(holdout_data),
+                np.concatenate(holdout_targets),
+                holdout_trsf,
+                self.use_path,
+            ),
+        )
+
     def _setup_data(self, dataset_name, shuffle, seed):
         idata = _get_idata(dataset_name, self.args)
         idata.download_data()

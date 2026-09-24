@@ -20,6 +20,7 @@ from utils.toolkit import count_parameters
 from models.losses import AngularPenaltySMLoss
 from contextlib import ExitStack
 from utils.task0_repro import tensor_hash, model_fingerprint, log_record, log_environment
+from utils.task0_validation import evaluate_task0_holdout
 from utils.dual_mask_budget import (
     select_global_budget_masks,
     select_projection_budget_masks,
@@ -119,6 +120,9 @@ class Learner(BaseLearner):
         self._weight_drift_curve = []
 
         self._functional_merge_calibration = None
+
+        self._task0_holdout_loss_curve = []
+        self._task0_holdout_accuracy_curve = []
 
         for layer_idx, module in enumerate(self._iter_lora_modules()):
             module.layer_idx = layer_idx
@@ -693,8 +697,29 @@ class Learner(BaseLearner):
 
         logging.info('Learning on {}-{}'.format(self._known_classes, self._total_classes))
 
-        train_dataset = data_manager.get_dataset(np.arange(self._known_classes, self._total_classes), source='train',
-                                                 mode='train')
+        task_classes = np.arange(self._known_classes, self._total_classes)
+        self.task0_validation_loader = None
+        if self._cur_task == 0 and bool(self.args.get('task0_validation_enabled', False)):
+            train_dataset, validation_dataset = data_manager.get_dataset_with_deterministic_holdout(
+                task_classes,
+                source='train',
+                holdout_mod=int(self.args.get('task0_validation_holdout_mod', 5)),
+            )
+            self.task0_validation_loader = DataLoader(
+                validation_dataset,
+                batch_size=self.batch_size,
+                shuffle=False,
+                num_workers=self.num_workers,
+                pin_memory=True,
+            )
+            logging.info(
+                'Task0 deterministic train holdout: train=%s, holdout=%s, holdout_mod=%s',
+                len(train_dataset),
+                len(validation_dataset),
+                int(self.args.get('task0_validation_holdout_mod', 5)),
+            )
+        else:
+            train_dataset = data_manager.get_dataset(task_classes, source='train', mode='train')
         self.train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True,
                                        num_workers=self.num_workers, pin_memory=True)  # 随机增强视图：用于优化 LoRA
         # 拿到所有已见类的 test set
@@ -864,6 +889,7 @@ class Learner(BaseLearner):
 
             losses = 0.
             correct, total = 0, 0
+            epoch_lr = float(optimizer.param_groups[0]['lr'])
             training_metric_totals = {}
             training_metric_batches = 0
 
@@ -954,10 +980,37 @@ class Learner(BaseLearner):
             ) + metric_info
             prog_bar.set_description(info)
 
+            validation_loader = getattr(self, 'task0_validation_loader', None)
+            if self._cur_task == 0 and validation_loader is not None:
+                holdout = evaluate_task0_holdout(
+                    self._network,
+                    validation_loader,
+                    loss_cos,
+                    device=self._device,
+                    cuda_devices=[
+                        device.index for device in self._multiple_gpus if device.type == 'cuda'
+                    ],
+                    known_classes=self._known_classes,
+                )
+                self._task0_holdout_loss_curve.append(holdout['loss'])
+                self._task0_holdout_accuracy_curve.append(holdout['accuracy'])
+                logging.info(
+                    'Task0 Holdout, Epoch %s/%s => Loss %.6f, Accuracy %.2f, LR %.8f',
+                    epoch + 1,
+                    self.run_epoch,
+                    holdout['loss'],
+                    holdout['accuracy'],
+                    epoch_lr,
+                )
+
             if repro:
                 log_record('epoch', epoch=epoch + 1, loss=losses / len(train_loader),
                            train_accuracy=float(train_acc),
                            trainable_sha256=tensor_hash((n, p) for n, p in self._network.named_parameters() if p.requires_grad))
+
+        if self._cur_task == 0 and getattr(self, 'task0_validation_loader', None) is not None:
+            logging.info('Task0 Holdout loss curve: %s', self._task0_holdout_loss_curve)
+            logging.info('Task0 Holdout accuracy curve: %s', self._task0_holdout_accuracy_curve)
 
         if self._global_conflict_enabled():
             self._refresh_global_conflict_masks(log_summary=True)

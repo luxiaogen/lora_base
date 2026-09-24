@@ -5,11 +5,80 @@ import unittest
 
 import numpy as np
 import torch
+from torch.utils.data import DataLoader, Dataset
 
+from models.losses import AngularPenaltySMLoss
+from utils.data_manager import DataManager
+from utils.task0_validation import evaluate_task0_holdout
 from utils.task0_repro import tensor_hash, model_fingerprint, log_record
 
 
 class Task0ReproTests(unittest.TestCase):
+    def test_task0_holdout_split_is_deterministic_balanced_and_disjoint(self):
+        manager = DataManager.__new__(DataManager)
+        manager._train_data = np.arange(20)
+        manager._train_targets = np.repeat([0, 1], 10)
+        manager._train_trsf = [lambda image: image]
+        manager._test_trsf = [lambda image: image]
+        manager._common_trsf = []
+        manager.use_path = False
+
+        train_a, holdout_a = manager.get_dataset_with_deterministic_holdout(
+            [0, 1], source='train', holdout_mod=5,
+        )
+        train_b, holdout_b = manager.get_dataset_with_deterministic_holdout(
+            [0, 1], source='train', holdout_mod=5,
+        )
+
+        self.assertEqual(len(train_a), 16)
+        self.assertEqual(len(holdout_a), 4)
+        self.assertEqual(np.bincount(train_a.labels).tolist(), [8, 8])
+        self.assertEqual(np.bincount(holdout_a.labels).tolist(), [2, 2])
+        self.assertFalse(set(train_a.images.tolist()) & set(holdout_a.images.tolist()))
+        np.testing.assert_array_equal(train_a.images, train_b.images)
+        np.testing.assert_array_equal(holdout_a.images, holdout_b.images)
+
+    def test_task0_holdout_evaluation_restores_rng_and_training_mode(self):
+        class TinyDataset(Dataset):
+            def __len__(self):
+                return 4
+
+            def __getitem__(self, index):
+                inputs = torch.tensor([float(index), 1.0])
+                return index, inputs, index % 2
+
+        class TinyNetwork(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.linear = torch.nn.Linear(2, 2)
+
+            def forward(self, inputs):
+                return {'logits': torch.nn.functional.normalize(self.linear(inputs), dim=1)}
+
+        network = TinyNetwork()
+        network.train()
+        loader = DataLoader(TinyDataset(), batch_size=2, shuffle=False)
+        loss = AngularPenaltySMLoss(loss_type='cosface', s=20.0, m=0.1)
+        torch_state = torch.get_rng_state().clone()
+        np_state = np.random.get_state()
+        py_state = random.getstate()
+
+        metrics = evaluate_task0_holdout(
+            network,
+            loader,
+            loss,
+            device=torch.device('cpu'),
+            cuda_devices=[],
+            known_classes=0,
+        )
+
+        self.assertTrue(network.training)
+        self.assertTrue(torch.equal(torch_state, torch.get_rng_state()))
+        self.assertTrue(np.array_equal(np_state[1], np.random.get_state()[1]))
+        self.assertEqual(py_state, random.getstate())
+        self.assertIn('loss', metrics)
+        self.assertIn('accuracy', metrics)
+
     def test_hash_includes_names_shapes_and_values(self):
         x = torch.arange(6).reshape(2, 3)
         self.assertEqual(tensor_hash([('x', x)]), tensor_hash([('x', x.clone())]))
@@ -138,6 +207,33 @@ class Task0ReproTests(unittest.TestCase):
         self.assertNotIn('task0_repro_batch_diagnostic', script)
         self.assertNotIn('data_path=', script)
         self.assertIn('cd "$(dirname "$0")/.."', script)
+
+    def test_task0_holdout_tuning_and_full_baseline_scripts_are_separate(self):
+        root = Path(__file__).resolve().parents[1]
+        sweep_dir = root / 'scripts/sweeps'
+        tuning = json.loads((sweep_dir / 'imgr10_task0_holdout_tuning_3090.json').read_text())
+        self.assertEqual(tuning['seeds'], [1993])
+        self.assertEqual([variant['name'] for variant in tuning['variants']],
+                         ['base_e20_lr002', 'e30_lr002', 'e20_lr001'])
+        common = tuning['common_overrides']
+        self.assertEqual(common['max_tasks'], 1)
+        self.assertTrue(common['task0_validation_enabled'])
+        self.assertEqual(common['task0_validation_holdout_mod'], 5)
+        self.assertTrue(common['disable_fused_sdpa'])
+        self.assertNotIn('data_path', common)
+
+        full = json.loads((sweep_dir / 'imgr10_math_sdpa_baseline_t10_seed1993_3090.json').read_text())
+        self.assertEqual(full['seeds'], [1993])
+        self.assertEqual(len(full['variants']), 1)
+        full_common = full['common_overrides']
+        self.assertEqual(full_common['max_tasks'], 10)
+        self.assertFalse(full_common['task0_validation_enabled'])
+        self.assertEqual(full_common['init_epoch'], 20)
+        self.assertEqual(full_common['init_lr'], 0.02)
+        self.assertEqual(full_common['ca_epochs'], 5)
+        self.assertEqual(full_common['dual_mask_reg_weight'], 0.01)
+        self.assertTrue(full_common['disable_fused_sdpa'])
+        self.assertNotIn('data_path', full_common)
 
 
 if __name__ == '__main__':

@@ -79,3 +79,26 @@ bash scripts/9_24_imgr10_task0_math_sdpa_full_repro_3090.sh
 日志在 `logs/shell_logs/imgr10_task0_math_sdpa_full_repro_3090/`。
 三次运行固定 seed1993、原 T10 的 Task0 类别、20 epochs、CA5 配置和 reg weight=0.01；
 Task0 本身不执行 CA。配置仍使用本机 JSON 的 `data_path`，不加载或挑选历史 checkpoint。
+
+## Task0 训练内 holdout 调参
+
+固定从每类训练样本中按原始顺序每 5 个取 1 个作为 holdout。holdout 使用测试预处理，
+不参与梯度更新；其余约 80% 样本继续使用训练增强。三组只比较：
+
+- 20 epochs，init_lr=0.02；
+- 30 epochs，init_lr=0.02；
+- 20 epochs，init_lr=0.01。
+
+三组均使用 math-only SDPA。每轮日志包含 `Task0 Holdout` 的 loss、accuracy 和当轮学习率；
+测试集结果不能用于选择设置。
+
+```bash
+bash scripts/9_24_imgr10_task0_holdout_tuning_3090.sh
+```
+
+正式完整 T10 基线关闭 holdout，Task0 使用全部训练样本，并恢复当前基线的
+20 epochs、init_lr=0.02：
+
+```bash
+bash scripts/9_24_imgr10_math_sdpa_baseline_t10_seed1993_3090.sh
+```
