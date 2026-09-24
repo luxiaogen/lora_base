@@ -17,9 +17,9 @@ from utils.dual_mask_budget import (  # noqa: E402
 
 class GlobalBudgetSelectionTests(unittest.TestCase):
     @staticmethod
-    def _make_attention(granularity="model"):
+    def _make_attention(granularity="model", **overrides):
         module = Attention_LoRA(dim=4, num_heads=1, r=2, n_tasks=2)
-        module._init_params({
+        args = {
             "use_slora": True,
             "use_plora": True,
             "dual_mask_importance": "svd",
@@ -34,7 +34,9 @@ class GlobalBudgetSelectionTests(unittest.TestCase):
             "dual_mask_competence_adaptive": False,
             "dual_mask_protect_strength_mode": "legacy_linear",
             "lora_A_init": "kaiming",
-        })
+        }
+        args.update(overrides)
+        module._init_params(args)
         module.cur_task = 1
         module.w0_importance.fill_(1.0)
         return module
@@ -150,6 +152,60 @@ class GlobalBudgetSelectionTests(unittest.TestCase):
     def test_projection_mode_is_accepted(self):
         module = self._make_attention(granularity="projection")
         self.assertEqual(module.dual_mask_conflict_granularity, "projection")
+
+    def test_scaled_budget_is_relative_to_actual_reference_mask(self):
+        delta = torch.arange(48, dtype=torch.float32).reshape(12, 4)
+        baseline = self._make_attention(
+            granularity="layer",
+            dual_mask_conflict_energy_adaptive=True,
+        )
+        baseline.w0_importance.copy_(torch.linspace(0.1, 1.0, 48).reshape(12, 4))
+        _, reference = baseline._joint_conflict(delta)
+        reference_k = int(reference.sum().item())
+        self.assertGreater(reference_k, 0)
+
+        for multiplier in (0.5, 1.0, 1.5):
+            module = self._make_attention(
+                granularity="layer",
+                dual_mask_conflict_energy_adaptive=True,
+                dual_mask_conflict_budget_multiplier=multiplier,
+            )
+            module.w0_importance.copy_(baseline.w0_importance)
+            _, selected = module._joint_conflict(delta)
+            expected_k = min(delta.numel(), int(reference_k * multiplier + 0.5))
+            self.assertEqual(int(selected.sum().item()), expected_k)
+            if multiplier == 1.0:
+                self.assertTrue(torch.equal(selected, reference))
+
+    def test_magnitude_only_uses_same_budget_but_different_score(self):
+        delta = torch.arange(48, dtype=torch.float32).reshape(12, 4)
+        baseline = self._make_attention(granularity="layer")
+        magnitude = self._make_attention(
+            granularity="layer",
+            dual_mask_conflict_score_mode="magnitude",
+        )
+        importance = torch.ones_like(delta)
+        importance[:, 2:] = 0.01
+        baseline.w0_importance.copy_(importance)
+        magnitude.w0_importance.copy_(importance)
+        _, reference = baseline._joint_conflict(delta)
+        _, selected = magnitude._joint_conflict(delta)
+        self.assertEqual(int(selected.sum().item()), int(reference.sum().item()))
+        self.assertFalse(torch.equal(selected, reference))
+
+    def test_scaled_budget_respects_valid_mask_and_unmasked_task0(self):
+        module = self._make_attention(
+            granularity="layer",
+            dual_mask_conflict_budget_multiplier=1.5,
+        )
+        module.dual_mask_task0_gate_mode = "unmasked"
+        delta = torch.arange(48, dtype=torch.float32).reshape(12, 4)
+        valid = torch.zeros_like(delta)
+        valid[:, :2] = 1
+        _, selected = module._joint_conflict(delta, valid_mask=valid)
+        self.assertEqual(int((selected * (1 - valid)).sum().item()), 0)
+        module.cur_task = 0
+        self.assertTrue(torch.equal(module._safe_delta(delta, isolated=False), delta))
 
     def test_private_merge_diagnostic_uses_applied_projection_mask(self):
         module = self._make_attention(granularity="projection")

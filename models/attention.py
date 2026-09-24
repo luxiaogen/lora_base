@@ -275,6 +275,8 @@ class Attention_LoRA(nn.Module):
         self.last_svd_energy_coverage = 0.0
 
         self.dual_mask_conflict_ratio = 0.25  # 决定 BA-W0 冲突区多大
+        self.dual_mask_conflict_budget_multiplier = 1.0
+        self.dual_mask_conflict_score_mode = "conflict"
         self.dual_mask_conflict_strength = 1.0  # 决定冲突区压制多强
 
         self.dual_mask_conflict_reg_enabled = True
@@ -357,6 +359,12 @@ class Attention_LoRA(nn.Module):
         self.dual_mask_svd_energy_coverage = float(args.get("dual_mask_svd_energy_coverage", 0.0))
 
         self.dual_mask_conflict_ratio = float(args.get("dual_mask_conflict_ratio", 0.25)) # Top-k 的比例参数  0.1
+        self.dual_mask_conflict_budget_multiplier = float(args.get("dual_mask_conflict_budget_multiplier", 1.0))
+        if not math.isfinite(self.dual_mask_conflict_budget_multiplier) or self.dual_mask_conflict_budget_multiplier < 0:
+            raise ValueError("dual_mask_conflict_budget_multiplier must be finite and nonnegative")
+        self.dual_mask_conflict_score_mode = str(args.get("dual_mask_conflict_score_mode", "conflict")).lower()
+        if self.dual_mask_conflict_score_mode not in {"conflict", "magnitude"}:
+            raise ValueError("dual_mask_conflict_score_mode must be conflict or magnitude")
         self.dual_mask_conflict_strength = float(args.get("dual_mask_conflict_strength", 1.0))  # 冲突区压制多强  也就是beta
 
         self.dual_mask_conflict_reg_enabled = bool(args.get("dual_mask_conflict_reg_enabled", True))
@@ -407,6 +415,8 @@ class Attention_LoRA(nn.Module):
             "Dual-mask branch: importance=%(importance)s, "
             "protect_ratio=%(protect_ratio).3f, svd_rank=%(svd_rank)s, "
             "conflict_strength=%(conflict_strength).3f, "
+            "conflict_budget_multiplier=%(conflict_budget_multiplier).3f, "
+            "conflict_score_mode=%(conflict_score_mode)s, "
             "conflict_energy_adaptive=%(conflict_energy_adaptive)s, "
             "conflict_energy_ratio_floor=%(conflict_energy_ratio_floor)s, "
             "task0_gate_mode=%(task0_gate_mode)s, "
@@ -423,6 +433,8 @@ class Attention_LoRA(nn.Module):
                 "svd_rank": self.dual_mask_svd_rank,
                 "conflict_ratio": self.dual_mask_conflict_ratio,
                 "conflict_strength": self.dual_mask_conflict_strength,
+                "conflict_budget_multiplier": self.dual_mask_conflict_budget_multiplier,
+                "conflict_score_mode": self.dual_mask_conflict_score_mode,
                 "conflict_energy_adaptive": self.dual_mask_conflict_energy_adaptive,
                 "conflict_energy_ratio_floor": self.dual_mask_conflict_energy_ratio_floor,
                 "private_conflict_mode": self.dual_mask_private_conflict_mode,
@@ -877,7 +889,26 @@ class Attention_LoRA(nn.Module):
                 valid_mask,
                 ratio,
             )
-        return conflict_score, conflict_mask
+        selection_score = ba_importance if self.dual_mask_conflict_score_mode == "magnitude" else conflict_score
+        if self.dual_mask_conflict_budget_multiplier != 1.0 or self.dual_mask_conflict_score_mode != "conflict":
+            reference_k = int(conflict_mask.bool().sum().item())
+            valid = (
+                torch.ones_like(conflict_mask, dtype=torch.bool).flatten()
+                if valid_mask is None else valid_mask.detach().bool().flatten()
+            )
+            valid_indices = valid.nonzero(as_tuple=True)[0]
+            budget = min(valid_indices.numel(), int(reference_k * self.dual_mask_conflict_budget_multiplier + 0.5))
+            selected = torch.zeros_like(conflict_mask).flatten()
+            if budget > 0:
+                selected_indices = torch.topk(
+                    selection_score.detach().float().flatten()[valid_indices],
+                    budget,
+                    largest=True,
+                    sorted=False,
+                ).indices
+                selected[valid_indices[selected_indices]] = 1
+            conflict_mask = selected.reshape_as(conflict_mask)
+        return selection_score, conflict_mask
 
     def clear_global_conflict_masks(self):
         self.global_conflict_masks_active = False
@@ -932,7 +963,7 @@ class Attention_LoRA(nn.Module):
         # between layers.
         ba_importance = _normalize_score(delta.detach().abs())
         w0_importance = self.w0_importance.to(device=delta.device, dtype=delta.dtype)
-        score = w0_importance * ba_importance
+        score = ba_importance if self.dual_mask_conflict_score_mode == "magnitude" else w0_importance * ba_importance
         return score, local_mask, valid_mask
 
     def _branch_conflict(
