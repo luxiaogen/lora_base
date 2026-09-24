@@ -65,3 +65,17 @@ bash scripts/9_24_imgr10_task0_math_sdpa_repro_3090.sh
 若两次 math-only 运行一致，而原默认后端的两次运行不一致，
 融合后端是待核查的差异来源；仅凭开关状态还不能断言原运行具体选择了哪个后端。
 若 math-only 仍分叉，就继续查第一次不同的梯度/算子，不能宣称这个开关修复了 Task0。
+
+## Math-only 完整 Task0 三重复
+
+逐批 1 epoch 对照一致后，恢复 Task0 的 `init_epoch=20`，在同一台 3090 上独立运行三次。
+这一步不再输出每个 batch 的哈希，只保留初始状态、每个 epoch 和最终模型记录，
+验证完整训练后的准确率与模型哈希是否稳定。
+
+```bash
+bash scripts/9_24_imgr10_task0_math_sdpa_full_repro_3090.sh
+```
+
+日志在 `logs/shell_logs/imgr10_task0_math_sdpa_full_repro_3090/`。
+三次运行固定 seed1993、原 T10 的 Task0 类别、20 epochs、CA5 配置和 reg weight=0.01；
+Task0 本身不执行 CA。配置仍使用本机 JSON 的 `data_path`，不加载或挑选历史 checkpoint。

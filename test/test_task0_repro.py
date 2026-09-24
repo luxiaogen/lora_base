@@ -115,6 +115,30 @@ class Task0ReproTests(unittest.TestCase):
         self.assertNotIn('data_path=', script)
         self.assertIn('cd "$(dirname "$0")/.."', script)
 
+    def test_full_math_sdpa_sweep_matches_full_task0_baseline(self):
+        root = Path(__file__).resolve().parents[1]
+        sweep_dir = root / 'scripts/sweeps'
+        baseline = json.loads((sweep_dir / 'imgr10_task0_repro_3090.json').read_text())
+        candidate = json.loads((sweep_dir / 'imgr10_task0_math_sdpa_full_repro_3090.json').read_text())
+        self.assertEqual(candidate['datasets'], baseline['datasets'])
+        self.assertEqual(candidate['seeds'], baseline['seeds'])
+        self.assertEqual([v['name'] for v in candidate['variants']],
+                         [v['name'] for v in baseline['variants']])
+        self.assertTrue(all(v['overrides'] == {} for v in candidate['variants']))
+        common = dict(candidate['common_overrides'])
+        self.assertTrue(common.pop('disable_fused_sdpa'))
+        common.pop('wandb_group')
+        baseline_common = dict(baseline['common_overrides'])
+        baseline_common.pop('wandb_group')
+        self.assertEqual(common, baseline_common)
+        script = (root / 'scripts/9_24_imgr10_task0_math_sdpa_full_repro_3090.sh').read_text()
+        self.assertEqual(script.count('python main.py'), 3)
+        self.assertEqual(script.count('--set init_epoch=20'), 3)
+        self.assertEqual(script.count('--set disable_fused_sdpa=true'), 3)
+        self.assertNotIn('task0_repro_batch_diagnostic', script)
+        self.assertNotIn('data_path=', script)
+        self.assertIn('cd "$(dirname "$0")/.."', script)
+
 
 if __name__ == '__main__':
     unittest.main()
