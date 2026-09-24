@@ -131,14 +131,8 @@ class DataManager(object):
         return DummyDataset(train_data, train_targets, trsf, self.use_path), \
             DummyDataset(val_data, val_targets, trsf, self.use_path)
 
-    def get_dataset_with_deterministic_holdout(self, indices, source, holdout_mod):
-        if source == 'train':
-            x, y = self._train_data, self._train_targets
-        elif source == 'test':
-            x, y = self._test_data, self._test_targets
-        else:
-            raise ValueError('Unknown data source {}.'.format(source))
-
+    def get_train_dataset_with_deterministic_holdout(self, indices, holdout_mod):
+        x, y = self._train_data, self._train_targets
         train_data, train_targets = [], []
         holdout_data, holdout_targets = [], []
         for idx in indices:

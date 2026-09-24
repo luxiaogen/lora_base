@@ -700,9 +700,8 @@ class Learner(BaseLearner):
         task_classes = np.arange(self._known_classes, self._total_classes)
         self.task0_validation_loader = None
         if self._cur_task == 0 and bool(self.args.get('task0_validation_enabled', False)):
-            train_dataset, validation_dataset = data_manager.get_dataset_with_deterministic_holdout(
+            train_dataset, validation_dataset = data_manager.get_train_dataset_with_deterministic_holdout(
                 task_classes,
-                source='train',
                 holdout_mod=int(self.args.get('task0_validation_holdout_mod', 5)),
             )
             self.task0_validation_loader = DataLoader(

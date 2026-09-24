@@ -23,11 +23,11 @@ class Task0ReproTests(unittest.TestCase):
         manager._common_trsf = []
         manager.use_path = False
 
-        train_a, holdout_a = manager.get_dataset_with_deterministic_holdout(
-            [0, 1], source='train', holdout_mod=5,
+        train_a, holdout_a = manager.get_train_dataset_with_deterministic_holdout(
+            [0, 1], holdout_mod=5,
         )
-        train_b, holdout_b = manager.get_dataset_with_deterministic_holdout(
-            [0, 1], source='train', holdout_mod=5,
+        train_b, holdout_b = manager.get_train_dataset_with_deterministic_holdout(
+            [0, 1], holdout_mod=5,
         )
 
         self.assertEqual(len(train_a), 16)
