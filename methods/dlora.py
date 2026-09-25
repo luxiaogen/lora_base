@@ -779,6 +779,23 @@ class Learner(BaseLearner):
             self._stage2_compact_classifier( # CA 分类器对齐
                 self.task_sizes[-1],ca_epochs=int(self.args.get("ca_epochs", 5)),)
 
+    def _lora_optimizer_groups(self, flora_params, other_params, lr, weight_decay):
+        groups = [
+            {'params': flora_params, 'lr': lr, 'momentum': 0.9, 'weight_decay': weight_decay},
+            {'params': other_params, 'lr': lr, 'momentum': 0.9, 'weight_decay': weight_decay},
+        ]
+        multiplier = float(self.args.get('plora_lr_multiplier', 1.0))
+        # Keep the legacy grouping for Task0 and the default multiplier.
+        if self._cur_task > 0 and multiplier != 1.0:
+            private_params = [p for name, p in self._network.named_parameters()
+                              if p.requires_grad and 'p_lora' in name.lower().split('.')]
+            if private_params:
+                private_ids = {id(p) for p in private_params}
+                groups[0]['params'] = [p for p in flora_params if id(p) not in private_ids]
+                groups.append({'params': private_params, 'lr': lr * multiplier,
+                               'momentum': 0.9, 'weight_decay': weight_decay})
+        return groups
+
     def _train(self, train_loader, test_loader):
         try:
             current_task = self._network.module.numtask - 1  # 多卡
@@ -827,10 +844,14 @@ class Learner(BaseLearner):
 
         lr = self.init_lr if self._cur_task == 0 else self.lrate
         weight_decay = self.init_weight_decay if self._cur_task == 0 else self.weight_decay
-        param_groups = [
-            {'params': flora_params, 'lr': lr, 'momentum': 0.9, 'weight_decay': weight_decay},
-            {'params': other_params, 'lr': lr, 'momentum': 0.9, 'weight_decay': weight_decay}
-        ]
+        param_groups = self._lora_optimizer_groups(flora_params, other_params, lr, weight_decay)
+        logging.info(
+            'LoRA optimizer groups: task=%s, configured_P_multiplier=%s, '
+            'order=LoRA/classifier[/P], scalars=%s, initial_lrs=%s',
+            self._cur_task, self.args.get('plora_lr_multiplier', 1.0),
+            [sum(p.numel() for p in group['params']) for group in param_groups],
+            [group['lr'] for group in param_groups],
+        )
         ############################## set learning rates ##################################
 
         if self._cur_task == 0:
@@ -896,6 +917,8 @@ class Learner(BaseLearner):
             losses = 0.
             correct, total = 0, 0
             epoch_lr = float(optimizer.param_groups[0]['lr'])
+            logging.info('LoRA learning rates: task=%s, epoch=%s, order=LoRA/classifier[/P], lrs=%s',
+                         self._cur_task, epoch + 1, [group['lr'] for group in optimizer.param_groups])
             training_metric_totals = {}
             training_metric_batches = 0
 
