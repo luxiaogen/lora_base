@@ -343,9 +343,15 @@ class Learner(BaseLearner):
             for module in modules:
                 task = self._cur_task
                 if self.args.get("use_slora", True):
-                    conflict_losses.append(module._joint_conflict_regularization(module.S_lora[task],isolated=False,))
+                    branch_loss = module._joint_conflict_regularization(module.S_lora[task],isolated=False,)
+                    if not self.args.get('dual_mask_s_reg_enabled', True):
+                        branch_loss = branch_loss * 0.0
+                    conflict_losses.append(branch_loss)
                 if (task > 0 and self.args.get("use_plora", True) and hasattr(module, "P_lora") and module.P_lora[task] is not None):
-                    conflict_losses.append(module._joint_conflict_regularization(module.P_lora[task],isolated=True,))
+                    branch_loss = module._joint_conflict_regularization(module.P_lora[task],isolated=True,)
+                    if not self.args.get('dual_mask_p_reg_enabled', True):
+                        branch_loss = branch_loss * 0.0
+                    conflict_losses.append(branch_loss)
             if conflict_losses:
                 weighted_mask_reg = reg_weight * torch.stack(conflict_losses).mean()
                 weighted_losses.append(weighted_mask_reg)
