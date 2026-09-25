@@ -457,10 +457,26 @@ class Learner(BaseLearner):
 
     def _backward_and_step(self, task_loss, extra_loss, optimizer, output, targets):
         """Optimization extension point used by experimental learners."""
+        direction_context = getattr(self, '_p_step_context', None)
+        if direction_context is not None:
+            from utils.p_step_direction import prepare_step, finish_step
+            snapshots = prepare_step(self._iter_lora_modules(), task_loss)
         loss = task_loss if extra_loss is None else task_loss + extra_loss
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         optimizer.step()
+        if direction_context is not None:
+            mode, epoch, batch, detailed = direction_context
+            probe_records = [] if detailed else None
+            counts = finish_step(snapshots, mode, epoch, batch, detailed, probe_records)
+            if detailed:
+                from utils.p_step_direction import probe_directions
+                inputs, loss_function = self._p_step_probe
+                metrics = probe_directions(self._network, probe_records, inputs, targets, loss_function)
+                logging.info('PStepProbe %s', dict(task=self._cur_task, epoch=epoch + 1,
+                             batch=batch + 1, mode=mode, training_batch=True, metrics=metrics))
+            for key, value in counts.items():
+                self._p_step_counts[key] = self._p_step_counts.get(key, 0) + value
         return loss
     # 临时把所有 LoRA Attention 层切回原始预训练权重 W_pre，提取一份不受增量学习影响的参考特征，使用完后再恢复当前模型
     def _pretrained_anchor_context(self):
@@ -1036,6 +1052,14 @@ class Learner(BaseLearner):
                         training_metric_totals[name] = (training_metric_totals.get(name, 0.0) + value)
                     training_metric_batches += 1
 
+                direction_mode = self.args.get('p_step_direction', 'off')
+                self._p_step_context = None
+                if i == 0:
+                    self._p_step_counts = {}
+                if (self._cur_task > 0 and direction_mode != 'off'
+                        and i % int(self.args.get('p_step_interval', 5)) == 0):
+                    self._p_step_context = (direction_mode, epoch, i, i == 0 and epoch in (0, 9, 19))
+                    self._p_step_probe = (inputs, loss_cos)
                 loss = self._backward_and_step(
                     task_loss,
                     extra_loss,
@@ -1043,6 +1067,10 @@ class Learner(BaseLearner):
                     output,
                     targets,
                 )
+                self._p_step_probe = None
+                if self._p_step_context is not None and i == 0:
+                    logging.info('PStepSchedule task=%s epoch=%s interval=%s mode=%s',
+                                 self._cur_task, epoch + 1, self.args.get('p_step_interval', 5), direction_mode)
 
                 batch_loss = loss.item()
                 losses += batch_loss
@@ -1059,6 +1087,10 @@ class Learner(BaseLearner):
                 correct += preds.eq(targets.expand_as(preds)).cpu().sum()
                 total += len(targets)
 
+            if getattr(self, '_p_step_counts', None):
+                logging.info('PStepSummary %s', dict(task=self._cur_task, epoch=epoch + 1,
+                             mode=self.args.get('p_step_direction'), **self._p_step_counts))
+            self._p_step_context = None
             scheduler.step()
             train_acc = np.around(tensor2numpy(correct) * 100 / total, decimals=2)
 

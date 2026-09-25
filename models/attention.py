@@ -1043,11 +1043,12 @@ class Attention_LoRA(nn.Module):
             isolated: bool,
             conflict_ratio: Optional[float] = None,
             conflict_strength: Optional[float] = None,
+            return_details: bool = False,
     ) -> torch.Tensor:
 
         gate_mode = self._effective_gate_mode()
         if gate_mode == "unmasked":
-            return delta
+            return (delta, torch.ones_like(delta), torch.zeros_like(delta)) if return_details else delta
 
         # general_mask/protect_mask: W0 重要区域，应该保护
         protect_mask = self.general_mask.to(device=delta.device, dtype=delta.dtype)
@@ -1064,6 +1065,7 @@ class Attention_LoRA(nn.Module):
             protect_gate = 1.0 - protect_strength * protect_mask
 
         private_conflict_disabled = (isolated and self.dual_mask_private_conflict_mode == "none")
+        conflict_mask = torch.zeros_like(delta) if return_details else None
         if gate_mode == "protect_only" or private_conflict_disabled or not self._conflict_gate_enabled(isolated):
             conflict_gate = torch.ones_like(protect_gate)
         else:
@@ -1088,7 +1090,8 @@ class Attention_LoRA(nn.Module):
             gate = plastic_mask * conflict_gate
         else:
             gate = protect_gate * conflict_gate  # [2304,768]
-        return delta * gate
+        safe = delta * gate
+        return (safe, gate, conflict_mask) if return_details else safe
 
     def _merge_base_and_conflict(
             self,
