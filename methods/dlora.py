@@ -17,7 +17,7 @@ from models.attention import Attention_LoRA
 from utils.schedulers import CosineSchedule
 from torch.distributions.multivariate_normal import MultivariateNormal
 from utils.toolkit import count_parameters
-from models.losses import AngularPenaltySMLoss
+from models.losses import AngularPenaltySMLoss, representation_steering_loss
 from contextlib import ExitStack
 from utils.task0_repro import tensor_hash, model_fingerprint, log_record, log_environment
 from utils.task0_validation import evaluate_task0_holdout
@@ -65,6 +65,11 @@ class Learner(BaseLearner):
             "selected_ratio": selected_ratio.detach(),
             "violation_ratio": violation_ratio.detach(),
         }
+
+    def _training_margin(self):
+        if self._cur_task == 0:
+            return float(self.args.get('task0_margin', self.margin))
+        return self.margin
 
     def __init__(self, args):
         super().__init__(args)
@@ -124,6 +129,7 @@ class Learner(BaseLearner):
 
         self._task0_holdout_loss_curve = []
         self._task0_holdout_accuracy_curve = []
+        self._task0_holdout_class_margin_curve = []
 
         for layer_idx, module in enumerate(self._iter_lora_modules()):
             module.layer_idx = layer_idx
@@ -303,6 +309,8 @@ class Learner(BaseLearner):
 
         anchor_task0_only = bool(self.args.get("dual_mask_anchor_reg_task0_only", False))
         anchor_applies = (anchor_enabled and anchor_weight > 0.0 and (not anchor_task0_only or self._cur_task == 0))
+        rs_weight = float(self.args.get('task0_rs_weight', 0.0))
+        rs_applies = self._cur_task == 0 and rs_weight > 0.0
 
         safe_residual_enabled = bool(self.args.get("dual_mask_safe_residual_enabled", False))
         safe_residual_weight = float(self.args.get("dual_mask_safe_residual_weight", 0.0))
@@ -328,7 +336,8 @@ class Learner(BaseLearner):
         self._last_training_loss_metrics = {}
         self._sampled_weighted_mask_reg = None
         if (reg_weight <= 0.0
-                and not anchor_applies and not safe_residual_applies and not selective_anchor_applies):
+                and not anchor_applies and not rs_applies
+                and not safe_residual_applies and not selective_anchor_applies):
             return None
 
         modules = [
@@ -363,6 +372,15 @@ class Learner(BaseLearner):
             weighted_anchor = anchor_weight * anchor_regularization
             weighted_losses.append(weighted_anchor)
             self._last_training_loss_metrics.update({"anchor_reg": anchor_regularization.detach(),"anchor_reg_weighted": weighted_anchor.detach(),})
+        if rs_applies:
+            rs_loss = representation_steering_loss(output['features'], targets)
+            ramp = min(1.0, current_epoch / 4.0)
+            weighted_rs = rs_weight * ramp * rs_loss
+            weighted_losses.append(weighted_rs)
+            self._last_training_loss_metrics.update({
+                'task0_rs': rs_loss.detach(),
+                'task0_rs_weighted': weighted_rs.detach(),
+            })
         if safe_residual_applies and modules:
           safe_residual_losses = [
               module.safe_residual_regularization()
@@ -946,8 +964,13 @@ class Learner(BaseLearner):
         label_smoothing = float(self.args.get('label_smoothing', 0.0))
         if (bool(self.args.get('label_smoothing_task0_only', False)) and self._cur_task != 0):
             label_smoothing = 0.0
+        training_margin = self._training_margin()
         loss_cos:AngularPenaltySMLoss = AngularPenaltySMLoss(
+            loss_type='cosface',s=self.scale,m=training_margin,label_smoothing=label_smoothing,)
+        holdout_loss_cos = AngularPenaltySMLoss(
             loss_type='cosface',s=self.scale,m=self.margin,label_smoothing=label_smoothing,)
+        logging.info('CosFace margin: task=%s train=%.3f holdout_reference=%.3f',
+                     self._cur_task, training_margin, self.margin)
 
         repro = self._cur_task == 0 and self.args.get('task0_repro_diagnostic', False)
         batch_repro = repro and self.args.get('task0_repro_batch_diagnostic', False)
@@ -1064,7 +1087,7 @@ class Learner(BaseLearner):
                 holdout = evaluate_task0_holdout(
                     self._network,
                     validation_loader,
-                    loss_cos,
+                    holdout_loss_cos,
                     device=self._device,
                     cuda_devices=[
                         device.index for device in self._multiple_gpus if device.type == 'cuda'
@@ -1073,12 +1096,17 @@ class Learner(BaseLearner):
                 )
                 self._task0_holdout_loss_curve.append(holdout['loss'])
                 self._task0_holdout_accuracy_curve.append(holdout['accuracy'])
+                self._task0_holdout_class_margin_curve.append(holdout['class_margin'])
                 logging.info(
-                    'Task0 Holdout, Epoch %s/%s => Loss %.6f, Accuracy %.2f, LR %.8f',
+                    'Task0 Holdout, Epoch %s/%s => Loss %.6f, Accuracy %.2f, Class margin %.6f, '
+                    'Class variance %.6f, Min centroid margin %.6f, LR %.8f',
                     epoch + 1,
                     self.run_epoch,
                     holdout['loss'],
                     holdout['accuracy'],
+                    holdout['class_margin'],
+                    holdout['class_variance'],
+                    holdout['min_centroid_margin'],
                     epoch_lr,
                 )
 
@@ -1090,6 +1118,7 @@ class Learner(BaseLearner):
         if self._cur_task == 0 and getattr(self, 'task0_validation_loader', None) is not None:
             logging.info('Task0 Holdout loss curve: %s', self._task0_holdout_loss_curve)
             logging.info('Task0 Holdout accuracy curve: %s', self._task0_holdout_accuracy_curve)
+            logging.info('Task0 Holdout class margin curve: %s', self._task0_holdout_class_margin_curve)
 
         if self._global_conflict_enabled():
             self._refresh_global_conflict_masks(log_summary=True)

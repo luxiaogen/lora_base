@@ -2,6 +2,19 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
+
+def representation_steering_loss(features, labels):
+    """RSIAT base-task pairwise feature loss (CVPR 2026)."""
+    features = F.normalize(features, dim=1)
+    similarities = features @ features.t()
+    same_class = labels[:, None].eq(labels[None, :])
+    positive = same_class & ~torch.eye(len(labels), dtype=torch.bool, device=labels.device)
+    negative = ~same_class
+    positive_loss = (F.relu(1.0 - similarities) * positive).sum() / positive.sum().clamp_min(1)
+    negative_loss = (F.relu(similarities - 0.4) * negative).sum() / negative.sum().clamp_min(1)
+    return positive_loss + 1.5 * negative_loss
+
+
 class AngularPenaltySMLoss(nn.Module):
     def __init__(
             self,

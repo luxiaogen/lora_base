@@ -1,0 +1,57 @@
+{
+  "name": "imgr10_task0_steering_screen_t3_3090",
+  "log_dir": "logs/shell_logs/imgr10_task0_steering_screen_t3_3090",
+  "datasets": [
+    {
+      "name": "imgr10_t3",
+      "config": "exps/dlora/imgr10.json"
+    }
+  ],
+  "seeds": [1993],
+  "common_overrides": {
+    "max_tasks": 3,
+    "init_epoch": 20,
+    "init_lr": 0.02,
+    "epochs": 20,
+    "ca_epochs": 5,
+    "dual_mask_reg_weight": 0.01,
+    "dual_mask_conflict_granularity": "layer",
+    "dual_mask_anchor_reg_enabled": true,
+    "dual_mask_anchor_reg_task0_only": true,
+    "dual_mask_anchor_reg_weight": 10.0,
+    "task0_margin": 0.1,
+    "task0_rs_weight": 0.0,
+    "task0_validation_enabled": true,
+    "task0_validation_holdout_mod": 5,
+    "disable_fused_sdpa": true,
+    "wandb_group": "imgr10_task0_steering_screen_t3_3090"
+  },
+  "variants": [
+    {
+      "name": "baseline",
+      "description": "Reference: Task0 margin 0.10, anchor weight 10",
+      "overrides": {}
+    },
+    {
+      "name": "task0_margin015",
+      "description": "Only Task0 CosFace margin 0.10 to 0.15",
+      "overrides": {
+        "task0_margin": 0.15
+      }
+    },
+    {
+      "name": "anchor5",
+      "description": "Only Task0 anchor weight 10 to 5",
+      "overrides": {
+        "dual_mask_anchor_reg_weight": 5.0
+      }
+    },
+    {
+      "name": "task0_rs",
+      "description": "Only add RSIAT-inspired Task0 representation-steering loss (weight 0.5)",
+      "overrides": {
+        "task0_rs_weight": 0.5
+      }
+    }
+  ]
+}
