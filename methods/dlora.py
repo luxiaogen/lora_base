@@ -326,6 +326,7 @@ class Learner(BaseLearner):
         )
 
         self._last_training_loss_metrics = {}
+        self._sampled_weighted_mask_reg = None
         if (reg_weight <= 0.0
                 and not anchor_applies and not safe_residual_applies and not selective_anchor_applies):
             return None
@@ -346,7 +347,10 @@ class Learner(BaseLearner):
                 if (task > 0 and self.args.get("use_plora", True) and hasattr(module, "P_lora") and module.P_lora[task] is not None):
                     conflict_losses.append(module._joint_conflict_regularization(module.P_lora[task],isolated=True,))
             if conflict_losses:
-                weighted_losses.append(reg_weight * torch.stack(conflict_losses).mean())
+                weighted_mask_reg = reg_weight * torch.stack(conflict_losses).mean()
+                weighted_losses.append(weighted_mask_reg)
+                if getattr(self, '_sample_mask_reg_grad', False):
+                    self._sampled_weighted_mask_reg = weighted_mask_reg
 
         if anchor_applies and modules:
             anchor_regularization = torch.stack([module.anchor_regularization() for module in modules]).mean()
@@ -393,6 +397,39 @@ class Learner(BaseLearner):
         if not weighted_losses:
             return None
         return torch.stack(weighted_losses).sum()
+
+    def _log_mask_reg_gradients(self, task_loss, epoch, batch):
+        """Read-only gradients of classification and the applied mask penalty on B."""
+        weighted_reg = self._sampled_weighted_mask_reg
+        for branch, attribute in (('S', 'S_lora'), ('P', 'P_lora')):
+            params = []
+            for module in self._iter_lora_modules():
+                unit = getattr(module, attribute)[self._cur_task]
+                if unit is not None and unit.B_weight.requires_grad:
+                    params.append(unit.B_weight)
+            if not params:
+                continue
+            task_grads = torch.autograd.grad(task_loss, params, retain_graph=True, allow_unused=True)
+            reg_grads = (torch.autograd.grad(weighted_reg, params, retain_graph=True, allow_unused=True)
+                         if weighted_reg is not None else (None,) * len(params))
+            task_sq, reg_sq, dot = task_loss.new_zeros(()), task_loss.new_zeros(()), task_loss.new_zeros(())
+            for task_grad, reg_grad in zip(task_grads, reg_grads):
+                if task_grad is not None:
+                    task_sq = task_sq + task_grad.detach().float().square().sum()
+                if reg_grad is not None:
+                    reg_sq = reg_sq + reg_grad.detach().float().square().sum()
+                if task_grad is not None and reg_grad is not None:
+                    dot = dot + (task_grad.detach().float() * reg_grad.detach().float()).sum()
+            task_norm, reg_norm = float(task_sq.sqrt()), float(reg_sq.sqrt())
+            logging.info('MaskRegGrad %s', {
+                'task': self._cur_task, 'epoch': epoch + 1, 'batch': batch + 1, 'branch': branch,
+                'reg_weight': float(self.args.get('dual_mask_reg_weight', 0.1)),
+                'task_grad_norm': task_norm, 'weighted_reg_grad_norm': reg_norm,
+                'reg_to_task_ratio': reg_norm / task_norm if task_norm > 0 else None,
+                'cosine': float(dot) / (task_norm * reg_norm) if task_norm > 0 and reg_norm > 0 else None,
+                'weighted_reg_loss': float(weighted_reg.detach()) if weighted_reg is not None else 0.0,
+            })
+        self._sampled_weighted_mask_reg = None
 
     def _backward_and_step(self, task_loss, extra_loss, optimizer, output, targets):
         """Optimization extension point used by experimental learners."""
@@ -948,6 +985,10 @@ class Learner(BaseLearner):
                 logits = output['logits']
                 task_loss = loss_cos(logits, targets)
 
+                self._sample_mask_reg_grad = (
+                    bool(self.args.get('dual_mask_reg_grad_diagnostic', False))
+                    and self._cur_task > 0 and i == 0 and epoch in (0, 9, 19)
+                )
                 extra_loss = self._extra_training_loss(
                     output=output,
                     inputs=inputs,
@@ -955,6 +996,9 @@ class Learner(BaseLearner):
                     epoch=epoch,
                     batch_context=batch_context,
                 )
+
+                if self._sample_mask_reg_grad:
+                    self._log_mask_reg_gradients(task_loss, epoch, i)
 
                 batch_training_metrics = getattr(self,"_last_training_loss_metrics",{},)
                 if batch_training_metrics: # 只负责汇总、显示额外损失的统计值
