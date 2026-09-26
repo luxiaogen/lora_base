@@ -25,7 +25,7 @@ def check_spec(spec):
         assert "data_path" not in settings
         assert 0 <= settings.get("dual_mask_conflict_local_fraction", .5) <= 1
         assert settings["dual_mask_private_conflict_mode"] == "global"
-        if 'p_step_direction' in settings:
+        if settings.get('p_step_direction', 'off') != 'off':
             assert settings['p_step_direction'] in ('baseline', 'norm', 'conflict')
             assert settings['p_step_interval'] > 0
             assert settings['optim'] == 'sgd'
@@ -44,7 +44,7 @@ def main():
     assert data_path.is_dir(), f"JSON data_path does not exist: {data_path}"
     print("Dataset from machine JSON:", data_path)
     sources = ["models/attention.py", "methods/dlora.py", "utils/dual_mask_budget.py",
-               "utils/update_overlap.py", "utils/p_step_direction.py", "trainer.py", "main.py"]
+               "utils/update_overlap.py", "utils/p_step_direction.py", "utils/stage_audit.py", "trainer.py", "main.py"]
     snapshot = {
         "revision": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
         "source_sha256": {p: hashlib.sha256((ROOT / p).read_bytes()).hexdigest() for p in sources},

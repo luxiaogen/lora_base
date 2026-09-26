@@ -809,6 +809,10 @@ class Learner(BaseLearner):
         test_dataset = data_manager.get_dataset(np.arange(0, self._total_classes), source='test', mode='test')
         self.test_loader = DataLoader(test_dataset, batch_size=self.batch_size, shuffle=False,
                                       num_workers=self.num_workers, pin_memory=True)
+        self._stage_audit = None
+        if self.args.get('stage_audit', False):
+            from utils.stage_audit import StageAudit
+            self._stage_audit = StageAudit(self._cur_task, self._known_classes)
 
         if self._cur_task == 0 and self.args.get('task0_repro_diagnostic', False):
             log_environment(self.args, train_dataset, test_dataset)
@@ -855,6 +859,9 @@ class Learner(BaseLearner):
         if self._cur_task > 0 and self.args['ca'] is True:
             self._stage2_compact_classifier( # CA 分类器对齐
                 self.task_sizes[-1],ca_epochs=int(self.args.get("ca_epochs", 5)),)
+        if self._stage_audit is not None:
+            self._stage_audit.record('post_ca', self._network, self.test_loader, self._device)
+            self._stage_audit = None
 
     def _lora_optimizer_groups(self, flora_params, other_params, lr, weight_decay):
         groups = [
@@ -960,12 +967,16 @@ class Learner(BaseLearner):
         if bool(self.args.get("dual_mask_functional_merge_calibration", False)):
             calibration_loader = getattr(self, "w0_loader", train_loader)
             self._calibrate_functional_merge(calibration_loader)
+        if self._stage_audit is not None:
+            self._stage_audit.record('pre_merge', self._network, test_loader, self._device)
             
         with torch.no_grad():
             # Task t 的 LoRA刚训练完，但增量还没有融合进主干网络 W0
             print('*' * 10 + 'Extrace features for merging shared component!' + '*' * 10)
             for module in lora_modules:
                 module.after_task(task=self._cur_task)
+        if self._stage_audit is not None:
+            self._stage_audit.record('post_merge', self._network, test_loader, self._device)
 
     def train_function(self, train_loader, test_loader, optimizer, scheduler):
         logging.info('Trainable params: {}'.format(count_parameters(self._network, True)))
