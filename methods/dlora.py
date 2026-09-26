@@ -463,7 +463,8 @@ class Learner(BaseLearner):
         network = self._network.module if isinstance(self._network, torch.nn.DataParallel) else self._network
         old_weights = torch.cat([head.weight.detach() for head in network.classifier_pool[:self._cur_task]])
         raw, active = old_competition_loss(output['features'], output['logits'], targets,
-                                          old_weights, float(self.args['scale']))
+                                          old_weights, float(self.args['scale']),
+                                          detach_old=self.args.get('old_competition_detach_old', False))
         weighted = weight * raw
         return weighted, {'old_competition_scaled_hinge': raw.detach(),
                           'old_competition_weighted': weighted.detach(),
