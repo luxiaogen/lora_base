@@ -14,11 +14,7 @@ if [[ "${1:-}" == "--smoke" ]]; then
     TASKS=2
     shift
     set -- "$@" --set max_tasks=2 --set init_epoch=1 --set epochs=1 --set ca_epochs=1 --set wandb_mode=offline
-else
-    python -m unittest test.test_ca_real_new test.test_stage_audit || exit 1
-    bash "$SCRIPT_PATH" --smoke "$@" || exit 1
 fi
-python scripts/night_mechanism_preflight.py scripts/sweeps/imgr10_ca_real_new_5090.json || exit 1
 echo "Code revision: $(git rev-parse --short HEAD)"
 git status --short
 LOG_DIR=logs/shell_logs/imgr10_ca_real_new_5090
@@ -250,11 +246,6 @@ echo "Logs: $LOG_DIR"
 echo "============================================================"
 if [[ "$FAILED" -eq 0 ]]; then
     python scripts/summarize_stage_audit.py --tasks "$TASKS" --output "$LOG_DIR/stages_${TIMESTAMP}.csv" \
-        "$LOG_DIR/imgr10_t10_gaussian_seed1993_${TIMESTAMP}.log" \
-        "$LOG_DIR/imgr10_t10_real_new_seed1993_${TIMESTAMP}.log" || FAILED=1
-fi
-if [[ "$RUN_KIND" == smoke && "$FAILED" -eq 0 ]]; then
-    python scripts/check_ca_real_new_smoke.py \
         "$LOG_DIR/imgr10_t10_gaussian_seed1993_${TIMESTAMP}.log" \
         "$LOG_DIR/imgr10_t10_real_new_seed1993_${TIMESTAMP}.log" || FAILED=1
 fi

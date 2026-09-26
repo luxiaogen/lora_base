@@ -31,9 +31,9 @@ are changed. Scripts log effective config/revision and stage-audit CSVs.
 5090: `bash scripts/9_26_imgr10_ca_real_new_5090.sh`
 
 Add `--smoke` for only the paired one-epoch Task0–1 smoke, or `--dry-run` to inspect
-full commands. Full launch automatically runs tests then smoke first. Smoke checks
-complete stage reports, matching Task0 and Task1 pre-CA accuracy, source engagement,
-and no competition loss; matching accuracy is not proof of identical parameters.
+full commands. Full launch directly runs the two full experiments; smoke is optional.
+There is no runtime accuracy-equality assertion or automatic test/preflight gate.
+Run tests separately with `python -m unittest test.test_ca_real_new test.test_stage_audit`.
 Local tests separately verify identical default weights/RNG versus e78251c, paired
 old samples/global RNG, retained class counts, cache lifetime, and unchanged backbone.
 

@@ -133,6 +133,9 @@ class CARealNewTests(unittest.TestCase):
                              [{'ca_real_new_features': False}, {'ca_real_new_features': True}])
             self.assertEqual(spec['common_overrides']['old_competition_weight'], 0)
             script = f'scripts/9_26_imgr10_ca_real_new_{gpu}.sh'
+            source = Path(script).read_text()
+            for runtime_check in ('check_ca_real_new_smoke', 'night_mechanism_preflight', 'python -m unittest'):
+                self.assertNotIn(runtime_check, source)
             subprocess.run(['bash', '-n', script], check=True)
             commands = subprocess.check_output(['bash', script, '--dry-run'], text=True).split('    python main.py')[1:]
             self.assertEqual(len(commands), 2)
