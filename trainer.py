@@ -10,6 +10,7 @@ import numpy as np
 from utils import factory
 from utils.data_manager import DataManager
 from utils.toolkit import count_parameters
+from utils.run_record import start_run_record, update_run_record
 import random
 
 def _init_experiment_tracker(args):
@@ -262,6 +263,8 @@ def _train(args, experiment_tracker=None):
     _set_random(args)
     _set_device(args)
     print_args(args)
+    run_record = start_run_record(args, logfilename + '.log')
+    recorded_tasks = []
     data_manager = DataManager(args['dataset'],args['shuffle'],args['seed'],args['init_cls'],args['increment'],args)
     model = factory.get_model(args['model_name'], args)
 
@@ -325,6 +328,13 @@ def _train(args, experiment_tracker=None):
 
         _log_experiment_task(experiment_tracker,model,task_id,cnn_accy,cnn_accy_with_task,cnn_accy_task,
                              w0_accuracy,train_seconds,eval_seconds,forgetting,backward,)
+        recorded_tasks.append({
+            'task': task_id, 'top1': float(cnn_accy['top1']),
+            'old': cnn_accy['grouped'].get('old'), 'new': cnn_accy['grouped'].get('new'),
+            'forgetting': float(forgetting) if forgetting is not None else None,
+            'train_seconds': train_seconds, 'eval_seconds': eval_seconds,
+        })
+        update_run_record(run_record, recorded_tasks, max_tasks, time.time() - run_start_time)
 
     logging.info('Accuracy Matrix: \n {}'.format(model.acc_matrix.T.round(2)))
     logging.info('Average Accuracy: {}'.format(np.mean(cnn_curve['top1'])))
@@ -337,6 +347,7 @@ def _train(args, experiment_tracker=None):
     logging.info('Task Prediction Accuracy average (%): {:.2f}'.format(task_pred_avg))
     logging.info('Final Task Prediction Accuracy (%): {:.2f}'.format(cnn_curve_task['top1'][-1] * 100.0))
     _log_experiment_summary(experiment_tracker,cnn_curve['top1'],w0_curve,cnn_curve_task['top1'],time.time() - run_start_time,)
+    update_run_record(run_record, recorded_tasks, max_tasks, time.time() - run_start_time, completed=True)
 
 def _set_device(args):
     device_type = args['device']

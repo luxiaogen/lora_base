@@ -52,3 +52,8 @@ manuscript/
 *.xlsx
 .reasonix/
 reasonix.toml
+
+# Raw experiment payloads stay local; source manifests remain versioned.
+docs/experiments/raw/experiments/**/*
+!docs/experiments/raw/experiments/**/
+!docs/experiments/raw/experiments/**/来源.md
