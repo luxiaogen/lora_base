@@ -42,12 +42,22 @@ def stage_metrics(logits, targets, known_classes, previous=None):
     ce = F.cross_entropy(logits, targets, reduction='none')
     groups = {'total': torch.ones_like(correct), 'old': targets < known_classes,
               'new': targets >= known_classes}
+    cross = (targets < known_classes) != (predictions < known_classes)
+    partition_predictions = predictions.clone()
+    if known_classes > 0:
+        old_samples = targets < known_classes
+        partition_predictions[old_samples] = logits[old_samples, :known_classes].argmax(1)
+        partition_predictions[~old_samples] = logits[~old_samples, known_classes:].argmax(1) + known_classes
     result = {}
     for name, mask in groups.items():
         n = int(mask.sum())
         values = dict(n=n, accuracy=float(correct[mask].float().mean() * 100) if n else None,
                       margin=float(margin[mask].mean()) if n else None,
                       cosine_ce=float(ce[mask].mean()) if n else None)
+        values.update(cross_partition_errors=int((cross & mask).sum()),
+                      within_partition_errors=int((~correct & ~cross & mask).sum()),
+                      partition_oracle_accuracy=float(partition_predictions[mask].eq(targets[mask]).float().mean()*100) if n else None,
+                      partition_oracle_recovered=int((~correct & partition_predictions.eq(targets) & mask).sum()))
         if previous is not None:
             before = previous.argmax(1).eq(targets)
             values.update(corrected=int((~before & correct & mask).sum()),

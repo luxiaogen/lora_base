@@ -66,7 +66,7 @@
     "dual_mask_private_conflict_mode": "global",
     "dual_mask_task0_gate_mode": "unmasked",
     "dual_mask_anchor_reg_enabled": true,
-    "dual_mask_anchor_reg_weight": 10.0,
+    "dual_mask_anchor_reg_weight": 5.0,
     "dual_mask_anchor_reg_task0_only": true,
 
     "dual_mask_competence_metric": "accuracy",

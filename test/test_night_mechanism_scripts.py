@@ -57,6 +57,8 @@ class NightScriptTests(unittest.TestCase):
         self.assertEqual([v["overrides"]["dual_mask_conflict_local_fraction"] for v in spec["variants"]], [0, .5, .25, .75])
         old = json.loads((ROOT / "scripts/sweeps/imgr10_conflict_score_t10_seed1993_5090.json").read_text())
         baseline = {**json.loads((ROOT / "exps/dlora/imgr10.json").read_text()), **old["common_overrides"]}
+        # This historical screen used anchor10, before the anchor5 working default.
+        baseline["dual_mask_anchor_reg_weight"] = 10
         for key, value in common.items():
             if key in baseline and key not in {"wandb_group", "wandb_tags"}:
                 self.assertEqual(value, baseline[key], key)

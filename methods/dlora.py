@@ -455,6 +455,20 @@ class Learner(BaseLearner):
             })
         self._sampled_weighted_mask_reg = None
 
+    def _old_competition_term(self, output, targets):
+        weight = float(self.args.get('old_competition_weight', 0.0))
+        if self._cur_task == 0 or weight == 0:
+            return None, {}
+        from utils.old_competition import old_competition_loss
+        network = self._network.module if isinstance(self._network, torch.nn.DataParallel) else self._network
+        old_weights = torch.cat([head.weight.detach() for head in network.classifier_pool[:self._cur_task]])
+        raw, active = old_competition_loss(output['features'], output['logits'], targets,
+                                          old_weights, float(self.args['scale']))
+        weighted = weight * raw
+        return weighted, {'old_competition_scaled_hinge': raw.detach(),
+                          'old_competition_weighted': weighted.detach(),
+                          'old_competition_active': active}
+
     def _backward_and_step(self, task_loss, extra_loss, optimizer, output, targets):
         """Optimization extension point used by experimental learners."""
         direction_context = getattr(self, '_p_step_context', None)
@@ -1056,7 +1070,11 @@ class Learner(BaseLearner):
                 if self._sample_mask_reg_grad:
                     self._log_mask_reg_gradients(task_loss, epoch, i)
 
-                batch_training_metrics = getattr(self,"_last_training_loss_metrics",{},)
+                competition_loss, competition_metrics = self._old_competition_term(output, targets)
+                if competition_loss is not None:
+                    extra_loss = competition_loss if extra_loss is None else extra_loss + competition_loss
+                batch_training_metrics = dict(getattr(self,"_last_training_loss_metrics",{},))
+                batch_training_metrics.update(competition_metrics)
                 if batch_training_metrics: # 只负责汇总、显示额外损失的统计值
                     for name, value in batch_training_metrics.items():
                         value = value.detach()

@@ -44,7 +44,7 @@ def main():
     assert data_path.is_dir(), f"JSON data_path does not exist: {data_path}"
     print("Dataset from machine JSON:", data_path)
     sources = ["models/attention.py", "methods/dlora.py", "utils/dual_mask_budget.py",
-               "utils/update_overlap.py", "utils/p_step_direction.py", "utils/stage_audit.py", "trainer.py", "main.py"]
+               "utils/update_overlap.py", "utils/p_step_direction.py", "utils/stage_audit.py", "utils/old_competition.py", "trainer.py", "main.py"]
     snapshot = {
         "revision": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
         "source_sha256": {p: hashlib.sha256((ROOT / p).read_bytes()).hexdigest() for p in sources},
