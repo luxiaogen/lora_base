@@ -1336,6 +1336,12 @@ class Learner(BaseLearner):
         self._network.to(self._device)
 
         self._network.eval()
+        real_new = bool(self.args.get('ca_real_new_features', False))
+        if real_new:
+            # Local CPU stream: sampling real features must not change Gaussian/shuffle RNG.
+            real_generator = torch.Generator().manual_seed(torch.initial_seed() + self._cur_task)
+        logging.info('CA feature source: new=%s old=gaussian per_class=256',
+                     'real' if real_new else 'gaussian')
         for epoch in range(run_epochs):
             losses = 0.
 
@@ -1352,6 +1358,11 @@ class Learner(BaseLearner):
                 m = MultivariateNormal(cls_mean.float(), cls_cov.float())
 
                 sampled_data_single = m.sample(sample_shape=(num_sampled_pcls,))
+                if real_new and c_id >= self._known_classes:
+                    # Keep the Gaussian draw above so subsequent old-class draws stay paired.
+                    pool = self._ca_new_features[c_id]
+                    indices = torch.randint(len(pool), (num_sampled_pcls,), generator=real_generator)
+                    sampled_data_single = pool[indices].to(self._device)
                 sampled_data.append(sampled_data_single)
                 sampled_label.extend([c_id] * num_sampled_pcls)
 
@@ -1401,7 +1412,13 @@ class Learner(BaseLearner):
             ).format(self._cur_task, losses / self._total_classes)
             logging.info(info)
 
+        if real_new:
+            self._ca_new_features.clear()
+
     def _compute_class_mean(self, data_manager, check_diff=False, oracle=False):
+        self._ca_new_features = {}
+        cache_real = (self.args.get('ca_real_new_features', False)
+                      and self.args.get('ca', False) and self._cur_task > 0)
         if hasattr(self,'_class_means') and self._class_means is not None and not check_diff:  # 已经完成过 Task 0，模型中已经存在之前算好的 _class_means（旧类别的均值矩阵）
             ori_classes = self._class_means.shape[0]
             assert ori_classes == self._known_classes
@@ -1420,6 +1437,8 @@ class Learner(BaseLearner):
                                                                   mode='test', ret_data=True)
             idx_loader = DataLoader(idx_dataset, batch_size=64, shuffle=False, num_workers=4)
             vectors, _ = self._extract_vectors(idx_loader)
+            if cache_real:
+                self._ca_new_features[class_idx] = torch.tensor(vectors, dtype=torch.float32).detach().cpu()
 
             class_mean = torch.mean(torch.tensor(vectors), dim=0)
             class_cov = torch.cov(torch.tensor(vectors, dtype=torch.float64).T) + torch.eye(class_mean.shape[-1]) * 1e-3
