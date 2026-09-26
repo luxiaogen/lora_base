@@ -89,6 +89,24 @@ def _top_ratio_mask(score: torch.Tensor, ratio: float) -> torch.Tensor:
     return (score >= threshold).to(score.dtype)  # 大于这个阈值的就是要保护的区域
 
 
+def _exact_top_ratio_mask(score, ratio, valid_mask=None):
+    """Select exactly floor(ratio * candidate_count), including tied scores."""
+    flat = score.detach().flatten()
+    indices = None if valid_mask is None else valid_mask.detach().bool().flatten().nonzero(as_tuple=True)[0]
+    values = flat if indices is None else flat[indices]
+    k = min(values.numel(), max(0, int(values.numel() * ratio)))
+    selected = torch.zeros_like(flat)
+    if k == values.numel():
+        if indices is None:
+            selected.fill_(1)
+        else:
+            selected[indices] = 1
+    elif k > 0:
+        top = torch.topk(values, k, largest=True, sorted=False).indices
+        selected[top if indices is None else indices[top]] = 1
+    return selected.reshape_as(score)
+
+
 def _masked_top_ratio_mask(
         score: torch.Tensor,
         valid_mask: torch.Tensor,
@@ -278,6 +296,7 @@ class Attention_LoRA(nn.Module):
         self.dual_mask_conflict_ratio = 0.25  # 决定 BA-W0 冲突区多大
         self.dual_mask_conflict_budget_multiplier = 1.0
         self.dual_mask_conflict_score_mode = "conflict"
+        self.dual_mask_conflict_exact_topk = False
         self.dual_mask_conflict_strength = 1.0  # 决定冲突区压制多强
 
         self.dual_mask_conflict_reg_enabled = True
@@ -367,6 +386,7 @@ class Attention_LoRA(nn.Module):
         self.dual_mask_conflict_ratio = float(args.get("dual_mask_conflict_ratio", 0.25)) # Top-k 的比例参数  0.1
         self.dual_mask_conflict_budget_multiplier = float(args.get("dual_mask_conflict_budget_multiplier", 1.0))
         self.dual_mask_conflict_score_mode = str(args.get("dual_mask_conflict_score_mode", "conflict")).lower()
+        self.dual_mask_conflict_exact_topk = bool(args.get("dual_mask_conflict_exact_topk", False))
         self.dual_mask_conflict_strength = float(args.get("dual_mask_conflict_strength", 1.0))  # 冲突区压制多强  也就是beta
 
         self.dual_mask_conflict_reg_enabled = bool(args.get("dual_mask_conflict_reg_enabled", True))
@@ -424,6 +444,7 @@ class Attention_LoRA(nn.Module):
             "conflict_strength=%(conflict_strength).3f, "
             "conflict_budget_multiplier=%(conflict_budget_multiplier).3f, "
             "conflict_score_mode=%(conflict_score_mode)s, "
+            "conflict_exact_topk=%(conflict_exact_topk)s, "
             "conflict_energy_adaptive=%(conflict_energy_adaptive)s, "
             "conflict_energy_ratio_floor=%(conflict_energy_ratio_floor)s, "
             "task0_gate_mode=%(task0_gate_mode)s, "
@@ -442,6 +463,7 @@ class Attention_LoRA(nn.Module):
                 "conflict_strength": self.dual_mask_conflict_strength,
                 "conflict_budget_multiplier": self.dual_mask_conflict_budget_multiplier,
                 "conflict_score_mode": self.dual_mask_conflict_score_mode,
+                "conflict_exact_topk": self.dual_mask_conflict_exact_topk,
                 "conflict_energy_adaptive": self.dual_mask_conflict_energy_adaptive,
                 "conflict_energy_ratio_floor": self.dual_mask_conflict_energy_ratio_floor,
                 "private_conflict_mode": self.dual_mask_private_conflict_mode,
@@ -873,7 +895,9 @@ class Attention_LoRA(nn.Module):
         ## 比如配置 dual_mask_conflict_ratio = 0.25，就把冲突分数最高的 25% 位置标为 1，其他位置标为 0
         ## conflict_mask[i, j] = 1  表示这个位置是高冲突区域 conflict_mask[i, j] = 0  表示这个位置冲突不高
         ratio = self.dual_mask_conflict_ratio if conflict_ratio is None else conflict_ratio
-        if self.dual_mask_conflict_energy_adaptive and float(ratio) > 0.0:
+        if self.dual_mask_conflict_exact_topk:
+            conflict_mask = _exact_top_ratio_mask(conflict_score, ratio, valid_mask)
+        elif self.dual_mask_conflict_energy_adaptive and float(ratio) > 0.0:
             if self.dual_mask_conflict_energy_ratio_floor:
                 conflict_mask = _energy_coverage_with_ratio_floor_mask(
                     conflict_score,
