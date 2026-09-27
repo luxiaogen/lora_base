@@ -19,16 +19,15 @@ def module_for(enabled=False):
 
 
 class PrivateATests(unittest.TestCase):
-    def test_queue_changes_only_private_a_flag(self):
+    def test_queue_runs_only_candidate(self):
         root = Path(__file__).resolve().parents[1]
         output = subprocess.check_output(
             ['bash', 'scripts/9_27_imgr10_plora_train_a_3090.sh', '--dry-run'],
             cwd=root, text=True)
         commands = [shlex.split(line) for line in output.splitlines() if 'main.py --config' in line]
-        self.assertEqual(len(commands), 2)
+        self.assertEqual(len(commands), 1)
         settings = [dict(token.split('=', 1) for token in command if '=' in token) for command in commands]
-        self.assertEqual(settings[0].pop('plora_train_a'), 'false')
-        self.assertEqual(settings[1].pop('plora_train_a'), 'true')
+        self.assertEqual(settings[0].pop('plora_train_a'), 'true')
         for run in settings:
             run.pop('prefix')
             self.assertNotIn('data_path', run)
@@ -37,7 +36,6 @@ class PrivateATests(unittest.TestCase):
             self.assertEqual(run['ca_epochs'], '5')
             self.assertEqual(run['max_tasks'], '10')
             self.assertEqual(run['disable_fused_sdpa'], 'true')
-        self.assertEqual(settings[0], settings[1])
 
     def test_task0_identical_and_incremental_only_private_a_changes(self):
         modules = []

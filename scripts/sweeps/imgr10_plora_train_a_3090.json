@@ -117,13 +117,6 @@
   },
   "variants": [
     {
-      "name": "frozen",
-      "description": "Baseline: freeze P A, train P B",
-      "overrides": {
-        "plora_train_a": false
-      }
-    },
-    {
       "name": "trainable",
       "description": "Candidate: train P A and B from Task1; S unchanged",
       "overrides": {
