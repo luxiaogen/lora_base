@@ -905,6 +905,13 @@ class Learner(BaseLearner):
         # update mean and cov and classifier alignment
         self._compute_class_mean(data_manager, check_diff=False, oracle=False)
         if self._cur_task > 0 and self.args['ca'] is True:
+            if self.args.get('ca_boundary_shadow', False):
+                from utils.ca_boundary import temporary_classifier
+                from utils.stage_audit import StageAudit
+                with temporary_classifier(self._network):
+                    self._stage2_compact_classifier(self.task_sizes[-1], boundary=True)
+                    shadow = StageAudit(self._cur_task, self._known_classes)
+                    shadow.record('boundary_shadow_post_ca', self._network, self.test_loader, self._device)
             self._stage2_compact_classifier( # CA 分类器对齐
                 self.task_sizes[-1],ca_epochs=int(self.args.get("ca_epochs", 5)),)
         if self._stage_audit is not None:
@@ -1353,7 +1360,7 @@ class Learner(BaseLearner):
 
         return np.around(tensor2numpy(correct) * 100 / total, decimals=2)
 
-    def _stage2_compact_classifier(self, task_size, ca_epochs=5):
+    def _stage2_compact_classifier(self, task_size, ca_epochs=5, boundary=False):
         """Align classifier heads using Gaussian pseudo-features."""
         if self.args.get("dual_mask_ca_diagnostics", False):
             self._ca_before_metrics = self._measure_ca_accuracy()
@@ -1411,9 +1418,20 @@ class Learner(BaseLearner):
             inputs = sampled_data
             targets = sampled_label
 
+            if boundary:
+                from utils.ca_boundary import boundary_weights
+                with torch.no_grad():
+                    pool_logits = torch.cat([self._network(chunk, fc_only=True)
+                                             for chunk in inputs.split(256)])
+                    weights = boundary_weights(pool_logits[:, :crct_num], targets)
+                logging.info('CABoundary task=%s epoch=%s weight_min=%.6f weight_max=%.6f weight_std=%.6f',
+                             self._cur_task, epoch, weights.min().item(), weights.max().item(), weights.std().item())
+
             sf_indexes = torch.randperm(inputs.size(0))
             inputs = inputs[sf_indexes]
             targets = targets[sf_indexes]
+            if boundary:
+                weights = weights[sf_indexes]
 
             for _iter in range(crct_num):
                 inp = inputs[_iter * num_sampled_pcls:(_iter + 1) * num_sampled_pcls]
@@ -1436,9 +1454,15 @@ class Learner(BaseLearner):
 
                     norms_all = torch.norm(logits[:, :crct_num], p=2, dim=-1, keepdim=True) + 1e-7
                     decoupled_logits = torch.div(logits[:, :crct_num], norms) / self.logit_norm
-                    loss = F.cross_entropy(decoupled_logits, tgt)
+                    loss_logits = decoupled_logits
                 else:
-                    loss = F.cross_entropy(logits[:, :crct_num] * self.args["scale"], tgt)
+                    loss_logits = logits[:, :crct_num] * self.args["scale"]
+
+                if boundary:
+                    batch_weights = weights[_iter * num_sampled_pcls:(_iter + 1) * num_sampled_pcls]
+                    loss = (F.cross_entropy(loss_logits, tgt, reduction='none') * batch_weights).mean()
+                else:
+                    loss = F.cross_entropy(loss_logits, tgt)
 
                 optimizer.zero_grad()
                 loss.backward()
