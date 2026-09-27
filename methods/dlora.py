@@ -918,8 +918,10 @@ class Learner(BaseLearner):
             self._network.to(self._device)
             self._prepare_w0_prototypes(self.w0_loader)
 
+        self._prepare_incremental_head(data_manager, 'pre')
         self._train(self.train_loader, self.test_loader)
         self._old_teacher = None
+        self._prepare_incremental_head(data_manager, 'post')
 
         if track_w0:
             self._measure_pretrained_drift(self.w0_loader)
@@ -945,6 +947,37 @@ class Learner(BaseLearner):
             loader = DataLoader(validation, batch_size=self.batch_size, shuffle=False,
                                 num_workers=0, generator=torch.Generator().manual_seed(1993))
             record_holdout(self._network, loader, self._device, self._cur_task, self._known_classes)
+
+    def _prepare_incremental_head(self, data_manager, stage):
+        initialize = stage == 'pre' and self.args.get('head_start_init', 'random') == 'prototype'
+        epochs = int(self.args.get('head_start_epochs', 0))
+        fit = epochs > 0 and stage == self.args.get('head_start_stage', 'pre')
+        if self._cur_task == 0 or not (initialize or fit):
+            return
+        import time
+        from utils.head_start import collect_features, prototype_init, fit_head
+        started = time.perf_counter()
+        dataset = data_manager.get_dataset(np.arange(self._known_classes, self._total_classes),
+                                           source='train', mode='test')
+        # Independent deterministic loader: never touches the training RNG stream.
+        loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=False, num_workers=0,
+                            generator=torch.Generator().manual_seed(1993 + self._cur_task))
+        self._network.to(self._device)
+        feature_task = self._cur_task - 1 if stage == 'pre' else self._cur_task
+        features, targets = collect_features(self._network, loader, self._device,
+                                             feature_task, self._known_classes)
+        head = self._network.classifier_pool[self._cur_task]
+        if initialize:
+            prototype_init(head, features, targets)
+        steps = 0
+        if fit:
+            steps = fit_head(head, features, targets, epochs, self.batch_size,
+                             self.lrate, self.weight_decay, self.scale, self.margin,
+                             seed=1993 + self._cur_task)
+        logging.info('HeadStart task=%s stage=%s init=%s source=current_train feature_task=%s '
+                     'samples=%s epochs=%s steps=%s seconds=%.3f',
+                     self._cur_task, stage, initialize, feature_task, len(targets),
+                     epochs if fit else 0, steps, time.perf_counter() - started)
 
     def _lora_optimizer_groups(self, flora_params, other_params, lr, weight_decay):
         groups = [
