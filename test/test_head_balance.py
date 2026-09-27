@@ -205,6 +205,7 @@ class HeadBalanceTests(unittest.TestCase):
                                   _extra_training_context=lambda *args: None,
                                   _extra_training_loss=lambda **kwargs: None,
                                   _old_competition_term=lambda *args: (None, {}),
+                                  _old_model_distillation_term=lambda *args: (None, {}),
                                   _compute_accuracy=lambda *args: 0.)
             for name in ('_prepare_head_balance', '_head_balance_term', '_backward_and_step'):
                 setattr(obj, name, learner_method(name).__get__(obj))

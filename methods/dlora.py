@@ -470,6 +470,21 @@ class Learner(BaseLearner):
                           'old_competition_weighted': weighted.detach(),
                           'old_competition_active': active}
 
+    def _old_model_distillation_term(self, output, inputs):
+        teacher = getattr(self, '_old_teacher', None)
+        if teacher is None:
+            return None, {}
+        from utils.old_model_distillation import old_output_loss
+        network = self._network.module if isinstance(self._network, torch.nn.DataParallel) else self._network
+        with torch.no_grad():
+            teacher_cosines = teacher.interface(inputs)
+        weights = torch.cat([head.weight.detach() for head in network.classifier_pool[:self._cur_task]])
+        raw = old_output_loss(output['features'], weights, teacher_cosines, self.scale,
+                              float(self.args.get('old_model_distill_temperature', 2.0)))
+        weighted = float(self.args.get('old_model_distill_weight', 0.0)) * raw
+        return weighted, {'old_model_distill': raw.detach(),
+                          'old_model_distill_weighted': weighted.detach()}
+
     def _prepare_head_balance(self):
         self._head_balance_pool = None
         if self._cur_task == 0 or float(self.args.get('head_balance_weight', 0.0)) == 0:
@@ -817,7 +832,13 @@ class Learner(BaseLearner):
     def incremental_train(self, data_manager):
 
         self._cur_task += 1
-
+        self._old_teacher = None
+        if self._cur_task > 0 and float(self.args.get('old_model_distill_weight', 0.0)) > 0:
+            from utils.old_model_distillation import frozen_teacher
+            self._old_teacher = frozen_teacher(self._network).to(self._device)
+            logging.info('Old-model teacher: task=%s old_classes=%s source=previous_post_ca weight=%s temperature=%s',
+                         self._cur_task, self._known_classes, self.args['old_model_distill_weight'],
+                         self.args.get('old_model_distill_temperature', 2.0))
 
         self._total_classes = self._known_classes + data_manager.get_task_size(self._cur_task)
         self.task_sizes.append(data_manager.get_task_size(self._cur_task))  # 当前这个 Task 新增的类别数量
@@ -898,6 +919,7 @@ class Learner(BaseLearner):
             self._prepare_w0_prototypes(self.w0_loader)
 
         self._train(self.train_loader, self.test_loader)
+        self._old_teacher = None
 
         if track_w0:
             self._measure_pretrained_drift(self.w0_loader)
@@ -1122,9 +1144,13 @@ class Learner(BaseLearner):
                 head_loss, head_metrics = self._head_balance_term(output, targets)
                 if head_loss is not None:
                     extra_loss = head_loss if extra_loss is None else extra_loss + head_loss
+                distill_loss, distill_metrics = self._old_model_distillation_term(output, inputs)
+                if distill_loss is not None:
+                    extra_loss = distill_loss if extra_loss is None else extra_loss + distill_loss
                 batch_training_metrics = dict(getattr(self,"_last_training_loss_metrics",{},))
                 batch_training_metrics.update(competition_metrics)
                 batch_training_metrics.update(head_metrics)
+                batch_training_metrics.update(distill_metrics)
                 if batch_training_metrics: # 只负责汇总、显示额外损失的统计值
                     for name, value in batch_training_metrics.items():
                         value = value.detach()
