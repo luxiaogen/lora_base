@@ -939,6 +939,12 @@ class Learner(BaseLearner):
         if self._stage_audit is not None:
             self._stage_audit.record('post_ca', self._network, self.test_loader, self._device)
             self._stage_audit = None
+        if self.args.get('incremental_holdout', False):
+            from utils.incremental_holdout import record_holdout
+            validation = data_manager.get_incremental_holdout(np.arange(self._total_classes))
+            loader = DataLoader(validation, batch_size=self.batch_size, shuffle=False,
+                                num_workers=0, generator=torch.Generator().manual_seed(1993))
+            record_holdout(self._network, loader, self._device, self._cur_task, self._known_classes)
 
     def _lora_optimizer_groups(self, flora_params, other_params, lr, weight_decay):
         groups = [

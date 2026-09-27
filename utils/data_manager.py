@@ -12,6 +12,8 @@ class DataManager(object):
         self.args = args
         self.dataset_name = dataset_name
         self._setup_data(dataset_name, shuffle, seed)
+        if (args or {}).get('incremental_holdout', False):
+            self._reserve_incremental_holdout(int(args.get('incremental_holdout_mod', 5)))
         assert init_cls <= len(self._class_order), 'No enough classes.'
         self._increments = [init_cls]
         while sum(self._increments) + increment < len(self._class_order):
@@ -27,6 +29,25 @@ class DataManager(object):
 
     def get_task_size(self, task):
         return self._increments[task]
+
+    def _reserve_incremental_holdout(self, holdout_mod):
+        # Remove validation images from every subsequent train-source request,
+        # including W0 competence and CA statistics, not just gradient batches.
+        selected = np.zeros(len(self._train_targets), dtype=bool)
+        for label in np.unique(self._train_targets):
+            positions = np.flatnonzero(self._train_targets == label)
+            selected[positions[::holdout_mod]] = True
+        self._holdout_data = self._train_data[selected].copy()
+        self._holdout_targets = self._train_targets[selected].copy()
+        self._train_data = self._train_data[~selected]
+        self._train_targets = self._train_targets[~selected]
+        logging.info('Incremental holdout: per_class_mod=%s train=%s holdout=%s',
+                     holdout_mod, len(self._train_targets), len(self._holdout_targets))
+
+    def get_incremental_holdout(self, indices):
+        selected = np.isin(self._holdout_targets, indices)
+        trsf = transforms.Compose([*self._test_trsf, *self._common_trsf])
+        return DummyDataset(self._holdout_data[selected], self._holdout_targets[selected], trsf, self.use_path)
 
     def get_dataset(self, indices, source, mode, appendent=None, ret_data=False):
         if source == 'train':
