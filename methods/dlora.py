@@ -980,6 +980,10 @@ class Learner(BaseLearner):
 
         enabled = {name for name, p in self._network.named_parameters() if p.requires_grad}
         print(f"[LoRA-Stage] Parameters to be updated: {enabled}")
+        logging.info('P-A training: task=%s enabled=%s trainable_scalars=%s',
+                     self._cur_task, self.args.get('plora_train_a', False),
+                     sum(p.numel() for name, p in self._network.named_parameters()
+                         if p.requires_grad and 'P_lora.' in name and name.endswith('.A.weight')))
 
         lr = self.init_lr if self._cur_task == 0 else self.lrate
         weight_decay = self.init_weight_decay if self._cur_task == 0 else self.weight_decay

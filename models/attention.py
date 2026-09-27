@@ -348,6 +348,7 @@ class Attention_LoRA(nn.Module):
         self.effective_protect_strength = _BALANCED_STATIC_STRENGTH
         self.current_private_rank = self.rank
         self.dual_mask_private_rank = 0  # 0: 原有策略；正整数: Task1 起固定 P rank。
+        self.plora_train_a = False
         self.pretrained_anchor_mode = False
         # 掩码可视化配置。
         self.dual_mask_vis = False
@@ -362,6 +363,7 @@ class Attention_LoRA(nn.Module):
         self.args = args
         self.use_slora: bool = args["use_slora"]
         self.use_plora: bool = args["use_plora"]
+        self.plora_train_a = bool(args.get("plora_train_a", False))
         # msg = f'Use slora:{self.use_slora} and Use plora:{self.use_plora}'
         # print(msg)
         # logging.info(msg)
@@ -752,6 +754,7 @@ class Attention_LoRA(nn.Module):
         if self.use_slora:
             self.S_lora[task].B.weight.requires_grad_(True)
         if self.use_plora and self.P_lora[task] is not None:
+            self.P_lora[task].A.weight.requires_grad_(self.plora_train_a)
             self.P_lora[task].B.weight.requires_grad_(True)
 
     def _soft_svd_importance(self, weight: torch.Tensor) -> torch.Tensor:
