@@ -854,9 +854,13 @@ class Learner(BaseLearner):
         self.test_loader = DataLoader(test_dataset, batch_size=self.batch_size, shuffle=False,
                                       num_workers=self.num_workers, pin_memory=True)
         self._stage_audit = None
-        if self.args.get('stage_audit', False):
+        if self.args.get('stage_audit', False) or self.args.get('history_audit', False):
             from utils.stage_audit import StageAudit
-            self._stage_audit = StageAudit(self._cur_task, self._known_classes)
+            if self.args.get('history_audit', False) and self._cur_task == 0:
+                from utils.history_audit import HistoryAudit
+                self._history_audit = HistoryAudit(self.args['history_audit_dir'])
+            history = getattr(self, '_history_audit', None) if self.args.get('history_audit', False) else None
+            self._stage_audit = StageAudit(self._cur_task, self._known_classes, history)
 
         if self._cur_task == 0 and self.args.get('task0_repro_diagnostic', False):
             log_environment(self.args, train_dataset, test_dataset)

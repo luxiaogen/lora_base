@@ -69,8 +69,9 @@ def stage_metrics(logits, targets, known_classes, previous=None):
 
 
 class StageAudit:
-    def __init__(self, task, known_classes):
+    def __init__(self, task, known_classes, history=None):
         self.task, self.known_classes = task, known_classes
+        self.history = history
         self.previous = None
         self.previous_stage = None
 
@@ -81,5 +82,7 @@ class StageAudit:
                    source='test_report_only', class_count=logits.shape[1], sample_sha256=digest,
                    metrics=stage_metrics(logits, targets, self.known_classes, self.previous))
         logging.info('StageAudit %s', json.dumps(row, allow_nan=False))
+        if self.history is not None:
+            self.history.record(self.task, stage, logits, targets, indices)
         self.previous, self.previous_stage = logits, stage
         return row
