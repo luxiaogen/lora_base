@@ -470,6 +470,35 @@ class Learner(BaseLearner):
                           'old_competition_weighted': weighted.detach(),
                           'old_competition_active': active}
 
+    def _prepare_head_balance(self):
+        self._head_balance_pool = None
+        if self._cur_task == 0 or float(self.args.get('head_balance_weight', 0.0)) == 0:
+            return
+        from utils.head_balance import sample_old_feature_pool
+        self._head_balance_generator = torch.Generator().manual_seed(
+            torch.initial_seed() + 10007 * self._cur_task)
+        self._head_balance_pool = sample_old_feature_pool(
+            self._class_means[:self._known_classes], self._class_covs[:self._known_classes],
+            self.task_sizes, self._cur_task, self._device, self._head_balance_generator)
+        logging.info('HeadBalance task=%s weight=%s old_classes=%s pool_per_class=256 '
+                     'auxiliary_target=current_head_only; backbone/old_heads detached',
+                     self._cur_task, self.args['head_balance_weight'], self._known_classes)
+
+    def _head_balance_term(self, output, targets):
+        weight = float(self.args.get('head_balance_weight', 0.0))
+        if self._cur_task == 0 or weight == 0:
+            return None, {}
+        from utils.head_balance import head_balance_loss
+        network = self._network.module if isinstance(self._network, torch.nn.DataParallel) else self._network
+        indices = torch.randint(256, (self._known_classes,), generator=self._head_balance_generator)
+        old_features = self._head_balance_pool[torch.arange(self._known_classes), indices].to(output['features'].device)
+        old_weights = torch.cat([head.weight.detach() for head in network.classifier_pool[:self._cur_task]])
+        loss, metrics = head_balance_loss(output['features'], targets, old_features, old_weights,
+                                          network.classifier_pool[self._cur_task].weight, float(self.args['scale']))
+        weighted = weight * loss
+        metrics['head_balance_weighted'] = weighted.detach()
+        return weighted, metrics
+
     def _backward_and_step(self, task_loss, extra_loss, optimizer, output, targets):
         """Optimization extension point used by experimental learners."""
         direction_context = getattr(self, '_p_step_context', None)
@@ -994,6 +1023,7 @@ class Learner(BaseLearner):
             self._stage_audit.record('post_merge', self._network, test_loader, self._device)
 
     def train_function(self, train_loader, test_loader, optimizer, scheduler):
+        self._prepare_head_balance()
         logging.info('Trainable params: {}'.format(count_parameters(self._network, True)))
         # Double check
         enabled = set()
@@ -1074,8 +1104,12 @@ class Learner(BaseLearner):
                 competition_loss, competition_metrics = self._old_competition_term(output, targets)
                 if competition_loss is not None:
                     extra_loss = competition_loss if extra_loss is None else extra_loss + competition_loss
+                head_loss, head_metrics = self._head_balance_term(output, targets)
+                if head_loss is not None:
+                    extra_loss = head_loss if extra_loss is None else extra_loss + head_loss
                 batch_training_metrics = dict(getattr(self,"_last_training_loss_metrics",{},))
                 batch_training_metrics.update(competition_metrics)
+                batch_training_metrics.update(head_metrics)
                 if batch_training_metrics: # 只负责汇总、显示额外损失的统计值
                     for name, value in batch_training_metrics.items():
                         value = value.detach()
@@ -1177,6 +1211,7 @@ class Learner(BaseLearner):
                            train_accuracy=float(train_acc),
                            trainable_sha256=tensor_hash((n, p) for n, p in self._network.named_parameters() if p.requires_grad))
 
+        self._head_balance_pool = None
         if self._cur_task == 0 and getattr(self, 'task0_validation_loader', None) is not None:
             logging.info('Task0 Holdout loss curve: %s', self._task0_holdout_loss_curve)
             logging.info('Task0 Holdout accuracy curve: %s', self._task0_holdout_accuracy_curve)
