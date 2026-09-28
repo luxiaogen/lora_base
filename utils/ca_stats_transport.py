@@ -16,9 +16,11 @@ def fit_diagonal_transport(before, after):
 
 
 @torch.no_grad()
-def transport_statistics(means, covariances, scale, offset):
+def transport_statistics(means, covariances, scale, offset, mean_only=False):
     scale, offset = scale.to(means), offset.to(means)
     mapped_means = means * scale + offset
+    if mean_only:
+        return mapped_means, covariances
     mapped_covariances = covariances * scale[None, :, None]
     mapped_covariances.mul_(scale[None, None, :])
     return mapped_means, mapped_covariances

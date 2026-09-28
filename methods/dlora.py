@@ -970,17 +970,19 @@ class Learner(BaseLearner):
         from utils.ca_stats_transport import fit_diagonal_transport, transport_statistics
         after = self._ca_transport_features(data_manager, self._cur_task)
         scale, offset = fit_diagonal_transport(before, after)
+        mean_only = bool(self.args.get('ca_stats_transport_mean_only', False))
         # At this point the arrays contain old classes only; current class statistics follow.
         self._class_means, self._class_covs = transport_statistics(
-            self._class_means, self._class_covs, scale, offset)
+            self._class_means, self._class_covs, scale, offset, mean_only=mean_only)
         delta = after.double() - before.double()
         residual = after.double() - (before.double() * scale + offset)
         logging.info('CATransport task=%s source=current_train samples=%s old_classes=%s '
                      'scale_min=%.6f scale_max=%.6f offset_norm=%.6f '
-                     'pair_mse_before=%.8f pair_mse_after=%.8f',
+                     'pair_mse_before=%.8f pair_mse_after=%.8f mode=%s',
                      self._cur_task, len(before), self._known_classes,
                      scale.min().item(), scale.max().item(), offset.norm().item(),
-                     delta.square().mean().item(), residual.square().mean().item())
+                     delta.square().mean().item(), residual.square().mean().item(),
+                     'mean_only' if mean_only else 'mean_and_covariance')
 
     def _prepare_incremental_head(self, data_manager, stage):
         initialize = stage == 'pre' and self.args.get('head_start_init', 'random') == 'prototype'

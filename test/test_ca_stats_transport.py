@@ -4,6 +4,7 @@ import logging
 import json
 from pathlib import Path
 import subprocess
+import shlex
 from types import SimpleNamespace
 import unittest
 
@@ -15,6 +16,57 @@ from utils.ca_stats_transport import fit_diagonal_transport, transport_statistic
 
 
 class StatsTransportTests(unittest.TestCase):
+    def test_mean_only_keeps_covariances_and_matches_full_transport_means(self):
+        torch.manual_seed(1993)
+        x = torch.randn(20, 3)
+        scale, offset = fit_diagonal_transport(x, x * 1.2 + .2)
+        means = torch.randn(4, 3)
+        matrix = torch.randn(4, 3, 3)
+        covs = matrix @ matrix.transpose(-1, -2) + .1 * torch.eye(3)
+        original = means.clone(), covs.clone()
+        rng = torch.get_rng_state().clone()
+        full_means, full_covs = transport_statistics(means, covs, scale, offset)
+        mapped_means, unchanged_covs = transport_statistics(means, covs, scale, offset, mean_only=True)
+        self.assertTrue(torch.equal(mapped_means, full_means))
+        self.assertIs(unchanged_covs, covs)
+        self.assertFalse(torch.equal(full_covs, covs))
+        # A second task updates the accumulated means, never the stored covariance.
+        next_means, next_covs = transport_statistics(mapped_means, unchanged_covs, scale, offset,
+                                                    mean_only=True)
+        torch.testing.assert_close(next_means, mapped_means * scale.float() + offset.float())
+        self.assertIs(next_covs, covs)
+        self.assertTrue(torch.equal(means, original[0]))
+        self.assertTrue(torch.equal(covs, original[1]))
+        self.assertTrue(torch.equal(rng, torch.get_rng_state()))
+
+    def test_two_mean_only_recipes_reuse_machine_specific_references(self):
+        root = Path(__file__).resolve().parents[1]
+        ref = json.loads((root / 'scripts/sweeps/imgr10_ca_stats_transport_5090.json').read_text())
+        reference = {**ref['common_overrides'], **ref['variants'][0]['overrides']}
+        for machine, anchor in (('3090', 2.5), ('5090', 5)):
+            spec = json.loads((root / f'scripts/sweeps/imgr10_ca_mean_transport_{machine}.json').read_text())
+            self.assertEqual(len(spec['variants']), 1)
+            settings = {**spec['common_overrides'], **spec['variants'][0]['overrides']}
+            expected = dict(reference, dual_mask_anchor_reg_weight=anchor,
+                            ca_stats_transport_mean_only=True, ca_cov_shrinkage=0,
+                            wandb_group=spec['name'])
+            self.assertEqual(settings, expected)
+            self.assertNotIn('device', settings)
+            self.assertNotIn('data_path', settings)
+            script = root / f'scripts/9_28_imgr10_ca_mean_transport_{machine}.sh'
+            subprocess.run(['bash', '-n', str(script)], check=True)
+            for mode, tasks in (([], '10'), (['--smoke'], '2')):
+                output = subprocess.check_output(['bash', str(script), '--dry-run', *mode],
+                                                 cwd='/tmp', text=True)
+                commands = [line for line in output.splitlines() if 'main.py --config' in line]
+                self.assertEqual(len(commands), 1)
+                tokens = shlex.split(commands[0])
+                cli = dict(tokens[i + 1].split('=', 1) for i, token in enumerate(tokens) if token == '--set')
+                self.assertEqual(cli['max_tasks'], tasks)
+                self.assertEqual(cli['seed'], '[1993]')
+                self.assertEqual(cli['ca_stats_transport_mean_only'], 'true')
+                self.assertEqual(cli['save_task_weights'], 'true')
+
     def test_5090_is_one_candidate_with_original_anchor5_reference(self):
         spec = json.loads(Path('scripts/sweeps/imgr10_ca_stats_transport_5090.json').read_text())
         self.assertEqual(len(spec['variants']), 1)
@@ -45,7 +97,7 @@ class StatsTransportTests(unittest.TestCase):
         exec(compile(ast.Module(body=[method], type_ignores=[]), '<transport-hook>', 'exec'), ns)
         before = torch.randn(10, 3)
         means, covs = torch.randn(4, 3), torch.eye(3).repeat(4, 1, 1)
-        learner = SimpleNamespace(_cur_task=2, _known_classes=4, _class_means=means,
+        learner = SimpleNamespace(args={}, _cur_task=2, _known_classes=4, _class_means=means,
                                   _class_covs=covs, _ca_transport_features=lambda manager, task: before + .2)
         rng = torch.get_rng_state().clone()
         with self.assertLogs(level='INFO') as messages:
@@ -55,6 +107,15 @@ class StatsTransportTests(unittest.TestCase):
         torch.testing.assert_close(learner._class_covs, covs)
         self.assertTrue(torch.equal(rng, torch.get_rng_state()))
         self.assertIn('CATransport', messages.output[0])
+        learner.args['ca_stats_transport_mean_only'] = True
+        learner._ca_transport_features = lambda manager, task: before * 1.2 + .2
+        learner._class_means, learner._class_covs = means, covs
+        scale, offset = fit_diagonal_transport(before, before * 1.2 + .2)
+        with self.assertLogs(level='INFO') as messages:
+            ns[method.name](learner, None, before)
+        torch.testing.assert_close(learner._class_means, means * scale.float() + offset.float())
+        self.assertIs(learner._class_covs, covs)
+        self.assertIn('mode=mean_only', messages.output[0])
 
     def test_identity_and_translation_are_exact(self):
         torch.manual_seed(3)
