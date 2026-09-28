@@ -922,6 +922,9 @@ class Learner(BaseLearner):
         if self._cur_task > 0 and self.args['ca'] and self.args.get('ca_stats_transport', False):
             ca_transport_before = self._ca_transport_features(data_manager, self._cur_task - 1)
 
+        if self._cur_task > 0 and self.args.get('plora_a_init_mode', 'off') != 'off':
+            self._plora_a_init_dataset = data_manager.get_dataset(
+                np.arange(self._known_classes, self._total_classes), source='train', mode='test')
         self._prepare_incremental_head(data_manager, 'pre')
         self._train(self.train_loader, self.test_loader)
         self._old_teacher = None
@@ -1015,6 +1018,18 @@ class Learner(BaseLearner):
                      self._cur_task, stage, initialize, feature_task, len(targets),
                      epochs if fit else 0, steps, time.perf_counter() - started)
 
+    def _initialize_plora_a(self):
+        mode = self.args.get('plora_a_init_mode', 'off')
+        if self._cur_task == 0 or mode == 'off':
+            return
+        from utils.plora_a_init import initialize_plora_a
+        network = self._network.module if isinstance(self._network, torch.nn.DataParallel) else self._network
+        initialize_plora_a(network, list(self._iter_lora_modules()), self._plora_a_init_dataset,
+                           self._device, self._cur_task, mode, batch_size=self.batch_size,
+                           batches=int(self.args.get('plora_a_init_batches', 4)),
+                           seed=int(self.args['seed']) + self._cur_task)
+        self._plora_a_init_dataset = None
+
     def _lora_optimizer_groups(self, flora_params, other_params, lr, weight_decay):
         groups = [
             {'params': flora_params, 'lr': lr, 'momentum': 0.9, 'weight_decay': weight_decay},
@@ -1067,6 +1082,7 @@ class Learner(BaseLearner):
             module.set_task_and_stage(task=self._cur_task, layer_idx=kk)  # 设置lora可不可训练
             kk += 1
 
+        self._initialize_plora_a()
 
         ############################## set learning rates ##################################
         flora_params, other_params = [], []  # flora_params:收集的是名称带 lora 的参数（即各个 Transformer 层中 LoRA 的 B 矩阵）
