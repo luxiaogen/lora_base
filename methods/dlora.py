@@ -994,6 +994,15 @@ class Learner(BaseLearner):
                 groups[0]['params'] = [p for p in flora_params if id(p) not in private_ids]
                 groups.append({'params': private_params, 'lr': lr * multiplier,
                                'momentum': 0.9, 'weight_decay': weight_decay})
+        shared_multiplier = float(self.args.get('slora_lr_multiplier', 1.0))
+        if self._cur_task > 0 and shared_multiplier != 1.0:
+            shared_params = [p for name, p in self._network.named_parameters()
+                             if p.requires_grad and 's_lora' in name.lower().split('.')]
+            if shared_params:
+                shared_ids = {id(p) for p in shared_params}
+                groups[0]['params'] = [p for p in groups[0]['params'] if id(p) not in shared_ids]
+                groups.append({'params': shared_params, 'lr': lr * shared_multiplier,
+                               'momentum': 0.9, 'weight_decay': weight_decay})
         return groups
 
     def _train(self, train_loader, test_loader):
@@ -1050,9 +1059,10 @@ class Learner(BaseLearner):
         weight_decay = self.init_weight_decay if self._cur_task == 0 else self.weight_decay
         param_groups = self._lora_optimizer_groups(flora_params, other_params, lr, weight_decay)
         logging.info(
-            'LoRA optimizer groups: task=%s, configured_P_multiplier=%s, '
-            'order=LoRA/classifier[/P], scalars=%s, initial_lrs=%s',
+            'LoRA optimizer groups: task=%s, configured_P_multiplier=%s, configured_S_multiplier=%s, '
+            'order=LoRA/classifier[/P][/S], scalars=%s, initial_lrs=%s',
             self._cur_task, self.args.get('plora_lr_multiplier', 1.0),
+            self.args.get('slora_lr_multiplier', 1.0),
             [sum(p.numel() for p in group['params']) for group in param_groups],
             [group['lr'] for group in param_groups],
         )
@@ -1131,7 +1141,7 @@ class Learner(BaseLearner):
             losses = 0.
             correct, total = 0, 0
             epoch_lr = float(optimizer.param_groups[0]['lr'])
-            logging.info('LoRA learning rates: task=%s, epoch=%s, order=LoRA/classifier[/P], lrs=%s',
+            logging.info('LoRA learning rates: task=%s, epoch=%s, order=LoRA/classifier[/P][/S], lrs=%s',
                          self._cur_task, epoch + 1, [group['lr'] for group in optimizer.param_groups])
             training_metric_totals = {}
             training_metric_batches = 0
