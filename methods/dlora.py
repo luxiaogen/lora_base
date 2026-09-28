@@ -918,6 +918,10 @@ class Learner(BaseLearner):
             self._network.to(self._device)
             self._prepare_w0_prototypes(self.w0_loader)
 
+        ca_transport_before = None
+        if self._cur_task > 0 and self.args['ca'] and self.args.get('ca_stats_transport', False):
+            ca_transport_before = self._ca_transport_features(data_manager, self._cur_task - 1)
+
         self._prepare_incremental_head(data_manager, 'pre')
         self._train(self.train_loader, self.test_loader)
         self._old_teacher = None
@@ -925,6 +929,10 @@ class Learner(BaseLearner):
 
         if track_w0:
             self._measure_pretrained_drift(self.w0_loader)
+
+        if ca_transport_before is not None:
+            self._transport_ca_statistics(data_manager, ca_transport_before)
+            del ca_transport_before
 
         # update mean and cov and classifier alignment
         self._compute_class_mean(data_manager, check_diff=False, oracle=False)
@@ -947,6 +955,32 @@ class Learner(BaseLearner):
             loader = DataLoader(validation, batch_size=self.batch_size, shuffle=False,
                                 num_workers=0, generator=torch.Generator().manual_seed(1993))
             record_holdout(self._network, loader, self._device, self._cur_task, self._known_classes)
+
+    def _ca_transport_features(self, data_manager, task):
+        from utils.head_start import collect_features
+        dataset = data_manager.get_dataset(np.arange(self._known_classes, self._total_classes),
+                                           source='train', mode='test')
+        loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=False, num_workers=0,
+                            generator=torch.Generator().manual_seed(1993 + self._cur_task))
+        self._network.to(self._device)
+        features, _ = collect_features(self._network, loader, self._device, task, self._known_classes)
+        return features.cpu()
+
+    def _transport_ca_statistics(self, data_manager, before):
+        from utils.ca_stats_transport import fit_diagonal_transport, transport_statistics
+        after = self._ca_transport_features(data_manager, self._cur_task)
+        scale, offset = fit_diagonal_transport(before, after)
+        # At this point the arrays contain old classes only; current class statistics follow.
+        self._class_means, self._class_covs = transport_statistics(
+            self._class_means, self._class_covs, scale, offset)
+        delta = after.double() - before.double()
+        residual = after.double() - (before.double() * scale + offset)
+        logging.info('CATransport task=%s source=current_train samples=%s old_classes=%s '
+                     'scale_min=%.6f scale_max=%.6f offset_norm=%.6f '
+                     'pair_mse_before=%.8f pair_mse_after=%.8f',
+                     self._cur_task, len(before), self._known_classes,
+                     scale.min().item(), scale.max().item(), offset.norm().item(),
+                     delta.square().mean().item(), residual.square().mean().item())
 
     def _prepare_incremental_head(self, data_manager, stage):
         initialize = stage == 'pre' and self.args.get('head_start_init', 'random') == 'prototype'
@@ -1467,8 +1501,17 @@ class Learner(BaseLearner):
             real_generator = torch.Generator().manual_seed(torch.initial_seed() + self._cur_task)
         logging.info('CA feature source: new=%s old=gaussian per_class=256',
                      'real' if real_new else 'gaussian')
+        cross_weight = float(self.args.get('ca_cross_task_margin_weight', 0.0))
+        if cross_weight > 0:
+            from utils.ca_cross_task_margin import cross_task_margin
+            cross_margin = float(self.args.get('ca_cross_task_margin', 0.05))
+            class_tasks = torch.repeat_interleave(
+                torch.arange(len(self.task_sizes), device=self._device),
+                torch.tensor(self.task_sizes, device=self._device))
         for epoch in range(run_epochs):
             losses = 0.
+            if cross_weight > 0:
+                ce_sum, cross_sum, active_sum = 0., 0., 0.
 
             sampled_data = []
             sampled_label = []
@@ -1543,6 +1586,14 @@ class Learner(BaseLearner):
                 else:
                     loss = F.cross_entropy(loss_logits, tgt)
 
+                if cross_weight > 0:
+                    # Raw cosine margin: independent of the CA temperature/normalization.
+                    cross_loss, active = cross_task_margin(logits[:, :crct_num], tgt, class_tasks, cross_margin)
+                    ce_sum += loss.item()
+                    cross_sum += cross_loss.item()
+                    active_sum += active.item()
+                    loss = loss + cross_weight * cross_loss
+
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
@@ -1553,6 +1604,12 @@ class Learner(BaseLearner):
                 '(classifier alignment; final accuracy is logged after CA)'
             ).format(self._cur_task, losses / self._total_classes)
             logging.info(info)
+            if cross_weight > 0:
+                logging.info('CACrossTaskMargin task=%s epoch=%s margin=%.4f weight=%.4f '
+                             'ce=%.6f hinge=%.6f weighted=%.6f active_fraction=%.6f',
+                             self._cur_task, epoch + 1, cross_margin, cross_weight,
+                             ce_sum / crct_num, cross_sum / crct_num,
+                             cross_weight * cross_sum / crct_num, active_sum / crct_num)
 
         if real_new:
             self._ca_new_features.clear()
