@@ -521,8 +521,41 @@ class Learner(BaseLearner):
             from utils.p_step_direction import prepare_step, finish_step
             snapshots = prepare_step(self._iter_lora_modules(), task_loss)
         loss = task_loss if extra_loss is None else task_loss + extra_loss
+        self._last_pair_separation_metrics = {}
+        pair_weight = float(getattr(self, 'args', {}).get('pair_separation_weight', 0.0))
+        pair_grads, named_params = (), []
+        weighted_pair = None
+        if pair_weight > 0 and self._cur_task > 0:
+            from utils.pair_separation import pair_separation_loss, log_pair_gradients
+            scope = self.args.get('pair_separation_scope', 'p')
+            for module in self._iter_lora_modules():
+                branches = (('P', 'P_lora'),) if scope == 'p' else (('S', 'S_lora'), ('P', 'P_lora'))
+                for branch, attribute in branches:
+                    unit = getattr(module, attribute)[self._cur_task]
+                    if unit is not None and unit.B_weight.requires_grad:
+                        named_params.append((branch, unit.B_weight))
+            raw_pair, metrics = pair_separation_loss(
+                output['features'], targets, float(self.args.get('pair_separation_margin', .1)))
+            weighted_pair = pair_weight * raw_pair
+            self._last_pair_separation_metrics = dict(metrics, pair_weighted=weighted_pair.detach())
+            pair_grads = torch.autograd.grad(weighted_pair, [p for _, p in named_params],
+                                             retain_graph=True, allow_unused=True)
+            diagnostic = getattr(self, '_pair_separation_diagnostic', None)
+            if diagnostic is not None:
+                epoch, batch = diagnostic
+                log_pair_gradients(task_loss, named_params, pair_grads,
+                                   self._cur_task, epoch, batch, scope)
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
+        # The ordinary loss still updates all original trainable parameters.
+        # Add only the auxiliary gradients requested by the experimental scope.
+        with torch.no_grad():
+            for (_, param), grad in zip(named_params, pair_grads):
+                if grad is not None:
+                    if param.grad is None:
+                        param.grad = grad.detach().clone()
+                    else:
+                        param.grad.add_(grad)
         optimizer.step()
         if direction_context is not None:
             mode, epoch, batch, detailed = direction_context
@@ -536,7 +569,7 @@ class Learner(BaseLearner):
                              batch=batch + 1, mode=mode, training_batch=True, metrics=metrics))
             for key, value in counts.items():
                 self._p_step_counts[key] = self._p_step_counts.get(key, 0) + value
-        return loss
+        return loss if weighted_pair is None else loss.detach() + weighted_pair.detach()
     # 临时把所有 LoRA Attention 层切回原始预训练权重 W_pre，提取一份不受增量学习影响的参考特征，使用完后再恢复当前模型
     def _pretrained_anchor_context(self):
         """Temporarily switch every LoRA attention layer to immutable W_pre."""
@@ -1252,12 +1285,6 @@ class Learner(BaseLearner):
                 batch_training_metrics.update(competition_metrics)
                 batch_training_metrics.update(head_metrics)
                 batch_training_metrics.update(distill_metrics)
-                if batch_training_metrics: # 只负责汇总、显示额外损失的统计值
-                    for name, value in batch_training_metrics.items():
-                        value = value.detach()
-                        training_metric_totals[name] = (training_metric_totals.get(name, 0.0) + value)
-                    training_metric_batches += 1
-
                 direction_mode = self.args.get('p_step_direction', 'off')
                 self._p_step_context = None
                 if i == 0:
@@ -1266,6 +1293,7 @@ class Learner(BaseLearner):
                         and i % int(self.args.get('p_step_interval', 5)) == 0):
                     self._p_step_context = (direction_mode, epoch, i, i == 0 and epoch in (0, 9, 19))
                     self._p_step_probe = (inputs, loss_cos)
+                self._pair_separation_diagnostic = (epoch, i) if i == 0 and epoch in (0, 9, 19) else None
                 loss = self._backward_and_step(
                     task_loss,
                     extra_loss,
@@ -1273,6 +1301,12 @@ class Learner(BaseLearner):
                     output,
                     targets,
                 )
+                batch_training_metrics.update(getattr(self, '_last_pair_separation_metrics', {}))
+                if batch_training_metrics: # 只负责汇总、显示额外损失的统计值
+                    for name, value in batch_training_metrics.items():
+                        value = value.detach()
+                        training_metric_totals[name] = (training_metric_totals.get(name, 0.0) + value)
+                    training_metric_batches += 1
                 self._p_step_probe = None
                 if self._p_step_context is not None and i == 0:
                     logging.info('PStepSchedule task=%s epoch=%s interval=%s mode=%s',
