@@ -265,6 +265,10 @@ def _train(args, experiment_tracker=None):
     print_args(args)
     run_record = start_run_record(args, logfilename + '.log')
     recorded_tasks = []
+    if args.get('save_task_weights', False):
+        from utils.task_weights import checkpoint_directory, save_task_weights
+        weights_directory = checkpoint_directory(args)
+        logging.info('Task weights directory: %s', weights_directory.resolve())
     data_manager = DataManager(args['dataset'],args['shuffle'],args['seed'],args['init_cls'],args['increment'],args)
     model = factory.get_model(args['model_name'], args)
 
@@ -335,6 +339,8 @@ def _train(args, experiment_tracker=None):
             'train_seconds': train_seconds, 'eval_seconds': eval_seconds,
         })
         update_run_record(run_record, recorded_tasks, max_tasks, time.time() - run_start_time)
+        if args.get('save_task_weights', False):
+            save_task_weights(weights_directory, model, data_manager, args, recorded_tasks)
 
     logging.info('Accuracy Matrix: \n {}'.format(model.acc_matrix.T.round(2)))
     logging.info('Average Accuracy: {}'.format(np.mean(cnn_curve['top1'])))
