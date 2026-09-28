@@ -1,0 +1,4 @@
+# Offline plotting on the existing Python3.9 training environment.
+# Torch/NumPy/Pillow/torchvision/timm/easydict are already training dependencies.
+scikit-learn==1.6.1
+matplotlib>=3.6,<3.10
