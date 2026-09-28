@@ -1501,6 +1501,10 @@ class Learner(BaseLearner):
             real_generator = torch.Generator().manual_seed(torch.initial_seed() + self._cur_task)
         logging.info('CA feature source: new=%s old=gaussian per_class=256',
                      'real' if real_new else 'gaussian')
+        cov_shrinkage = float(self.args.get('ca_cov_shrinkage', 0.0))
+        if cov_shrinkage > 0:
+            logging.info('CACovShrinkage task=%s alpha=%.4f target=diagonal classes=%s',
+                         self._cur_task, cov_shrinkage, crct_num)
         cross_weight = float(self.args.get('ca_cross_task_margin_weight', 0.0))
         if cross_weight > 0:
             from utils.ca_cross_task_margin import cross_task_margin
@@ -1522,6 +1526,9 @@ class Learner(BaseLearner):
                 decay = (t_id + 1) / (self._cur_task + 1) * 0.1
                 cls_mean = self._class_means[c_id].to(self._device) * (0.9 + decay)
                 cls_cov = self._class_covs[c_id].to(self._device)
+                if cov_shrinkage > 0:
+                    cls_cov = ((1 - cov_shrinkage) * cls_cov
+                               + cov_shrinkage * torch.diag(cls_cov.diagonal()))
 
                 m = MultivariateNormal(cls_mean.float(), cls_cov.float())
 
