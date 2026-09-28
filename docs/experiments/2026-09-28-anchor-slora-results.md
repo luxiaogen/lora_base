@@ -1,5 +1,21 @@
 # 2026-09-28：全量anchor短程消融与S学习率候选
 
+## 完整日志补记（替代下方初次快照的未完成状态）
+
+用户补发的同路径3090完整日志SHA256为
+`596b7c9bedfb0a3ea063b22a01e97f8b7b22e0cc0a5cd11714f98c6a90c59121`。
+四组均完成Task0–2、exit0，未见运行错误；下面初次快照及hash保留作追溯，不再代表当前完成状态。
+
+| 补齐组 | Task0 | Task1 | Task2 | Average | Task2 Old | Task2 New | Forgetting |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| anchor5 | 96.37 | 92.43 | 89.98 | 92.9267 | 91.22 | 87.29 | 2.1350 |
+| anchor20 | 96.52 | 92.51 | 89.47 | 92.8333 | 90.92 | 86.30 | 2.6300 |
+
+anchor2.5仍是四组Average和Last最高者。与同批anchor5相比Average+0.28pp，
+主要来自Task0+0.73pp；Task1相同、Task2+0.11pp（Old+0.15、New相同），
+且Forgetting高0.095pp。不能宣称各指标全面改善。
+下一步实施[两机确认队列](2026-09-28-anchor2p5-confirmation-plan.md)，尚未启动服务器。
+
 ## 日志身份和完成情况
 
 均为ImageNet-R、seed1993、T10类别顺序，仅执行Task0–2；20epochs、CA5、math-SDPA，
