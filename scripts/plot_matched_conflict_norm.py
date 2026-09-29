@@ -3,6 +3,7 @@ import argparse
 import ast
 import hashlib
 import json
+import math
 from pathlib import Path
 import re
 
@@ -19,6 +20,8 @@ def read_run(path):
         raise ValueError(f'{path}: incomplete T10 ({len(curve)} tasks)')
     metrics = [ast.literal_eval(v) for v in re.findall(r'=> CNN: (\{.*?\})', text)]
     metrics = metrics[-10:]
+    if len(metrics) != 10:
+        raise ValueError(f'{path}: expected ten CNN metric records')
     return {'average': sum(curve) / 10, 'last': curve[-1],
             'old': metrics[-1]['old'], 'new': metrics[-1]['new'],
             'stage_old': sum(m['old'] for m in metrics[1:]) / 9,
@@ -37,8 +40,12 @@ def main():
     checks = [json.loads(s.split('MatchedConflictNorm ', 1)[1])
               for s in args.candidate.read_text().splitlines() if 'MatchedConflictNorm {' in s]
     checks = [c for c in checks if c['task'] > 0]
-    if len(checks) != 216:
-        raise ValueError(f'Missing norm telemetry: {len(checks)}/216')
+    expected = {(t, layer, branch) for t in range(1, 10) for layer in range(12) for branch in ('S', 'P')}
+    keys = [(c['task'], c['layer'], c['branch']) for c in checks]
+    if len(checks) != 216 or set(keys) != expected:
+        raise ValueError('Expected unique Task1–9 × 12 layers × S/P norm telemetry')
+    if not all(math.isfinite(c[k]) for c in checks for k in ('reference_removed_norm', 'actual_removed_norm', 'base_norm')):
+        raise ValueError('Non-finite norm telemetry')
     error = max(abs(c['reference_removed_norm'] - c['actual_removed_norm']) /
                 max(c['base_norm'], 1e-12) for c in checks)
     if error > 1e-5:
