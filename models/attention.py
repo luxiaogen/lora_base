@@ -279,6 +279,9 @@ class Attention_LoRA(nn.Module):
         self.register_buffer("global_p_conflict_mask", torch.empty(0, dtype=torch.bool), persistent=False)
         self.global_conflict_masks_active = False
 
+        self.register_buffer("frozen_p_conflict_mask", None, persistent=False)
+        self.register_buffer("previous_p_conflict_mask", None, persistent=False)
+
         self.register_buffer("pretrained_weight", torch.zeros(shape), persistent=True)
         self.register_buffer("pretrained_anchor_captured", torch.tensor(False, dtype=torch.bool), persistent=True)
 
@@ -676,6 +679,8 @@ class Attention_LoRA(nn.Module):
     def before_task(self, task: int):
 
         self.clear_global_conflict_masks()
+        self.frozen_p_conflict_mask = None
+        self.previous_p_conflict_mask = None
 
         t = int(task)
         self.cur_task = t
@@ -1017,7 +1022,7 @@ class Attention_LoRA(nn.Module):
             conflict_ratio: Optional[float] = None,
             valid_mask: Optional[torch.Tensor] = None,
     ):
-        if self.global_conflict_masks_active:
+        if self.global_conflict_masks_active or (isolated and self.frozen_p_conflict_mask is not None):
             ba_importance = _normalize_score(delta.detach().abs())
             w0_importance = self.w0_importance.to(device=delta.device, dtype=delta.dtype)
             if self.dual_mask_conflict_score_mode == "magnitude":
@@ -1027,11 +1032,45 @@ class Attention_LoRA(nn.Module):
             else:
                 score = w0_importance * ba_importance
             mask = self.global_p_conflict_mask if isolated else self.global_s_conflict_mask
+            if isolated and self.frozen_p_conflict_mask is not None:
+                mask = self.frozen_p_conflict_mask
             mask = mask.to(device=delta.device, dtype=delta.dtype)
             if valid_mask is not None:
                 mask = mask * valid_mask.to(mask)
             return score, mask
         return self._joint_conflict(delta, conflict_ratio=conflict_ratio, valid_mask=valid_mask)
+
+    @torch.no_grad()
+    def update_p_conflict_freeze(self, completed_epochs):
+        """Epoch-end capture and read-only telemetry for the layer/global-P experiment."""
+        freeze_epoch = int(self.args.get("p_conflict_freeze_epoch", 0))
+        if self.cur_task == 0 or freeze_epoch <= 0:
+            return
+        unit = self.P_lora[self.cur_task]
+        raw = unit.B_weight.detach() @ unit.A_weight.detach()
+        safe, _, applied = self._safe_delta(raw, isolated=True, return_details=True)
+        applied = applied.bool()
+        if completed_epochs == freeze_epoch:
+            self.frozen_p_conflict_mask = applied.clone()
+        # Counterfactual selection for diagnostics only; never replaces the frozen mask.
+        _, dynamic = self._joint_conflict(raw, conflict_ratio=self._conflict_parameters()[0])
+        dynamic = dynamic.bool()
+        previous = self.previous_p_conflict_mask
+        base = raw * (1.0 - self.general_mask.to(raw))
+        denominator = base.norm().clamp_min(1e-12)
+        strength = self._conflict_parameters()[1]
+        logging.info("PConflictFreeze %s", json.dumps({
+            "task": self.cur_task, "layer": self.layer_idx, "epoch": completed_epochs,
+            "frozen": self.frozen_p_conflict_mask is not None,
+            "applied_density": float(applied.float().mean()),
+            "dynamic_density": float(dynamic.float().mean()),
+            "applied_switch_fraction": float((applied ^ previous).float().mean()) if previous is not None else None,
+            "applied_jaccard_previous": float((applied & previous).sum() / (applied | previous).sum().clamp_min(1)) if previous is not None else None,
+            "applied_jaccard_dynamic": float((applied & dynamic).sum() / (applied | dynamic).sum().clamp_min(1)),
+            "applied_suppression_ratio": float((base - safe).norm() / denominator),
+            "dynamic_suppression_ratio": float((base * dynamic * strength).norm() / denominator),
+        }))
+        self.previous_p_conflict_mask = applied.clone()
 
     def _private_plastic_norm_matched_conflict(
             self,
@@ -1743,4 +1782,6 @@ class Attention_LoRA(nn.Module):
 
         self.clear_global_conflict_masks()
 
+        self.frozen_p_conflict_mask = None
+        self.previous_p_conflict_mask = None
         return None

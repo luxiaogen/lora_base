@@ -1370,6 +1370,9 @@ class Learner(BaseLearner):
                              mode=self.args.get('p_step_direction'), **self._p_step_counts))
             self._p_step_context = None
             scheduler.step()
+            if self._cur_task > 0 and int(self.args.get('p_conflict_freeze_epoch', 0)) > 0:
+                for module in self._iter_lora_modules():
+                    module.update_p_conflict_freeze(epoch + 1)
             if average_epochs and epoch >= self.run_epoch - average_epochs:
                 with torch.no_grad():
                     for running_sum, param in zip(averaged_sums, averaged_params):
