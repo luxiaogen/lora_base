@@ -28,6 +28,16 @@ from utils.dual_mask_budget import (
 )
 
 
+@torch.no_grad()
+def _apply_epoch_average(params, running_sums, count):
+    raw_sq = sum(param.detach().float().square().sum().item() for param in params)
+    shift_sq = sum((param.detach().float() - running_sum.float() / count).square().sum().item()
+                   for param, running_sum in zip(params, running_sums))
+    for param, running_sum in zip(params, running_sums):
+        param.copy_(running_sum / count)
+    return (shift_sq / max(raw_sq, 1e-12)) ** 0.5
+
+
 class Learner(BaseLearner):
     @staticmethod
     def _selective_functional_anchor_loss(current_features,w0_features,targets,prototypes,min_margin,tolerance,):
@@ -1230,6 +1240,18 @@ class Learner(BaseLearner):
         logging.info('CosFace margin: task=%s train=%.3f holdout_reference=%.3f',
                      self._cur_task, training_margin, self.margin)
 
+        average_epochs = int(self.args.get('late_weight_average_epochs', 0)) if self._cur_task > 0 else 0
+        averaged_params = []
+        averaged_sums = []
+        averaged_count = 0
+        if average_epochs:
+            for module in self._iter_lora_modules():
+                averaged_params.extend((module.S_lora[self._cur_task].B_weight,
+                                        module.P_lora[self._cur_task].B_weight))
+            network = self._network.module if isinstance(self._network, torch.nn.DataParallel) else self._network
+            averaged_params.extend(network.classifier_pool[self._cur_task].parameters())
+            averaged_sums = [torch.zeros_like(param) for param in averaged_params]
+
         repro = self._cur_task == 0 and self.args.get('task0_repro_diagnostic', False)
         batch_repro = repro and self.args.get('task0_repro_batch_diagnostic', False)
         if repro:
@@ -1348,6 +1370,11 @@ class Learner(BaseLearner):
                              mode=self.args.get('p_step_direction'), **self._p_step_counts))
             self._p_step_context = None
             scheduler.step()
+            if average_epochs and epoch >= self.run_epoch - average_epochs:
+                with torch.no_grad():
+                    for running_sum, param in zip(averaged_sums, averaged_params):
+                        running_sum.add_(param.detach())
+                averaged_count += 1
             train_acc = np.around(tensor2numpy(correct) * 100 / total, decimals=2)
 
             self._last_epoch_training_loss_metrics = {}
@@ -1414,6 +1441,17 @@ class Learner(BaseLearner):
 
         # test train finished  当前任务 LoRA 训练完成→ LoRA 尚未 merge→ CA 分类器校准尚未执行
         test_acc = self._compute_accuracy(self._network, test_loader)
+        if averaged_count:
+            relative_shift = _apply_epoch_average(averaged_params, averaged_sums, averaged_count)
+            if self._global_conflict_enabled():
+                self._refresh_global_conflict_masks(log_summary=True)
+            averaged_test_acc = self._compute_accuracy(self._network, test_loader)
+            logging.info('LateWeightAverage task=%s epochs=%s-%s snapshots=%s relative_shift=%.6f '
+                         'raw_premerge=%.2f averaged_premerge=%.2f',
+                         self._cur_task, self.run_epoch - averaged_count + 1, self.run_epoch,
+                         averaged_count, relative_shift,
+                         test_acc, averaged_test_acc)
+            test_acc = averaged_test_acc
         # pre-merge / pre-CA Test_accy
         final_info = 'Task {}, Epoch {}/{} => Loss {:.3f}, Train_accy {:.2f}, Test_accy {:.2f}'.format(
             self._cur_task,
