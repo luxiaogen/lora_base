@@ -1193,6 +1193,21 @@ class Learner(BaseLearner):
         if self._stage_audit is not None:
             self._stage_audit.record('post_merge', self._network, test_loader, self._device)
 
+    def _set_branch_training_phase(self, epoch):
+        s_epochs = int(self.args.get('sp_staged_s_epochs', 0))
+        if self._cur_task == 0 or s_epochs <= 0:
+            return
+        train_s = epoch < s_epochs
+        for module in self._iter_lora_modules():
+            for unit, trainable in ((module.S_lora[self._cur_task], train_s),
+                                    (module.P_lora[self._cur_task], not train_s)):
+                unit.B_weight.requires_grad_(trainable)
+                if not trainable:
+                    unit.B_weight.grad = None
+        if epoch in (0, s_epochs):
+            logging.info('SP staged training: task=%s epoch=%s phase=%s; classifier stays trainable; scheduler unchanged',
+                         self._cur_task, epoch + 1, 'S' if train_s else 'P')
+
     def train_function(self, train_loader, test_loader, optimizer, scheduler):
         self._prepare_head_balance()
         logging.info('Trainable params: {}'.format(count_parameters(self._network, True)))
@@ -1222,6 +1237,7 @@ class Learner(BaseLearner):
 
         for _, epoch in enumerate(prog_bar):
             self._network.train()
+            self._set_branch_training_phase(epoch)
 
             losses = 0.
             correct, total = 0, 0
