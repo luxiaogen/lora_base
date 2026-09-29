@@ -1543,6 +1543,8 @@ class Attention_LoRA(nn.Module):
             )
             plastic_mask = (1.0 - protect_mask).to(device=private_raw.device,dtype=private_raw.dtype,)
             private_score, global_private_mask = self._joint_conflict(private_raw,conflict_ratio=conflict_ratio,)
+            if self.frozen_p_conflict_mask is not None:
+                global_private_mask = self.frozen_p_conflict_mask.to(private_raw)
             selected_count = global_private_mask.detach().float().sum()
             if selected_count > 0.0:
                 private_mask_overlap = (global_private_mask.detach().float() * plastic_mask.float()).sum() / selected_count
