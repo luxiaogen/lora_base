@@ -1547,12 +1547,17 @@ class Learner(BaseLearner):
         self._network.to(self._device)
 
         self._network.eval()
+        two_centers = bool(self.args.get('ca_two_centers', False))
+        if two_centers:
+            from utils.ca_two_centers import add_center_offsets
+            center_generator = torch.Generator().manual_seed(torch.initial_seed() + self._cur_task)
         real_new = bool(self.args.get('ca_real_new_features', False))
         if real_new:
             # Local CPU stream: sampling real features must not change Gaussian/shuffle RNG.
             real_generator = torch.Generator().manual_seed(torch.initial_seed() + self._cur_task)
-        logging.info('CA feature source: new=%s old=gaussian per_class=256',
-                     'real' if real_new else 'gaussian')
+        logging.info('CA feature source: new=%s old=%s per_class=256',
+                     'real' if real_new else ('two_center' if two_centers else 'gaussian'),
+                     'two_center' if two_centers else 'gaussian')
         cov_shrinkage = float(self.args.get('ca_cov_shrinkage', 0.0))
         if cov_shrinkage > 0:
             logging.info('CACovShrinkage task=%s alpha=%.4f target=diagonal classes=%s',
@@ -1585,6 +1590,12 @@ class Learner(BaseLearner):
                 m = MultivariateNormal(cls_mean.float(), cls_cov.float())
 
                 sampled_data_single = m.sample(sample_shape=(num_sampled_pcls,))
+                if two_centers:
+                    # Decay the overall mean as before, not the offsets: this keeps
+                    # the mixture's total covariance equal to the original CA's.
+                    sampled_data_single = add_center_offsets(
+                        sampled_data_single, self._ca_mixture_offsets[c_id],
+                        self._ca_mixture_probs[c_id], center_generator)
                 if real_new and c_id >= self._known_classes:
                     # Keep the Gaussian draw above so subsequent old-class draws stay paired.
                     pool = self._ca_new_features[c_id]
@@ -1675,6 +1686,15 @@ class Learner(BaseLearner):
 
     def _compute_class_mean(self, data_manager, check_diff=False, oracle=False):
         self._ca_new_features = {}
+        two_centers = bool(self.args.get('ca_two_centers', False))
+        if two_centers:
+            from utils.ca_two_centers import fit_two_centers
+            offsets = torch.zeros(self._total_classes, 2, self.feature_dim)
+            probs = torch.zeros(self._total_classes, 2)
+            if self._known_classes:
+                offsets[:self._known_classes] = self._ca_mixture_offsets[:self._known_classes]
+                probs[:self._known_classes] = self._ca_mixture_probs[:self._known_classes]
+            self._ca_mixture_offsets, self._ca_mixture_probs = offsets, probs
         cache_real = (self.args.get('ca_real_new_features', False)
                       and self.args.get('ca', False) and self._cur_task > 0)
         if hasattr(self,'_class_means') and self._class_means is not None and not check_diff:  # 已经完成过 Task 0，模型中已经存在之前算好的 _class_means（旧类别的均值矩阵）
@@ -1701,6 +1721,15 @@ class Learner(BaseLearner):
             class_mean = torch.mean(torch.tensor(vectors), dim=0)
             class_cov = torch.cov(torch.tensor(vectors, dtype=torch.float64).T) + torch.eye(class_mean.shape[-1]) * 1e-3
 
+            if two_centers:
+                offsets, probs, shared_cov = fit_two_centers(vectors)
+                self._ca_mixture_offsets[class_idx] = offsets
+                self._ca_mixture_probs[class_idx] = probs
+                between_trace = (offsets.square().sum(1) * probs).sum()
+                logging.info('CATwoCenters class=%s samples=%s proportions=%s between_trace_fraction=%.6f',
+                             class_idx, len(vectors), probs.tolist(),
+                             float(between_trace / class_cov.trace()))
+                class_cov = shared_cov
             self._class_means[class_idx, :] = class_mean.detach()
             self._class_covs[class_idx, ...] = class_cov.detach()
 
