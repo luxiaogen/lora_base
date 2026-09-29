@@ -300,6 +300,7 @@ class Attention_LoRA(nn.Module):
         self.dual_mask_conflict_budget_multiplier = 1.0
         self.dual_mask_conflict_score_mode = "conflict"
         self.dual_mask_conflict_exact_topk = False
+        self.dual_mask_uniform_norm_matched = False
         self.dual_mask_conflict_strength = 1.0  # 决定冲突区压制多强
 
         self.dual_mask_conflict_reg_enabled = True
@@ -392,6 +393,7 @@ class Attention_LoRA(nn.Module):
         self.dual_mask_conflict_budget_multiplier = float(args.get("dual_mask_conflict_budget_multiplier", 1.0))
         self.dual_mask_conflict_score_mode = str(args.get("dual_mask_conflict_score_mode", "conflict")).lower()
         self.dual_mask_conflict_exact_topk = bool(args.get("dual_mask_conflict_exact_topk", False))
+        self.dual_mask_uniform_norm_matched = bool(args.get("dual_mask_uniform_norm_matched", False))
         self.dual_mask_conflict_strength = float(args.get("dual_mask_conflict_strength", 1.0))  # 冲突区压制多强  也就是beta
 
         self.dual_mask_conflict_reg_enabled = bool(args.get("dual_mask_conflict_reg_enabled", True))
@@ -1147,6 +1149,10 @@ class Attention_LoRA(nn.Module):
                 _, conflict_mask = self._branch_conflict(delta, isolated=isolated,
                     conflict_ratio=conflict_ratio,
                     valid_mask=(plastic_mask if isolated and self.dual_mask_private_conflict_mode == "plastic" else None),)
+            if self.dual_mask_uniform_norm_matched:
+                base = delta * (plastic_mask if isolated else protect_gate)
+                conflict_strength = self._uniform_conflict_strength(base, conflict_mask, conflict_strength)
+                conflict_mask = torch.ones_like(conflict_mask)
             # 高冲突区域按 conflict_strength 压制；其余区域保持不变。
             conflict_gate = 1.0 - conflict_strength * conflict_mask.to(delta.dtype)
         # Private LoRA 只使用非保护区；在二值互补 mask 下，
@@ -1158,6 +1164,13 @@ class Attention_LoRA(nn.Module):
             gate = protect_gate * conflict_gate  # [2304,768]
         safe = delta * gate
         return (safe, gate, conflict_mask) if return_details else safe
+
+    @staticmethod
+    def _uniform_conflict_strength(base, mask, strength):
+        # Match the removed Frobenius norm on this update, without differentiating alpha.
+        with torch.no_grad():
+            value = base.detach().float()
+            return strength * (value * mask).norm() / value.norm().clamp_min(1e-12)
 
     def _merge_base_and_conflict(
             self,
@@ -1422,6 +1435,10 @@ class Attention_LoRA(nn.Module):
                 )
         else:
             applied_mask = torch.zeros_like(raw_delta)
+        if self.dual_mask_uniform_norm_matched and applied_mask.any():
+            reference_removed_norm = float((before_conflict * applied_mask * conflict_strength).norm())
+            conflict_strength = float(self._uniform_conflict_strength(before_conflict, applied_mask, conflict_strength))
+            applied_mask = torch.ones_like(applied_mask)
         applied_mask = applied_mask.bool()
         selected_plastic = applied_mask & plastic
         removed = before_conflict - safe_delta
@@ -1501,7 +1518,7 @@ class Attention_LoRA(nn.Module):
         conflict_strength = min(max(conflict_strength, 0.0), 1.0)
         # 总分支的冲突门削弱程度  把raw_total = S_raw + P_raw作为整体，估算只施加冲突门后，整体增量范数下降多少
         conflict_gate_suppression = self._conflict_gate_suppression(raw_total,conflict_mask,conflict_strength,)
-        if not (self.dual_mask_s_conflict_enabled and self.dual_mask_p_conflict_enabled):
+        if self.dual_mask_uniform_norm_matched or not (self.dual_mask_s_conflict_enabled and self.dual_mask_p_conflict_enabled):
             base_total = torch.stack([
                 self._merge_base_and_conflict(item["raw_delta"], item["isolated"], conflict_ratio)[0]
                 for item in branch_deltas
@@ -1572,6 +1589,11 @@ class Attention_LoRA(nn.Module):
             if self.dual_mask_private_conflict_mode != "plastic_norm_matched":
                 actual_private_strength = conflict_strength
             private_plastic_delta = private_raw * plastic_mask
+            if self.dual_mask_uniform_norm_matched and actual_private_mask.any():
+                actual_private_strength = self._uniform_conflict_strength(private_plastic_delta, actual_private_mask, actual_private_strength)
+                actual_private_mask = torch.ones_like(actual_private_mask)
+                private_mask_overlap = plastic_mask.float().mean()
+                private_energy_overlap = (private_score * plastic_mask).sum() / private_score.sum().clamp_min(1e-12)
             private_gate_suppression = self._conflict_gate_suppression(private_plastic_delta,actual_private_mask,actual_private_strength,)
 
 
@@ -1744,6 +1766,16 @@ class Attention_LoRA(nn.Module):
                     if self._effective_gate_mode() == "unmasked":
                         reference = torch.zeros_like(reference)
                     error = (safe - base * (1 - conflict_strength * applied)).abs().max()
+                    if self.dual_mask_uniform_norm_matched:
+                        _, actual_gate, actual_mask = self._safe_delta(raw, item["isolated"], conflict_ratio, conflict_strength, return_details=True)
+                        error = (safe - raw * actual_gate).abs().max()
+                        logging.info("MatchedConflictNorm %s", json.dumps({
+                            "task": t, "layer": self.layer_idx, "branch": item["name"],
+                            "reference_removed_norm": float((base * applied * conflict_strength).norm()),
+                            "actual_removed_norm": float((base - safe).norm()),
+                            "base_norm": float(base.norm()),
+                        }))
+                        applied = actual_mask
                     logging.info("AppliedConflictBudget %s", json.dumps({
                         "task": t, "layer": self.layer_idx, "branch": item["name"],
                         "granularity": self.dual_mask_conflict_granularity,
