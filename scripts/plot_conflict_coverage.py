@@ -27,13 +27,13 @@ def extract(path):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--logs', nargs=2, type=Path, required=True)
+    parser.add_argument('--logs', nargs=1, type=Path, required=True)
     parser.add_argument('--out', type=Path, required=True)
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
     rows = []
     fig, ax = plt.subplots(figsize=(7.5, 4.7), layout='constrained')
-    for path, machine, color, marker in zip(args.logs, ('3090', '5090'), ('#2878B5', '#D97928'), ('o', 's')):
+    for path, machine, color, marker in zip(args.logs, ('3090',), ('#2878B5',), ('o',)):
         groups = extract(path)
         xs, ys = [], []
         for coverage, values in sorted(groups.items()):
@@ -46,15 +46,16 @@ def main():
                 rows.append((machine, coverage, task, layer, value, str(path)))
         ax.plot(xs, ys, marker=marker, color=color, label=machine, linewidth=1.8, markersize=7)
     ax.axhline(50, color='#999999', linestyle='--', linewidth=1, label='Uniform attenuation at beta = 0.5')
-    ax.annotate('10% selected coordinates\n~42.3% removed-update norm ratio', xy=(10, 42.29),
+    ten_percent = ys[xs.index(10)]
+    ax.annotate(f'10% selected coordinates\n{ten_percent:.2f}% removed-update norm ratio', xy=(10, ten_percent),
                 xytext=(27, 27), fontsize=10, arrowprops={'arrowstyle': '->', 'color': '#555555'})
     ax.set(xlabel='Selected conflict coordinates (% of full QKV matrix)',
            ylabel='Removed P-update norm ratio (%)',
-           xlim=(-3, 103), ylim=(-2, 57), title='Coverage is not suppression strength')
+           xlim=(-2, 63), ylim=(-2, 57), title='Coverage is not suppression strength')
     ax.spines[['top', 'right']].set_visible(False)
     ax.grid(axis='y', alpha=.18)
     ax.legend(loc='lower right', frameon=False, fontsize=9)
-    fig.supxlabel('Denominator: P-update norm after plastic gating, before conflict gating.\nImageNet-R T10, seed 1993; Task1–9 × 12-layer mean, GPUs kept separate.\nLines are guides, not extra measurements.', fontsize=8)
+    fig.supxlabel('Denominator: P-update norm after plastic gating, before conflict gating.\n3090, ImageNet-R T10, seed 1993; Task1–9 × 12-layer mean.\nLines are guides, not extra measurements; dashed line is a theoretical reference.', fontsize=8)
     for ext in ('png', 'pdf', 'svg'):
         fig.savefig(args.out / f'coverage_suppression.{ext}', dpi=220)
     plt.close(fig)
