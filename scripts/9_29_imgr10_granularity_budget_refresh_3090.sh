@@ -28,7 +28,7 @@ echo "============================================================"
 if
     python main.py --config exps/dlora/imgr10.json \
         --set 'seed=[1993]' \
-        --set prefix=imgr10_granularity_budget_refresh_3090_layer_budget1_seed1993 \
+        --set "prefix=imgr10_granularity_budget_refresh_3090_layer_budget1_seed1993_${TIMESTAMP}" \
         --set dataset=ImageNet_R \
         --set memory_size=0 \
         --set memory_per_class=0 \
@@ -165,7 +165,7 @@ echo "============================================================"
 if
     python main.py --config exps/dlora/imgr10.json \
         --set 'seed=[1993]' \
-        --set prefix=imgr10_granularity_budget_refresh_3090_projection_seed1993 \
+        --set "prefix=imgr10_granularity_budget_refresh_3090_projection_seed1993_${TIMESTAMP}" \
         --set dataset=ImageNet_R \
         --set memory_size=0 \
         --set memory_per_class=0 \
@@ -302,7 +302,7 @@ echo "============================================================"
 if
     python main.py --config exps/dlora/imgr10.json \
         --set 'seed=[1993]' \
-        --set prefix=imgr10_granularity_budget_refresh_3090_model_seed1993 \
+        --set "prefix=imgr10_granularity_budget_refresh_3090_model_seed1993_${TIMESTAMP}" \
         --set dataset=ImageNet_R \
         --set memory_size=0 \
         --set memory_per_class=0 \
@@ -439,7 +439,7 @@ echo "============================================================"
 if
     python main.py --config exps/dlora/imgr10.json \
         --set 'seed=[1993]' \
-        --set prefix=imgr10_granularity_budget_refresh_3090_budget0p5_seed1993 \
+        --set "prefix=imgr10_granularity_budget_refresh_3090_budget0p5_seed1993_${TIMESTAMP}" \
         --set dataset=ImageNet_R \
         --set memory_size=0 \
         --set memory_per_class=0 \
@@ -576,7 +576,7 @@ echo "============================================================"
 if
     python main.py --config exps/dlora/imgr10.json \
         --set 'seed=[1993]' \
-        --set prefix=imgr10_granularity_budget_refresh_3090_budget1p5_seed1993 \
+        --set "prefix=imgr10_granularity_budget_refresh_3090_budget1p5_seed1993_${TIMESTAMP}" \
         --set dataset=ImageNet_R \
         --set memory_size=0 \
         --set memory_per_class=0 \
@@ -713,7 +713,7 @@ echo "============================================================"
 if
     python main.py --config exps/dlora/imgr10.json \
         --set 'seed=[1993]' \
-        --set prefix=imgr10_granularity_budget_refresh_3090_magnitude1_seed1993 \
+        --set "prefix=imgr10_granularity_budget_refresh_3090_magnitude1_seed1993_${TIMESTAMP}" \
         --set dataset=ImageNet_R \
         --set memory_size=0 \
         --set memory_per_class=0 \
