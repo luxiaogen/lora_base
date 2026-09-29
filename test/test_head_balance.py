@@ -207,7 +207,7 @@ class HeadBalanceTests(unittest.TestCase):
                                   _old_competition_term=lambda *args: (None, {}),
                                   _old_model_distillation_term=lambda *args: (None, {}),
                                   _compute_accuracy=lambda *args: 0.)
-            for name in ('_prepare_head_balance', '_head_balance_term', '_backward_and_step'):
+            for name in ('_prepare_head_balance', '_head_balance_term', '_backward_and_step', '_set_branch_training_phase'):
                 setattr(obj, name, learner_method(name).__get__(obj))
             net.load_state_dict(initial)
             optimizer = torch.optim.SGD([p for p in net.parameters() if p.requires_grad], lr=.02)
