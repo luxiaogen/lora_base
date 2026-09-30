@@ -1218,6 +1218,19 @@ class Learner(BaseLearner):
             logging.info('SP staged training: task=%s epoch=%s phase=%s; classifier stays trainable; scheduler unchanged',
                          self._cur_task, epoch + 1, 'S' if train_s else 'P')
 
+    def _set_p_conflict_strength_epoch(self, epoch):
+        if self._cur_task == 0 or not self.args.get('p_conflict_strength_warmup', False):
+            return
+        scale = .5 + .1 * min(max(epoch - 5, 0), 5)
+        for module in self._iter_lora_modules():
+            module.p_conflict_strength_scale = scale
+            if module.layer_idx == 0:
+                base_strength = module._conflict_parameters()[1]
+                logging.info('PConflictWarmup task=%s epoch=%s multiplier=%.2f '
+                             'base_strength=%.4f train_strength=%.4f eval_merge_strength=%.4f',
+                             self._cur_task, epoch, scale, base_strength,
+                             base_strength * scale, base_strength)
+
     def train_function(self, train_loader, test_loader, optimizer, scheduler):
         self._prepare_head_balance()
         logging.info('Trainable params: {}'.format(count_parameters(self._network, True)))
@@ -1260,6 +1273,8 @@ class Learner(BaseLearner):
         for _, epoch in enumerate(prog_bar):
             self._network.train()
             self._set_branch_training_phase(epoch)
+            if self.args.get('p_conflict_strength_warmup', False):
+                self._set_p_conflict_strength_epoch(epoch + 1)
 
             losses = 0.
             correct, total = 0, 0

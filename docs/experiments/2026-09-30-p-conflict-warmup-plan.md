@@ -1,0 +1,60 @@
+# P 冲突门渐进加强：单候选实验
+
+状态：已实现；本地单元验证通过，CUDA 短测及正式结果待执行。
+
+## 问题与唯一变化
+
+检验在相同最终保护规则下，前期减弱 P 冲突门能否改善新任务学习，而不损害 Old。
+不是更换预算、冻结掩码、交替训练 S/P，也不是修改正则损失。
+
+新增开关 `p_conflict_strength_warmup=true`，默认关闭。仅 Task1–9 的 P 训练前向：
+
+| 一基训练轮次 | 本任务原有效 β 的倍率 |
+| --- | ---: |
+| 1–5 | 0.50 |
+| 6–10 | 0.60、0.70、0.80、0.90、1.00 |
+| 11–20 | 1.00 |
+
+倍率乘的是包含旧类重叠自适应后的有效 β，不是固定将 β 设置为 0.25。
+Task0、S 分支、掩码评分与选择、P 可塑区、所有正则、学习率和 CA 均保持原规则。
+评估及 merge 始终使用原 β；后十轮训练前向也已恢复原 β。
+不新增稠密状态，不保存 checkpoint，不改本机 JSON 的数据路径。
+
+## 正式协议与参照
+
+3090 原项目，AugReg ViT-B/16，ImageNet-R T10，seed1993。
+Task0 及增量任务均 20 epoch；anchor2.5、LoRA LR0.02、CA5、math-SDPA。
+layer 粒度、原冲突评分、自适应预算 1×、S/P 双门、正则权重 0.01。
+完整显式配置见 [sweep](../../scripts/sweeps/imgr10_p_conflict_warmup_3090.json)。
+
+复用最近同机 layer 基线，不重新训练基线：
+
+`/Users/luxiaogen/Desktop/loda_logs/9-30/9_29_imgr10_granularity_budget_refresh_3090.log`
+
+前缀 `imgr10_granularity_budget_refresh_3090_layer_budget1_seed1993` 的完整 T10 段，
+代码 `862f199`：Task0 97.10、Average 87.210、Last 82.45、Old 82.05、New 86.18、Forgetting 5.6867。
+不可使用该文件开头一轮短测作为对照；也不混用旧 anchor 或其他机器结果。
+默认关闭新开关时的输出、梯度、权重和 RNG 不变由测试检查。
+
+## 执行与记录
+
+```bash
+bash scripts/9_30_imgr10_p_conflict_warmup_3090.sh
+```
+
+脚本先执行一次 GPU 短测：Task0 1 轮、Task1 11 轮、CA1、W&B offline，
+覆盖完整强度变化边界。短测成功后自动启动唯一一个正式 T10 候选；短测分数不作性能证据。
+内层日志目录按时间戳和 smoke/run 区分，前缀包含模式与 PID，避免覆盖。
+日志中每个增量 epoch 输出 `PConflictWarmup`，包含倍率、原 β、训练 β、评估/合并 β。
+实际代码版本由脚本运行时输出；数据及预训练路径继续读取服务器原配置。
+
+## 验证与结果边界
+
+专项测试检查调度边界、真实 epoch 循环接入、Task0/关闭开关不变、S 不变、
+正则及选点不变、两分支 B 均更新、A 仍冻结、eval/merge 使用原 β，
+以及当前能量/旧重叠自适应规则。所有断言只位于 test，不在训练路径加性能断言。
+
+以阶段平均 Old/New、Average、Last、Forgetting 共同判断。只有 New 改善且整体成绩及
+Old 没有明显代价，才支持候选；仅 New 上升、Old 下降仍是取舍，不能称为提点。
+前期放松可能损害 Old，后期恢复门强度不保证自动恢复旧知识。
+单 seed 结果只作为初步证据。按最近 3090 完整训练约 80 分钟估算，本次另含短测。

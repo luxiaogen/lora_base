@@ -302,6 +302,7 @@ class Attention_LoRA(nn.Module):
         self.dual_mask_conflict_exact_topk = False
         self.dual_mask_uniform_norm_matched = False
         self.dual_mask_conflict_strength = 1.0  # 决定冲突区压制多强
+        self.p_conflict_strength_scale = 1.0
 
         self.dual_mask_conflict_reg_enabled = True
         self.dual_mask_s_conflict_enabled = True
@@ -683,6 +684,7 @@ class Attention_LoRA(nn.Module):
         self.clear_global_conflict_masks()
         self.frozen_p_conflict_mask = None
         self.previous_p_conflict_mask = None
+        self.p_conflict_strength_scale = 1.0
 
         t = int(task)
         self.cur_task = t
@@ -1235,7 +1237,11 @@ class Attention_LoRA(nn.Module):
         raw_delta = unit.B_weight @ unit.A_weight
         ## isolated=True: safe_delta_p = BA_p * plastic_mask * conflict_gate
         ## isolated=False: safe_delta_s = BA_s * protect_gate * conflict_gate
-        safe_delta = self._safe_delta(raw_delta, isolated=isolated)
+        if isolated and self.training and self.p_conflict_strength_scale != 1.0:
+            strength = self._conflict_parameters()[1] * self.p_conflict_strength_scale
+            safe_delta = self._safe_delta(raw_delta, isolated=True, conflict_strength=strength)
+        else:
+            safe_delta = self._safe_delta(raw_delta, isolated=isolated)
         if self.dual_mask_safe_residual_enabled and self.training and torch.is_grad_enabled():
             base_delta, _ = self._merge_base_and_conflict(raw_delta, isolated=isolated, conflict_ratio=self._conflict_parameters()[0], compute_conflict=False)
             self._pending_safe_residual_deltas.append(residual_scale * (base_delta - safe_delta))
