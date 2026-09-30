@@ -526,6 +526,14 @@ class Learner(BaseLearner):
 
     def _backward_and_step(self, task_loss, extra_loss, optimizer, output, targets):
         """Optimization extension point used by experimental learners."""
+        branch_context = getattr(self, '_branch_choice_context', None)
+        if branch_context is not None:
+            branch_snapshots = []
+            for module in self._iter_lora_modules():
+                for branch, units in (('S', module.S_lora), ('P', module.P_lora)):
+                    unit = units[self._cur_task]
+                    if unit is not None and unit.B_weight.requires_grad:
+                        branch_snapshots.append((branch, unit.B_weight, unit.B_weight.detach().clone()))
         oracle_context = getattr(self, '_p_old_gradient_context', None)
         if oracle_context is not None:
             oracle_snapshots = [(module.P_lora[self._cur_task].B_weight,
@@ -573,6 +581,10 @@ class Learner(BaseLearner):
                     else:
                         param.grad.add_(grad)
         optimizer.step()
+        if branch_context is not None:
+            epoch, batch, inputs = branch_context
+            self._branch_choice.step(self._network, branch_snapshots, inputs, targets,
+                                     self.scale, self._cur_task, epoch, batch)
         if oracle_context is not None:
             epoch, batch, inputs, loss_function = oracle_context
             self._p_old_gradient_oracle.step(self._network, oracle_snapshots, inputs, targets,
@@ -923,6 +935,13 @@ class Learner(BaseLearner):
             train_dataset = data_manager.get_dataset(task_classes, source='train', mode='train')
         self.train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True,
                                        num_workers=self.num_workers, pin_memory=True)  # 随机增强视图：用于优化 LoRA
+        self._branch_choice = None
+        if self._cur_task > 0 and self.args.get('branch_choice_mode', 'off') != 'off':
+            from utils.branch_step_choice import BranchStepChoice
+            self._branch_choice = BranchStepChoice(
+                data_manager, self._known_classes, self._total_classes,
+                int(self.args['seed']) + 10007 * self._cur_task, self.batch_size,
+                self.args['branch_choice_mode'], self.args.get('branch_choice_scope', 'p'))
         self._p_old_gradient_oracle = None
         if self._cur_task > 0 and self.args.get('p_old_gradient_oracle', False):
             from utils.p_old_gradient_oracle import OldGradientOracle
@@ -986,6 +1005,7 @@ class Learner(BaseLearner):
                 np.arange(self._known_classes, self._total_classes), source='train', mode='test')
         self._prepare_incremental_head(data_manager, 'pre')
         self._train(self.train_loader, self.test_loader)
+        self._branch_choice = None
         self._p_old_gradient_oracle = None
         self._old_teacher = None
         self._prepare_incremental_head(data_manager, 'post')
@@ -1250,6 +1270,7 @@ class Learner(BaseLearner):
 
     def train_function(self, train_loader, test_loader, optimizer, scheduler):
         self._prepare_head_balance()
+        branch_choice = getattr(self, '_branch_choice', None)
         old_gradient_oracle = getattr(self, '_p_old_gradient_oracle', None)
         logging.info('Trainable params: {}'.format(count_parameters(self._network, True)))
         # Double check
@@ -1366,6 +1387,9 @@ class Learner(BaseLearner):
                     self._p_step_probe = (inputs, loss_cos)
                 self._pair_separation_diagnostic = (epoch, i) if i == 0 and epoch in (0, 9, 19) else None
                 self._p_old_gradient_context = None
+                self._branch_choice_context = None
+                if branch_choice is not None and i % int(self.args.get('branch_choice_interval', 5)) == 0:
+                    self._branch_choice_context = (epoch, i, inputs)
                 if (old_gradient_oracle is not None
                         and i % int(self.args.get('p_old_gradient_interval', 5)) == 0):
                     self._p_old_gradient_context = (epoch, i, inputs, loss_cos)
@@ -1407,6 +1431,9 @@ class Learner(BaseLearner):
                              mode=self.args.get('p_step_direction'), **self._p_step_counts))
             if old_gradient_oracle is not None:
                 old_gradient_oracle.summary(self._cur_task, epoch)
+            if branch_choice is not None:
+                branch_choice.summary(self._cur_task, epoch)
+            self._branch_choice_context = None
             self._p_old_gradient_context = None
             self._p_step_context = None
             scheduler.step()
