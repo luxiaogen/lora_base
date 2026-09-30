@@ -1,6 +1,7 @@
 # P 冲突门渐进加强：单候选实验
 
-状态：已实现；本地单元验证通过，CUDA 短测及正式结果待执行。
+状态：已实现并部署；3090 队列于 2026-09-30 18:50（北京时间）启动。
+GPU 短测中，通过后自动进入正式 T10；尚无正式性能结论。
 
 ## 问题与唯一变化
 
@@ -58,3 +59,19 @@ bash scripts/9_30_imgr10_p_conflict_warmup_3090.sh
 Old 没有明显代价，才支持候选；仅 New 上升、Old 下降仍是取舍，不能称为提点。
 前期放松可能损害 Old，后期恢复门强度不保证自动恢复旧知识。
 单 seed 结果只作为初步证据。按最近 3090 完整训练约 80 分钟估算，本次另含短测。
+
+## 2026-09-30 部署与启动
+
+- 训练代码提交：`069a0806a3412d83f8996ce2b78d2a94e68143c2`，已推送原实验分支。
+- 3090 原项目：`/home/shengqin/lys/baseline/LoDA_ICML2026`，运行于该提交的 detached HEAD；没有新建 worktree 或项目。
+- 服务器 GitHub 拉取因 SSH 公钥认证失败；改用包含该提交的 Git bundle 部署，未修改服务器 GitHub 登录配置。
+- Python：`/home/shengqin/anaconda3/envs/ICML2026_LoDA/bin/python`；93 项相关服务器测试通过，Shell 语法检查通过。
+- 本地专项/相关测试 85 项通过；完整发现 362 项中两项因本机缺少 `easydict` 导入失败，不冒充完整回归通过。
+- 队列 PID：`2861433`；外层日志：`/home/shengqin/lys/baseline/LoDA_ICML2026/logs/9_30_imgr10_p_conflict_warmup_3090_20260930_185039.log`。
+- 18:51 检查：Python PID `2861450` 使用 GPU，短测 Task0 一轮结束；该分数不作性能结果。
+- 18:52 检查：Task1 epoch1–3 输出倍率 0.50，原有效 β=0.5404、训练 β=0.2702、评估/merge β=0.5404；渐进路径实际启用。短测仍未完成，不提前标记正式结果。
+- 数据路径、预训练路径继续来自服务器原 JSON；正式配置与最新本机 layer 基线配对，保留原正则、CA5、math-SDPA 和 anchor2.5。
+
+```bash
+tail -f logs/9_30_imgr10_p_conflict_warmup_3090_20260930_185039.log
+```
