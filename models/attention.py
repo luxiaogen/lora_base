@@ -281,6 +281,7 @@ class Attention_LoRA(nn.Module):
 
         self.register_buffer("frozen_p_conflict_mask", None, persistent=False)
         self.register_buffer("previous_p_conflict_mask", None, persistent=False)
+        self.register_buffer("p_hard_zero_random_mask", None, persistent=False)
 
         self.register_buffer("pretrained_weight", torch.zeros(shape), persistent=True)
         self.register_buffer("pretrained_anchor_captured", torch.tensor(False, dtype=torch.bool), persistent=True)
@@ -684,6 +685,7 @@ class Attention_LoRA(nn.Module):
         self.clear_global_conflict_masks()
         self.frozen_p_conflict_mask = None
         self.previous_p_conflict_mask = None
+        self.p_hard_zero_random_mask = None
         self.p_conflict_strength_scale = 1.0
 
         t = int(task)
@@ -1104,6 +1106,28 @@ class Attention_LoRA(nn.Module):
             return self.dual_mask_task0_gate_mode
         return "full"
 
+    @torch.no_grad()
+    def _p_hard_zero_mask(self, delta):
+        """Delete an exact fraction of plastic coordinates; random ranking is task-fixed."""
+        mode = self.args.get("p_hard_zero_mode", "off")
+        plastic = (1.0 - self.general_mask.to(delta)).bool()
+        ratio = self.args.get("p_hard_zero_ratio", .4)
+        if mode == "random":
+            if self.p_hard_zero_random_mask is None:
+                indices = plastic.flatten().nonzero(as_tuple=True)[0]
+                k = min(indices.numel(), max(0, int(indices.numel() * ratio)))
+                generator = torch.Generator(device=delta.device)
+                generator.manual_seed(int(self.args.get("seed", 1993)) + 1009 * self.cur_task + 9176 * self.layer_idx)
+                order = torch.randperm(indices.numel(), device=delta.device, generator=generator)
+                selected = torch.zeros_like(plastic).flatten()
+                selected[indices[order[:k]]] = True
+                self.p_hard_zero_random_mask = selected.reshape_as(plastic)
+            return self.p_hard_zero_random_mask.to(delta)
+        score = delta.detach().abs()
+        if mode == "conflict":
+            score = self.w0_importance.to(delta) * score
+        return _exact_top_ratio_mask(score, ratio, plastic)
+
     def _conflict_gate_enabled(self, isolated):
         return self.dual_mask_p_conflict_enabled if isolated else self.dual_mask_s_conflict_enabled
 
@@ -1138,6 +1162,9 @@ class Attention_LoRA(nn.Module):
         conflict_mask = torch.zeros_like(delta) if return_details else None
         if gate_mode == "protect_only" or private_conflict_disabled or not self._conflict_gate_enabled(isolated):
             conflict_gate = torch.ones_like(protect_gate)
+        elif isolated and self.cur_task > 0 and self.args.get("p_hard_zero_mode", "off") != "off":
+            conflict_mask = self._p_hard_zero_mask(delta)
+            conflict_gate = 1.0 - conflict_mask
         else:
             # conflict 高表示,W0 很重要，而且 LoRA 也想大幅修改这个位置
             if conflict_strength is None:
@@ -1199,6 +1226,9 @@ class Attention_LoRA(nn.Module):
         private_conflict_disabled = (isolated and self.dual_mask_private_conflict_mode == "none")
         if gate_mode == "protect_only" or private_conflict_disabled or not self._conflict_gate_enabled(isolated):
             return base_delta, torch.zeros_like(delta)
+
+        if isolated and self.cur_task > 0 and self.args.get("p_hard_zero_mode", "off") != "off":
+            return base_delta, self._p_hard_zero_mask(delta)
 
         if isolated and self.dual_mask_private_conflict_mode == "plastic_norm_matched":
             conflict_mask, _ = self._private_plastic_norm_matched_conflict(
@@ -1422,7 +1452,10 @@ class Attention_LoRA(nn.Module):
                 and self.dual_mask_private_conflict_mode != "none"
                 and self.dual_mask_p_conflict_enabled
         ):
-            if self.dual_mask_private_conflict_mode == "plastic_norm_matched":
+            if self.cur_task > 0 and self.args.get("p_hard_zero_mode", "off") != "off":
+                applied_mask = self._p_hard_zero_mask(raw_delta)
+                conflict_strength = 1.0
+            elif self.dual_mask_private_conflict_mode == "plastic_norm_matched":
                 _, baseline_mask = self._branch_conflict(
                     raw_delta, isolated=True, conflict_ratio=conflict_ratio,
                 )
@@ -1568,6 +1601,8 @@ class Attention_LoRA(nn.Module):
             private_score, global_private_mask = self._joint_conflict(private_raw,conflict_ratio=conflict_ratio,)
             if self.frozen_p_conflict_mask is not None:
                 global_private_mask = self.frozen_p_conflict_mask.to(private_raw)
+            if self.cur_task > 0 and self.args.get("p_hard_zero_mode", "off") != "off":
+                global_private_mask = self._p_hard_zero_mask(private_raw)
             selected_count = global_private_mask.detach().float().sum()
             if selected_count > 0.0:
                 private_mask_overlap = (global_private_mask.detach().float() * plastic_mask.float()).sum() / selected_count
@@ -1594,6 +1629,8 @@ class Attention_LoRA(nn.Module):
                 actual_private_mask = global_private_mask
             if self.dual_mask_private_conflict_mode != "plastic_norm_matched":
                 actual_private_strength = conflict_strength
+            if self.cur_task > 0 and self.args.get("p_hard_zero_mode", "off") != "off":
+                actual_private_strength = 1.0
             private_plastic_delta = private_raw * plastic_mask
             if self.dual_mask_uniform_norm_matched and actual_private_mask.any():
                 actual_private_strength = self._uniform_conflict_strength(private_plastic_delta, actual_private_mask, actual_private_strength)
@@ -1772,6 +1809,18 @@ class Attention_LoRA(nn.Module):
                     if self._effective_gate_mode() == "unmasked":
                         reference = torch.zeros_like(reference)
                     error = (safe - base * (1 - conflict_strength * applied)).abs().max()
+                    if item["isolated"] and self.cur_task > 0 and self._effective_gate_mode() == "full" and self.args.get("p_hard_zero_mode", "off") != "off":
+                        error = (safe - base * (1 - applied)).abs().max()
+                        plastic_count = int((1.0 - self.general_mask).bool().sum())
+                        logging.info("PHardZero %s", json.dumps({
+                            "task": t, "layer": self.layer_idx, "mode": self.args["p_hard_zero_mode"],
+                            "target_fraction": self.args.get("p_hard_zero_ratio", .4),
+                            "plastic_coordinates": plastic_count, "zeroed_coordinates": int(applied.sum()),
+                            "zeroed_fraction_of_plastic": float(applied.sum()) / plastic_count if plastic_count else 0.0,
+                            "retained_nonzero_coordinates": int((safe != 0).sum()),
+                            "removed_norm": float((base - safe).norm()), "plastic_update_norm": float(base.norm()),
+                            "merge_error": float(error),
+                        }))
                     if self.dual_mask_uniform_norm_matched:
                         _, actual_gate, actual_mask = self._safe_delta(raw, item["isolated"], conflict_ratio, conflict_strength, return_details=True)
                         error = (safe - raw * actual_gate).abs().max()
@@ -1824,4 +1873,5 @@ class Attention_LoRA(nn.Module):
 
         self.frozen_p_conflict_mask = None
         self.previous_p_conflict_mask = None
+        self.p_hard_zero_random_mask = None
         return None
