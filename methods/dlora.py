@@ -526,6 +526,12 @@ class Learner(BaseLearner):
 
     def _backward_and_step(self, task_loss, extra_loss, optimizer, output, targets):
         """Optimization extension point used by experimental learners."""
+        oracle_context = getattr(self, '_p_old_gradient_context', None)
+        if oracle_context is not None:
+            oracle_snapshots = [(module.P_lora[self._cur_task].B_weight,
+                                 module.P_lora[self._cur_task].B_weight.detach().clone())
+                                for module in self._iter_lora_modules()
+                                if module.P_lora[self._cur_task] is not None]
         direction_context = getattr(self, '_p_step_context', None)
         if direction_context is not None:
             from utils.p_step_direction import prepare_step, finish_step
@@ -567,6 +573,10 @@ class Learner(BaseLearner):
                     else:
                         param.grad.add_(grad)
         optimizer.step()
+        if oracle_context is not None:
+            epoch, batch, inputs, loss_function = oracle_context
+            self._p_old_gradient_oracle.step(self._network, oracle_snapshots, inputs, targets,
+                                             loss_function, self.scale, self._cur_task, epoch, batch)
         if direction_context is not None:
             mode, epoch, batch, detailed = direction_context
             probe_records = [] if detailed else None
@@ -913,6 +923,12 @@ class Learner(BaseLearner):
             train_dataset = data_manager.get_dataset(task_classes, source='train', mode='train')
         self.train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True,
                                        num_workers=self.num_workers, pin_memory=True)  # 随机增强视图：用于优化 LoRA
+        self._p_old_gradient_oracle = None
+        if self._cur_task > 0 and self.args.get('p_old_gradient_oracle', False):
+            from utils.p_old_gradient_oracle import OldGradientOracle
+            self._p_old_gradient_oracle = OldGradientOracle(
+                data_manager, self._known_classes, self._total_classes,
+                int(self.args['seed']) + 10007 * self._cur_task, self.batch_size)
         # 拿到所有已见类的 test set
         test_dataset = data_manager.get_dataset(np.arange(0, self._total_classes), source='test', mode='test')
         self.test_loader = DataLoader(test_dataset, batch_size=self.batch_size, shuffle=False,
@@ -970,6 +986,7 @@ class Learner(BaseLearner):
                 np.arange(self._known_classes, self._total_classes), source='train', mode='test')
         self._prepare_incremental_head(data_manager, 'pre')
         self._train(self.train_loader, self.test_loader)
+        self._p_old_gradient_oracle = None
         self._old_teacher = None
         self._prepare_incremental_head(data_manager, 'post')
 
@@ -1233,6 +1250,7 @@ class Learner(BaseLearner):
 
     def train_function(self, train_loader, test_loader, optimizer, scheduler):
         self._prepare_head_balance()
+        old_gradient_oracle = getattr(self, '_p_old_gradient_oracle', None)
         logging.info('Trainable params: {}'.format(count_parameters(self._network, True)))
         # Double check
         enabled = set()
@@ -1347,6 +1365,10 @@ class Learner(BaseLearner):
                     self._p_step_context = (direction_mode, epoch, i, i == 0 and epoch in (0, 9, 19))
                     self._p_step_probe = (inputs, loss_cos)
                 self._pair_separation_diagnostic = (epoch, i) if i == 0 and epoch in (0, 9, 19) else None
+                self._p_old_gradient_context = None
+                if (old_gradient_oracle is not None
+                        and i % int(self.args.get('p_old_gradient_interval', 5)) == 0):
+                    self._p_old_gradient_context = (epoch, i, inputs, loss_cos)
                 loss = self._backward_and_step(
                     task_loss,
                     extra_loss,
@@ -1383,6 +1405,9 @@ class Learner(BaseLearner):
             if getattr(self, '_p_step_counts', None):
                 logging.info('PStepSummary %s', dict(task=self._cur_task, epoch=epoch + 1,
                              mode=self.args.get('p_step_direction'), **self._p_step_counts))
+            if old_gradient_oracle is not None:
+                old_gradient_oracle.summary(self._cur_task, epoch)
+            self._p_old_gradient_context = None
             self._p_step_context = None
             scheduler.step()
             if self._cur_task > 0 and int(self.args.get('p_conflict_freeze_epoch', 0)) > 0:
