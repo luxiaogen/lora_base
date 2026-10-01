@@ -553,25 +553,41 @@ class Learner(BaseLearner):
             snapshots = prepare_step(self._iter_lora_modules(), task_loss)
         loss = task_loss if extra_loss is None else task_loss + extra_loss
         self._last_wpre_distill_metrics = {}
-        wpre_grads, s_params, weighted_wpre = (), [], None
+        wpre_grads, wpre_params, weighted_wpre = (), [], None
         wpre_weight = float(getattr(self, 'args', {}).get('wpre_distill_weight', 0.0))
         if wpre_weight > 0 and self._cur_task > 0:
-            from utils.wpre_distill import selective_feature_loss, log_s_gradients
-            s_params = [module.S_lora[self._cur_task].B_weight
-                        for module in self._iter_lora_modules()
-                        if module.S_lora[self._cur_task] is not None
-                        and module.S_lora[self._cur_task].B_weight.requires_grad]
+            from utils.wpre_distill import selective_feature_loss, log_s_gradients, all_seen_logits
+            scope = self.args.get('wpre_distill_scope', 's')
+            branches = ('S_lora', 'P_lora') if scope == 'sp' else (scope.upper() + '_lora',)
+            for module in self._iter_lora_modules():
+                for attribute in branches:
+                    unit = getattr(module, attribute)[self._cur_task]
+                    if unit is not None and unit.B_weight.requires_grad:
+                        wpre_params.append(unit.B_weight)
+            selection = self.args.get('wpre_distill_selection', 'teacher_correct')
+            normalization = self.args.get('wpre_distill_normalization', 'selected')
+            student_logits, generator = None, None
+            if selection != 'teacher_correct' or normalization == 'batch':
+                network = self._network.module if isinstance(self._network, torch.nn.DataParallel) else self._network
+                student_logits = all_seen_logits(output['features'], network.classifier_pool[:network.numtask])
+            if selection == 'random_matched':
+                if getattr(self, '_wpre_random_task', None) != self._cur_task:
+                    self._wpre_random_task = self._cur_task
+                    self._wpre_selection_generator = torch.Generator().manual_seed(
+                        int(self.args['seed']) + 10007 * self._cur_task)
+                generator = self._wpre_selection_generator
             raw_wpre, metrics = selective_feature_loss(
                 output['features'], output['wpre_teacher_features'], self._wpre_ridge_weight,
-                targets + self._known_classes)
+                targets + self._known_classes, selection=selection, student_logits=student_logits,
+                normalization=normalization, generator=generator)
             weighted_wpre = wpre_weight * raw_wpre
             self._last_wpre_distill_metrics = dict(metrics, wpre_weighted=weighted_wpre.detach())
-            wpre_grads = torch.autograd.grad(weighted_wpre, s_params,
+            wpre_grads = torch.autograd.grad(weighted_wpre, wpre_params,
                                               retain_graph=True, allow_unused=True)
             diagnostic = getattr(self, '_wpre_distill_diagnostic', None)
             if diagnostic is not None:
-                log_s_gradients(task_loss, s_params, wpre_grads,
-                                self._cur_task, *diagnostic)
+                log_s_gradients(task_loss, wpre_params, wpre_grads,
+                                self._cur_task, *diagnostic, scope=scope)
         self._last_pair_separation_metrics = {}
         pair_weight = float(getattr(self, 'args', {}).get('pair_separation_weight', 0.0))
         pair_grads, named_params = (), []
@@ -601,7 +617,7 @@ class Learner(BaseLearner):
         # The ordinary loss still updates all original trainable parameters.
         # Add only the auxiliary gradients requested by the experimental scope.
         with torch.no_grad():
-            for param, grad in zip(s_params, wpre_grads):
+            for param, grad in zip(wpre_params, wpre_grads):
                 if grad is not None:
                     if param.grad is None:
                         param.grad = grad.detach().clone()
