@@ -282,6 +282,8 @@ class Attention_LoRA(nn.Module):
         self.register_buffer("frozen_p_conflict_mask", None, persistent=False)
         self.register_buffer("previous_p_conflict_mask", None, persistent=False)
         self.register_buffer("p_hard_zero_random_mask", None, persistent=False)
+        self.register_buffer("composed_random_score", None, persistent=False)
+        self._composed_forward_gate = None
 
         self.register_buffer("pretrained_weight", torch.zeros(shape), persistent=True)
         self.register_buffer("pretrained_anchor_captured", torch.tensor(False, dtype=torch.bool), persistent=True)
@@ -300,6 +302,7 @@ class Attention_LoRA(nn.Module):
         self.dual_mask_conflict_ratio = 0.25  # 决定 BA-W0 冲突区多大
         self.dual_mask_conflict_budget_multiplier = 1.0
         self.dual_mask_conflict_score_mode = "conflict"
+        self.dual_mask_composed_conflict = "off"
         self.dual_mask_conflict_exact_topk = False
         self.dual_mask_uniform_norm_matched = False
         self.dual_mask_conflict_strength = 1.0  # 决定冲突区压制多强
@@ -394,6 +397,7 @@ class Attention_LoRA(nn.Module):
         self.dual_mask_conflict_ratio = float(args.get("dual_mask_conflict_ratio", 0.25)) # Top-k 的比例参数  0.1
         self.dual_mask_conflict_budget_multiplier = float(args.get("dual_mask_conflict_budget_multiplier", 1.0))
         self.dual_mask_conflict_score_mode = str(args.get("dual_mask_conflict_score_mode", "conflict")).lower()
+        self.dual_mask_composed_conflict = str(args.get("dual_mask_composed_conflict", "off")).lower()
         self.dual_mask_conflict_exact_topk = bool(args.get("dual_mask_conflict_exact_topk", False))
         self.dual_mask_uniform_norm_matched = bool(args.get("dual_mask_uniform_norm_matched", False))
         self.dual_mask_conflict_strength = float(args.get("dual_mask_conflict_strength", 1.0))  # 冲突区压制多强  也就是beta
@@ -1131,6 +1135,63 @@ class Attention_LoRA(nn.Module):
     def _conflict_gate_enabled(self, isolated):
         return self.dual_mask_p_conflict_enabled if isolated else self.dual_mask_s_conflict_enabled
 
+    def _composed_conflict_active(self):
+        return (self.dual_mask_composed_conflict != "off" and self.cur_task > 0
+                and self.use_slora and self.use_plora
+                and self.S_lora[self.cur_task] is not None
+                and self.P_lora[self.cur_task] is not None)
+
+    def _composed_base_gate(self, delta, isolated):
+        protect = self.general_mask.to(delta)
+        if isolated:
+            return 1.0 - protect
+        strength = min(max(self.effective_protect_strength, 0.0), 1.0)
+        return 1.0 - strength * protect if self.dual_mask_s_protect_enabled else torch.ones_like(protect)
+
+    def _composed_conflict_state(self):
+        """Rank the composed update; apply the same detached conflict gate to S/P."""
+        s, p = self.S_lora[self.cur_task], self.P_lora[self.cur_task]
+        raw_s = self.slora_gamma * (s.B_weight @ s.A_weight)
+        raw_p = self.plora_gamma * (p.B_weight @ p.A_weight)
+        s_base = raw_s * self._composed_base_gate(raw_s, False)
+        p_base = raw_p * self._composed_base_gate(raw_p, True)
+        net = s_base + p_base
+        with torch.no_grad():
+            # Average the two original adaptive budgets, before changing how to rank.
+            # Thus each shared-mask branch has the same average coordinate budget.
+            _, s_reference = self._joint_conflict(raw_s)
+            _, p_reference = self._joint_conflict(raw_p)
+            k = (int(s_reference.sum() + p_reference.sum()) + 1) // 2
+            k = min(net.numel(), max(0, k))
+            mode = self.dual_mask_composed_conflict
+            magnitude = net.detach().abs()
+            if mode == "gross":
+                magnitude = s_base.detach().abs() + p_base.detach().abs()
+            importance = self.w0_importance.to(net)
+            score = importance * magnitude
+            if mode == "magnitude":
+                score = magnitude
+            elif mode == "w_pre":
+                score = importance
+            elif mode == "random":
+                if self.composed_random_score is None:
+                    generator = torch.Generator(device=net.device)
+                    generator.manual_seed(int(self.args.get("seed", 1993)) + 1009 * self.cur_task + 9176 * self.layer_idx)
+                    self.composed_random_score = torch.rand(net.shape, device=net.device,
+                                                           generator=generator, dtype=net.dtype)
+                score = self.composed_random_score
+            selected = torch.zeros_like(net).flatten()
+            if k:
+                selected[score.flatten().topk(k, sorted=False).indices] = 1
+            selected = selected.reshape_as(net)
+            strength = self._conflict_parameters()[1]
+            gate = 1.0 - strength * selected
+            if mode == "uniform":
+                alpha = self._uniform_conflict_strength(net, selected, strength)
+                gate = torch.ones_like(net) * (1.0 - alpha)
+        return dict(raw_s=raw_s, raw_p=raw_p, s_base=s_base, p_base=p_base, net=net, gate=gate, selected=selected,
+                    score=score, reference_k=k, s_reference=s_reference, p_reference=p_reference)
+
     def _safe_delta(
             self,
             delta: torch.Tensor,
@@ -1143,6 +1204,12 @@ class Attention_LoRA(nn.Module):
         gate_mode = self._effective_gate_mode()
         if gate_mode == "unmasked":
             return (delta, torch.ones_like(delta), torch.zeros_like(delta)) if return_details else delta
+        if self._composed_conflict_active():
+            state = self._composed_conflict_state()
+            gate = self._composed_base_gate(delta, isolated) * state["gate"]
+            applied = torch.ones_like(delta) if self.dual_mask_composed_conflict == "uniform" else state["selected"]
+            safe = delta * gate
+            return (safe, gate, applied) if return_details else safe
 
         # general_mask/protect_mask: W0 重要区域，应该保护
         protect_mask = self.general_mask.to(device=delta.device, dtype=delta.dtype)
@@ -1328,7 +1395,10 @@ class Attention_LoRA(nn.Module):
         if gate_mode == "unmasked":
             return delta.sum() * 0.0
 
-        safe_delta = self._safe_delta(delta, isolated=isolated)
+        if self._composed_conflict_active() and self._composed_forward_gate is not None:
+            safe_delta = delta * self._composed_base_gate(delta, isolated) * self._composed_forward_gate
+        else:
+            safe_delta = self._safe_delta(delta, isolated=isolated)
         w0_importance = self.w0_importance.to(device=delta.device, dtype=delta.dtype)
         # 如果某个位置 W0 很重要，那么 safe_delta 在这个位置越大，惩罚越大
         protection = (w0_importance * safe_delta.pow(2)).mean()
@@ -1717,6 +1787,7 @@ class Attention_LoRA(nn.Module):
 
         self._pending_safe_residual_deltas = []
         self._last_safe_residual_loss = None
+        self._composed_forward_gate = None
 
         zero_output = x.new_zeros((*x.shape[:-1], self.dim * 3))
 
@@ -1729,6 +1800,11 @@ class Attention_LoRA(nn.Module):
         # 当前任务已经 merge，后续只使用写入 qkv.weight 的增量。
         if unit_s is None and unit_p is None:
             return zero_output
+
+        if self._composed_conflict_active():
+            state = self._composed_conflict_state()
+            self._composed_forward_gate = state["gate"]
+            return F.linear(x, state["net"] * state["gate"])
 
         if not self.use_slora and not self.use_plora:
             if unit_s is None:
@@ -1798,10 +1874,19 @@ class Attention_LoRA(nn.Module):
 
             self.last_functional_merge_strength = float(conflict_strength)
 
-            for item in branch_deltas:
-                mask_delta(item, conflict_ratio, conflict_strength)
+            composed = None
+            if self._composed_conflict_active():
+                with torch.no_grad():
+                    composed = self._composed_conflict_state()
+                    for item in branch_deltas:
+                        base = composed["p_base" if item["isolated"] else "s_base"]
+                        item["safe_delta"] = base * composed["gate"]
+                    self._log_composed_merge(t, composed, conflict_strength)
+            else:
+                for item in branch_deltas:
+                    mask_delta(item, conflict_ratio, conflict_strength)
 
-            if self.dual_mask_applied_budget_log:
+            if self.dual_mask_applied_budget_log and composed is None:
                 for item in branch_deltas:
                     raw, safe = item["raw_delta"], item["safe_delta"]
                     base, applied = self._merge_base_and_conflict(raw, item["isolated"], conflict_ratio)
@@ -1859,9 +1944,11 @@ class Attention_LoRA(nn.Module):
             self._save_dual_mask_snapshot(t, branch_deltas, conflict_ratio=conflict_ratio, conflict_strength=conflict_strength)
 
             #########################
-            self._log_merge_stats(t, branch_deltas, conflict_ratio=conflict_ratio, conflict_strength=conflict_strength)
+            if composed is None:
+                self._log_merge_stats(t, branch_deltas, conflict_ratio=conflict_ratio, conflict_strength=conflict_strength)
             with torch.no_grad():
-                delta = torch.stack([item["safe_delta"] for item in branch_deltas]).sum(dim=0)
+                delta = (composed["net"] * composed["gate"] if composed is not None else
+                         torch.stack([item["safe_delta"] for item in branch_deltas]).sum(dim=0))
                 self.qkv.weight.add_(delta.to(device, dtype))
 
             # safe_delta 已经永久写入 qkv.weight；旧 A/B 后续不再参与前向。
@@ -1874,4 +1961,48 @@ class Attention_LoRA(nn.Module):
         self.frozen_p_conflict_mask = None
         self.previous_p_conflict_mask = None
         self.p_hard_zero_random_mask = None
+        self.composed_random_score = None
+        self._composed_forward_gate = None
         return None
+
+    @torch.no_grad()
+    def _log_composed_merge(self, task, state, strength):
+        """Actual gate telemetry and independent-gate counterfactual at the SAME weights."""
+        net, gate = state["net"], state["gate"]
+        s, p = state["s_base"], state["p_base"]
+        original = s * (1 - strength * state["s_reference"]) + p * (1 - strength * state["p_reference"])
+        safe = net * gate
+        tolerance = 1e-8
+        active = net.abs() > tolerance
+        amplification = original.abs() > net.abs() + tolerance
+        reversal = (original * net < 0) & active
+        removed_ratio = float((net - safe).norm() / net.norm().clamp_min(1e-12))
+        selected = state["selected"]
+        entropy, top10 = self._conflict_distribution_stats(state["score"],
+            _top_ratio_mask(state["score"], self.dual_mask_conflict_ratio))
+        self.last_conflict_entropy.copy_(entropy)
+        self.last_conflict_top10_energy.copy_(top10)
+        self.last_conflict_energy50_ratio.copy_(self._conflict_energy50_ratio(state["score"]))
+        self.last_effective_conflict_ratio.copy_(selected.mean())
+        self.last_effective_conflict_strength.fill_(float((1 - gate).max()))
+        self.last_conflict_gate_suppression.fill_(self._delta_stats(net, safe)["suppressed_ratio"])
+        self.last_safe_suppression.fill_(self._delta_stats(state["raw_s"] + state["raw_p"], safe)["suppressed_ratio"])
+        applied = torch.ones_like(selected) if self.dual_mask_composed_conflict == "uniform" else selected
+        plastic = 1.0 - self.general_mask.to(net)
+        self.last_private_conflict_mask_overlap.copy_((applied * plastic).sum() / applied.sum().clamp_min(1))
+        selected_score = state["score"] * applied
+        self.last_private_conflict_energy_overlap.copy_((selected_score * plastic).sum() /
+                                                       selected_score.sum().clamp_min(1e-12))
+        self.last_private_conflict_gate_suppression.fill_(self._delta_stats(p, p * gate)["suppressed_ratio"])
+        logging.info("ComposedConflict %s", json.dumps(dict(
+            task=int(task), layer=int(self.layer_idx), mode=self.dual_mask_composed_conflict,
+            reference_k=state["reference_k"], selected_k=int(selected.sum()),
+            density=float(selected.mean()), qkv_density=[float(part.mean()) for part in selected.chunk(3)],
+            net_norm=float(net.norm()), gross_norm=float((s.abs() + p.abs()).norm()),
+            net_to_gross_norm=float(net.norm() / (s.abs() + p.abs()).norm().clamp_min(1e-12)),
+            removed_ratio=removed_ratio, independent_removed_ratio=float((net - original).norm() / net.norm().clamp_min(1e-12)),
+            independent_amplified_coordinates=int(amplification.sum()), independent_reversed_coordinates=int(reversal.sum()),
+            active_coordinates=int(active.sum()), shared_amplified_coordinates=int((safe.abs() > net.abs() + tolerance).sum()),
+            shared_reversed_coordinates=int(((safe * net < 0) & active).sum()),
+            branch_sum_error=float((s * gate + p * gate - safe).abs().max()),
+        )))
