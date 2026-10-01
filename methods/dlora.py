@@ -120,6 +120,8 @@ class Learner(BaseLearner):
         self.acc_matrix = np.zeros((self.total_sessions, self.total_sessions))
 
         self._w0_class_means = {}
+        self._ridge_fusion = None
+        self._ridge_fusion_ready = False
         self._w0_competence = 0.0
 
         self._w0_competence_new = None
@@ -715,6 +717,13 @@ class Learner(BaseLearner):
         # 训练集中的特征
         indices, features, targets = self._collect_anchor_features(loader)
 
+        if self.args.get('ridge_fusion_enabled', False):
+            from utils.ridge_fusion import RidgeFusion
+            if self._ridge_fusion is None:
+                self._ridge_fusion = RidgeFusion(features.shape[1], self.total_classnum,
+                                                 self.class_num, self.total_sessions)
+            self._ridge_fusion.update(features, targets)
+
         ## Kt 是否使用的是所有已见类的原型，还是仅使用当前任务的原型 --> 保护控制器选择  C_control = C_new × (1 - D_t)
         use_all_seen_prototypes = bool(self.args.get("dual_mask_competence_all_seen", False))
         ## accuracy : C = 正确分类的 holdout 样本数 / 总 holdout 样本数
@@ -914,6 +923,7 @@ class Learner(BaseLearner):
     def incremental_train(self, data_manager):
 
         self._cur_task += 1
+        self._ridge_fusion_ready = False
         self._old_teacher = None
         if self._cur_task > 0 and float(self.args.get('old_model_distill_weight', 0.0)) > 0:
             from utils.old_model_distillation import frozen_teacher
@@ -1000,6 +1010,7 @@ class Learner(BaseLearner):
 
         if (track_w0 or competence_adaptive or plasticity_adaptive or all_seen_competence
                 or old_overlap_conflict or functional_merge_calibration or selective_anchor_enabled
+                or self.args.get('ridge_fusion_enabled', False)
         ):
             w0_dataset = data_manager.get_dataset(  # 所有训练样本，顺序固定  | 确定性测试视图：用于判断冻结 W0 的原始能力
                 np.arange(self._known_classes, self._total_classes),
@@ -1058,6 +1069,28 @@ class Learner(BaseLearner):
             loader = DataLoader(validation, batch_size=self.batch_size, shuffle=False,
                                 num_workers=0, generator=torch.Generator().manual_seed(1993))
             record_holdout(self._network, loader, self._device, self._cur_task, self._known_classes)
+
+        if self.args.get('ridge_fusion_enabled', False):
+            self._prepare_ridge_fusion()
+
+    def _prepare_ridge_fusion(self):
+        from utils.ridge_fusion import collect_calibration, select_coefficient
+        weight, regularizer = self._ridge_fusion.ridge_weight(1., self._total_classes)
+        self._ridge_fusion_weight = weight.to(self._device)
+        self._ridge_fusion.coefficient = 0.
+        rows, calibration_n = [], 0
+        if self._cur_task > 0:
+            loader = DataLoader(self._two_expert_calibration_dataset, batch_size=self.batch_size,
+                                shuffle=False, num_workers=0,
+                                generator=torch.Generator().manual_seed(1993 + self._cur_task))
+            base, ridge, labels = collect_calibration(self._network, loader, self._device,
+                                                       self._pretrained_anchor_context,
+                                                       self._ridge_fusion_weight)
+            self._ridge_fusion.coefficient, rows = select_coefficient(base, ridge, labels)
+            calibration_n = len(labels)
+        self._ridge_fusion.seal(self._cur_task, self.args['ridge_fusion_dir'], rows,
+                                calibration_n, regularizer)
+        self._ridge_fusion_ready = True
 
     def _ca_transport_features(self, data_manager, task):
         from utils.head_start import collect_features
@@ -1591,6 +1624,10 @@ class Learner(BaseLearner):
 
     def eval_task(self):
         result = super().eval_task()
+        if self._ridge_fusion_ready:
+            self._ridge_fusion.report(self._cur_task, self._ridge_fusion_eval_base,
+                                      self._ridge_fusion_eval_candidate, self._ridge_fusion_eval_targets,
+                                      self.args['ridge_fusion_dir'])
         if self._cur_task == 0 and self.args.get('task0_repro_diagnostic', False):
             log_record('final', accuracy=float(result[0]['top1']),
                        **model_fingerprint(self._network))
@@ -1625,6 +1662,7 @@ class Learner(BaseLearner):
     def _eval_cnn(self, loader):
         self._network.eval()
         y_pred, y_true = [], []
+        ridge_base_predictions = []
         y_pred_with_task = []
         y_pred_task, y_true_task = [], []
 
@@ -1637,6 +1675,14 @@ class Learner(BaseLearner):
                 y_true_task.append(task_id)
                 # 前向推理，不给真实 task id  | 全局 logits
                 outputs = self._network.interface(inputs)  # [bs,C*num_task]
+                if self._ridge_fusion_ready:
+                    from utils.ridge_fusion import fuse_scores
+                    ridge_base_predictions.append(torch.topk(outputs, k=self.topk, dim=1,
+                                                             largest=True, sorted=True)[1].view(-1).cpu().numpy())
+                    if self._ridge_fusion.coefficient:
+                        with self._pretrained_anchor_context():
+                            ridge = self._network.extract_vector(inputs) @ self._ridge_fusion_weight
+                        outputs = fuse_scores(outputs, ridge, self._ridge_fusion.coefficient)
             # topk1 [bs]
             predicts = torch.topk(outputs, k=self.topk, dim=1, largest=True, sorted=True)[1].view(-1)  # [bs, topk]
             y_pred_task.append((predicts // self.class_num).cpu())
@@ -1652,6 +1698,10 @@ class Learner(BaseLearner):
             y_pred.append(predicts.cpu().numpy())
             y_pred_with_task.append(predicts_with_task.cpu().numpy())
             y_true.append(targets.cpu().numpy())
+        if self._ridge_fusion_ready:
+            self._ridge_fusion_eval_base = np.concatenate(ridge_base_predictions)
+            self._ridge_fusion_eval_candidate = np.concatenate(y_pred)
+            self._ridge_fusion_eval_targets = np.concatenate(y_true)
         # 转成 []
         return np.concatenate(y_pred), np.concatenate(y_pred_with_task), np.concatenate(y_true), torch.cat(
             y_pred_task), torch.cat(y_true_task)  # [N, topk]
