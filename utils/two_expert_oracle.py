@@ -31,10 +31,13 @@ def expert_signals(base, anchor):
     base_gap = base_top[:, 0] - base_top[:, 1]
     anchor_gap = anchor_top[:, 0] - anchor_top[:, 1]
     gather = lambda logits, predictions: logits.gather(1, predictions[:, None]).squeeze(1)
+    entropy = lambda scores: -(scores.mul(20).softmax(1) * scores.mul(20).log_softmax(1)).sum(1)
     return dict(margin_advantage=anchor_gap - base_gap,
                 proposal_advantage=(gather(anchor, anchor_pred) - gather(anchor, base_pred)
                                     - gather(base, base_pred) + gather(base, anchor_pred)),
-                base_uncertainty=-base_gap)
+                base_uncertainty=-base_gap,
+                prototype_advantage=anchor_top[:, 0] - base_top[:, 0],
+                entropy_advantage=entropy(base) - entropy(anchor))
 
 
 def expert_rows(base, anchor, targets, indices, class_ids, class_size):
@@ -121,10 +124,10 @@ def save_report(directory, task, source, rows, known_classes):
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     stem = directory / f'task_{task:02d}_{source}'
-    report = dict(task=task, source=source, class_scope='all_seen',
+    report = dict(task=task, source=source, class_scope='all_seen', known_classes=known_classes,
                   used_for_training=False, old_train_images_accessed=False,
                   oracle_uses_true_class_labels=True, signals_use_labels_or_task_id=False,
-                  thresholds_fitted=False, probe_is_unseen_holdout=False,
+                  thresholds_fitted=False, probe_is_unseen_holdout=source == 'current_train_holdout',
                   prototype_source='immutable_W_pre_current_train_when_each_class_arrived',
                   auc_population='disagreements_with_exactly_one_expert_correct; excludes_both_wrong',
                   **expert_report(rows, known_classes))

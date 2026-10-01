@@ -14,6 +14,8 @@ class DataManager(object):
         self._setup_data(dataset_name, shuffle, seed)
         if (args or {}).get('incremental_holdout', False):
             self._reserve_incremental_holdout(int(args.get('incremental_holdout_mod', 5)))
+        elif (args or {}).get('two_expert_calibration_holdout_mod', 0):
+            self._reserve_incremental_holdout(int(args['two_expert_calibration_holdout_mod']), init_cls)
         assert init_cls <= len(self._class_order), 'No enough classes.'
         self._increments = [init_cls]
         while sum(self._increments) + increment < len(self._class_order):
@@ -30,11 +32,11 @@ class DataManager(object):
     def get_task_size(self, task):
         return self._increments[task]
 
-    def _reserve_incremental_holdout(self, holdout_mod):
+    def _reserve_incremental_holdout(self, holdout_mod, min_class=0):
         # Remove validation images from every subsequent train-source request,
         # including W0 competence and CA statistics, not just gradient batches.
         selected = np.zeros(len(self._train_targets), dtype=bool)
-        for label in np.unique(self._train_targets):
+        for label in np.unique(self._train_targets[self._train_targets >= min_class]):
             positions = np.flatnonzero(self._train_targets == label)
             selected[positions[::holdout_mod]] = True
         self._holdout_data = self._train_data[selected].copy()

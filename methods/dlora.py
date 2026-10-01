@@ -851,10 +851,14 @@ class Learner(BaseLearner):
         self._w0_accuracy_curve.append(accuracy)
         if self.args.get('two_expert_oracle_diagnostic', False):
             from utils.two_expert_oracle import collect_experts, save_report
-            for source, dataset in (
+            datasets = [
                 ('current_train_seen_probe', self.w0_loader.dataset),
                 ('test_report_only', self.test_loader.dataset),
-            ):
+            ]
+            calibration = getattr(self, '_two_expert_calibration_dataset', None)
+            if calibration is not None:
+                datasets.insert(0, ('current_train_holdout', calibration))
+            for source, dataset in datasets:
                 loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=False,
                                     num_workers=0, generator=torch.Generator().manual_seed(0))
                 rows = collect_experts(self._network, loader, self._device,
@@ -925,6 +929,9 @@ class Learner(BaseLearner):
         logging.info('Learning on {}-{}'.format(self._known_classes, self._total_classes))
 
         task_classes = np.arange(self._known_classes, self._total_classes)
+        self._two_expert_calibration_dataset = None
+        if self._cur_task > 0 and self.args.get('two_expert_calibration_holdout_mod', 0):
+            self._two_expert_calibration_dataset = data_manager.get_incremental_holdout(task_classes)
         self.task0_validation_loader = None
         if self._cur_task == 0 and bool(self.args.get('task0_validation_enabled', False)):
             train_dataset, validation_dataset = data_manager.get_train_dataset_with_deterministic_holdout(
