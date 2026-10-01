@@ -122,6 +122,7 @@ class Learner(BaseLearner):
         self._w0_class_means = {}
         self._ridge_fusion = None
         self._ridge_fusion_ready = False
+        self._wpre_readout = None
         self._w0_competence = 0.0
 
         self._w0_competence_new = None
@@ -298,6 +299,10 @@ class Learner(BaseLearner):
                 )
 
     def _extra_training_context(self, inputs, targets, epoch):
+        if self._cur_task > 0 and float(self.args.get('wpre_distill_weight', 0.0)) > 0:
+            from utils.wpre_distill import teacher_features
+            return {'wpre_teacher_features': teacher_features(
+                self._network, inputs, self._pretrained_anchor_context())}
         enabled = bool(self.args.get("dual_mask_selective_anchor_enabled", False))
         weight = float(self.args.get("dual_mask_selective_anchor_weight", 0.0))
         start_epoch = int(self.args.get("dual_mask_selective_anchor_start_epoch", 0))
@@ -547,6 +552,26 @@ class Learner(BaseLearner):
             from utils.p_step_direction import prepare_step, finish_step
             snapshots = prepare_step(self._iter_lora_modules(), task_loss)
         loss = task_loss if extra_loss is None else task_loss + extra_loss
+        self._last_wpre_distill_metrics = {}
+        wpre_grads, s_params, weighted_wpre = (), [], None
+        wpre_weight = float(getattr(self, 'args', {}).get('wpre_distill_weight', 0.0))
+        if wpre_weight > 0 and self._cur_task > 0:
+            from utils.wpre_distill import selective_feature_loss, log_s_gradients
+            s_params = [module.S_lora[self._cur_task].B_weight
+                        for module in self._iter_lora_modules()
+                        if module.S_lora[self._cur_task] is not None
+                        and module.S_lora[self._cur_task].B_weight.requires_grad]
+            raw_wpre, metrics = selective_feature_loss(
+                output['features'], output['wpre_teacher_features'], self._wpre_ridge_weight,
+                targets + self._known_classes)
+            weighted_wpre = wpre_weight * raw_wpre
+            self._last_wpre_distill_metrics = dict(metrics, wpre_weighted=weighted_wpre.detach())
+            wpre_grads = torch.autograd.grad(weighted_wpre, s_params,
+                                              retain_graph=True, allow_unused=True)
+            diagnostic = getattr(self, '_wpre_distill_diagnostic', None)
+            if diagnostic is not None:
+                log_s_gradients(task_loss, s_params, wpre_grads,
+                                self._cur_task, *diagnostic)
         self._last_pair_separation_metrics = {}
         pair_weight = float(getattr(self, 'args', {}).get('pair_separation_weight', 0.0))
         pair_grads, named_params = (), []
@@ -576,6 +601,12 @@ class Learner(BaseLearner):
         # The ordinary loss still updates all original trainable parameters.
         # Add only the auxiliary gradients requested by the experimental scope.
         with torch.no_grad():
+            for param, grad in zip(s_params, wpre_grads):
+                if grad is not None:
+                    if param.grad is None:
+                        param.grad = grad.detach().clone()
+                    else:
+                        param.grad.add_(grad)
             for (_, param), grad in zip(named_params, pair_grads):
                 if grad is not None:
                     if param.grad is None:
@@ -603,7 +634,8 @@ class Learner(BaseLearner):
                              batch=batch + 1, mode=mode, training_batch=True, metrics=metrics))
             for key, value in counts.items():
                 self._p_step_counts[key] = self._p_step_counts.get(key, 0) + value
-        return loss if weighted_pair is None else loss.detach() + weighted_pair.detach()
+        reported_loss = loss if weighted_pair is None else loss.detach() + weighted_pair.detach()
+        return reported_loss if weighted_wpre is None else reported_loss.detach() + weighted_wpre.detach()
     # 临时把所有 LoRA Attention 层切回原始预训练权重 W_pre，提取一份不受增量学习影响的参考特征，使用完后再恢复当前模型
     def _pretrained_anchor_context(self):
         """Temporarily switch every LoRA attention layer to immutable W_pre."""
@@ -716,6 +748,19 @@ class Learner(BaseLearner):
 
         # 训练集中的特征
         indices, features, targets = self._collect_anchor_features(loader)
+
+        if float(self.args.get('wpre_distill_weight', 0.0)) > 0:
+            from utils.frozen_readout import FrozenReadout
+            if self._wpre_readout is None:
+                self._wpre_readout = FrozenReadout(features.shape[1], self.total_classnum)
+            self._wpre_readout.update(features, targets)
+            if self._cur_task > 0:
+                weight, regularizer = self._wpre_readout.ridge_weight(1., self._total_classes)
+                self._wpre_ridge_weight = weight.to(self._device)
+                logging.info('WpreDistillTeacher %s', dict(task=self._cur_task,
+                    source='current_train_only_additive_stats', current_samples=len(targets),
+                    accumulated_samples=self._wpre_readout.samples, seen_classes=self._total_classes,
+                    alpha=1., regularizer=regularizer, storage_bytes=self._wpre_readout.storage_bytes))
 
         if self.args.get('ridge_fusion_enabled', False):
             from utils.ridge_fusion import RidgeFusion
@@ -1011,6 +1056,7 @@ class Learner(BaseLearner):
         if (track_w0 or competence_adaptive or plasticity_adaptive or all_seen_competence
                 or old_overlap_conflict or functional_merge_calibration or selective_anchor_enabled
                 or self.args.get('ridge_fusion_enabled', False)
+                or float(self.args.get('wpre_distill_weight', 0.0)) > 0
         ):
             w0_dataset = data_manager.get_dataset(  # 所有训练样本，顺序固定  | 确定性测试视图：用于判断冻结 W0 的原始能力
                 np.arange(self._known_classes, self._total_classes),
@@ -1399,6 +1445,8 @@ class Learner(BaseLearner):
                 )
 
                 output = self._network(inputs)
+                if batch_context:
+                    output.update(batch_context)
                 logits = output['logits']
                 task_loss = loss_cos(logits, targets)
 
@@ -1439,6 +1487,7 @@ class Learner(BaseLearner):
                     self._p_step_context = (direction_mode, epoch, i, i == 0 and epoch in (0, 9, 19))
                     self._p_step_probe = (inputs, loss_cos)
                 self._pair_separation_diagnostic = (epoch, i) if i == 0 and epoch in (0, 9, 19) else None
+                self._wpre_distill_diagnostic = (epoch, i) if i == 0 and epoch in (0, 9, 19) else None
                 self._p_old_gradient_context = None
                 self._branch_choice_context = None
                 if branch_choice is not None and i % int(self.args.get('branch_choice_interval', 5)) == 0:
@@ -1454,6 +1503,7 @@ class Learner(BaseLearner):
                     targets,
                 )
                 batch_training_metrics.update(getattr(self, '_last_pair_separation_metrics', {}))
+                batch_training_metrics.update(getattr(self, '_last_wpre_distill_metrics', {}))
                 if batch_training_metrics: # 只负责汇总、显示额外损失的统计值
                     for name, value in batch_training_metrics.items():
                         value = value.detach()
