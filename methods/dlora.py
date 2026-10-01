@@ -849,6 +849,19 @@ class Learner(BaseLearner):
             self._network.train()
         accuracy = 100.0 * correct / max(total, 1)
         self._w0_accuracy_curve.append(accuracy)
+        if self.args.get('two_expert_oracle_diagnostic', False):
+            from utils.two_expert_oracle import collect_experts, save_report
+            for source, dataset in (
+                ('current_train_seen_probe', self.w0_loader.dataset),
+                ('test_report_only', self.test_loader.dataset),
+            ):
+                loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=False,
+                                    num_workers=0, generator=torch.Generator().manual_seed(0))
+                rows = collect_experts(self._network, loader, self._device,
+                                       self._pretrained_anchor_context, prototypes,
+                                       class_ids, self.class_num)
+                save_report(self.args['two_expert_oracle_dir'], self._cur_task,
+                            source, rows, self._known_classes)
         return accuracy
     def _measure_pretrained_drift(self, loader):
         """Log feature cosine drift and relative QKV weight drift from W_pre."""
