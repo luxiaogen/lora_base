@@ -48,7 +48,7 @@ def select_alpha(stats, holdout_features, holdout_labels, seen_classes):
 
 
 def training_partition(targets, old_classes, seen_classes, outer_mod, inner_mod):
-    """Same per-class sorted positions as existing calibration / W_pre NCM."""
+    """Split alpha-selection data; the final readouts refit on both returned subsets."""
     fit, holdout = [], []
     for label in range(old_classes, seen_classes):
         positions = np.flatnonzero(targets == label)

@@ -89,16 +89,21 @@ def run_readouts(network, train, test, args, device, out, reference, tasks):
         fit, holdout = training_partition(train.labels, known, seen,
             args['two_expert_calibration_holdout_mod'], args['dual_mask_competence_holdout_mod'])
         positions = np.sort(np.concatenate((fit, holdout)))
-        print(f'Task{task}: current train only; fit={len(fit)}, holdout={len(holdout)}, classes={seen}', flush=True)
+        print(f'Task{task}: current train only; final_fit={len(positions)}, classes={seen}', flush=True)
         features, labels = collect(network, train, positions, args, device)
         fit_mask = torch.from_numpy(np.isin(positions, fit))
-        stats.update(features[fit_mask], labels[fit_mask])
         if task == 0:
+            stats.update(features[fit_mask], labels[fit_mask])
             alpha, candidates = select_alpha(stats, features[~fit_mask], labels[~fit_mask], seen)
             write_json(out / 'task0_alpha.json', dict(source='task0_train_holdout_only',
                 selected_alpha=alpha, candidates=candidates, tie_rule='first_predeclared_alpha',
-                selected_before_test_access=True, refit_with_holdout=False))
+                selected_before_test_access=True, refit_with_holdout=True,
+                selection_fit_samples=len(fit), selection_holdout_samples=len(holdout)))
             print(f'Task0 train-holdout selected alpha={alpha}; fixed for every later task.', flush=True)
+            # The original NCM uses all available train samples after competence calibration.
+            stats.update(features[~fit_mask], labels[~fit_mask])
+        else:
+            stats.update(features, labels)
         weight, regularizer = stats.ridge_weight(alpha, seen)
         # Current training features are discarded; old train images are never loaded again.
         del features, labels
@@ -120,7 +125,8 @@ def run_readouts(network, train, test, args, device, out, reference, tasks):
             if not torch.equal(ncm, cached_ncm):
                 base, status = None, 'ncm_reproduction_mismatch'
         report = dict(task=task, classes=seen, alpha=alpha, regularizer=regularizer,
-                      fit_samples=len(fit), holdout_samples=len(holdout), cumulative_fit=stats.samples,
+                      fit_samples=len(positions), holdout_samples=len(holdout) if task == 0 else 0,
+                      cumulative_fit=stats.samples,
                       statistics_bytes=stats.storage_bytes, reference_status=status,
                       ncm_vs_ridge=readout_report(ncm, ridge, all_y, known),
                       base_vs_ncm=None, base_vs_ridge=None, reference_ncm_agreement_percent=agreement,
@@ -156,8 +162,12 @@ def run_readouts(network, train, test, args, device, out, reference, tasks):
         summary.update(base_average=mean([r['base_vs_ridge']['total']['base_accuracy'] for r in reports]),
                        ridge_complement_oracle_average=mean([r['base_vs_ridge']['total']['oracle_accuracy'] for r in reports]),
                        ncm_complement_oracle_average=mean([r['base_vs_ncm']['total']['oracle_accuracy'] for r in reports]))
+    summary['comparison_status'] = ('paired_complete' if summary['paired_reference_tasks'] == len(reports)
+                                    else 'paired_incomplete')
     write_json(out / 'summary.json', summary)
     print('FrozenReadoutSummary ' + json.dumps(summary, allow_nan=False), flush=True)
+    print(f"DualMask complement comparison: {summary['comparison_status']}; "
+          f"paired tasks={summary['paired_reference_tasks']}/{len(reports)}", flush=True)
     return summary
 
 
@@ -180,7 +190,8 @@ def main():
                 reference_protocol_compatible=args['_reference_protocol_compatible'],
                 ncm_and_ridge_fit_same_samples=True, train_dualmask=False, save_weights=False,
                 save_dense_features=False, old_train_image_replay=False,
-                alpha_selection='task0_train_holdout_only_then_fixed', disable_fused_sdpa=True)
+                alpha_selection='task0_train_holdout_only_then_fixed',
+                final_fit='all_available_current_train_after_alpha_selection', disable_fused_sdpa=True)
     if cli.dry_run:
         print(json.dumps(plan, indent=2))
         return 0
