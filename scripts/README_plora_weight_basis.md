@@ -47,8 +47,9 @@ ImageNet-R、seed1993、完整训练集、正式测试 Task0–2，anchor2.5、2
 这些权重代理变小不等于 Old 改善；判定仍以本机三组的 Old、New、Average、Last、Forgetting 为准。
 当前 CA 仍保存类别协方差，因此只能说“不用历史激活统计构造 A”，不能说“整个方法无二阶统计”。
 
-只有联合组在 New 提高同时保住 Old、且 Average/Last 有净收益时，才值得另行确认完整 T10。
-如果 gradient 已有收益而联合组无收益，则只支持普通梯度初始化，不能宣称保护先验贡献。
+联合组须在 New 提高同时保住 Old、且 Average/Last 有净收益，才支持候选的性能价值。
+已完成三任务结果不满足该条件；按用户本轮要求仍补两个候选的完整T10，作为一次完整任务复核。
+如果 gradient 有收益而联合组无收益，则只支持普通梯度初始化，不能宣称保护先验贡献。
 
 ## 运行
 
@@ -64,3 +65,19 @@ bash scripts/10_02_imgr10_plora_weight_basis_t3_3090.sh
 结果输出到 `logs/shell_logs/imgr10_plora_weight_basis_t3_3090/<timestamp>/`：
 每组 training.log、run.json（提交/有效配置/源文件哈希）、queue.json、results.json/CSV、
 basis_initializations.csv 和 basis_actual_updates.csv。没有特征/旧图片/历史矩阵缓存。
+
+## 完整 T10 接续
+
+```bash
+bash scripts/10_02_imgr10_plora_weight_basis_t10_3090.sh
+```
+
+顺序为gradient → weight_prior，只跑这两个完整Task0–9候选；不重跑random基线或已完成短测。
+由于前一轮没有保存权重，候选从Task0重新训练，不是加载Task2 checkpoint续训。
+只把max_tasks=3改为10，以及日志/W&B分组改为t10；公式与所有训练设置保持不变。
+预计每组75–80分钟，总计约2.5小时。输出独立保存到
+`logs/shell_logs/imgr10_plora_weight_basis_t10_3090/<timestamp>/`，汇总注明expected_tasks和full_t10_completed。
+
+两个候选之间为本次同提交配对；已有3090 anchor2.5完整基线87.214/87.281仅作历史参考，
+不是本次同提交、同诊断流程的新配对基线，不能用零点几差异直接宣称突破。
+dry-run可用同一脚本加`--mode dry-run`，只打印两个短测及两个T10命令，不执行训练。

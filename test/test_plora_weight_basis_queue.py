@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,6 +17,48 @@ module_spec.loader.exec_module(queue)
 
 
 class BasisQueueTests(unittest.TestCase):
+    def test_t10_only_expands_task_count_and_log_group(self):
+        for mode in queue.MODES:
+            short = queue.settings_for(mode)
+            full = queue.settings_for(mode, tasks=10)
+            self.assertEqual(full.pop('max_tasks'), 10)
+            self.assertEqual(full.pop('wandb_group'), short['wandb_group'].replace('_t3_', '_t10_'))
+            self.assertEqual(full, {key: value for key, value in short.items()
+                                    if key not in ('max_tasks', 'wandb_group')})
+            self.assertEqual(queue.settings_for(mode, smoke=True, tasks=10)['max_tasks'], 2)
+
+    def test_t10_wrapper_dry_run_has_two_candidates_and_no_random_baseline(self):
+        script = ROOT / 'scripts/10_02_imgr10_plora_weight_basis_t10_3090.sh'
+        subprocess.run(['bash', '-n', str(script)], check=True)
+        output = subprocess.check_output(['bash', str(script), '--mode', 'dry-run'], cwd='/tmp', text=True)
+        commands = [shlex.split(line.split('Command:', 1)[1]) for line in output.splitlines()
+                    if line.startswith('Command:')]
+        self.assertEqual(len(commands), 4)
+        for index, command in enumerate(commands):
+            settings = dict(token.split('=', 1) for token in command
+                            if token.startswith(('max_tasks=', 'epochs=', 'plora_a_init_mode=', 'save_task_weights=')))
+            self.assertEqual(settings['plora_a_init_mode'], ('gradient', 'weight_prior')[index % 2])
+            self.assertEqual(settings['max_tasks'], '2' if index < 2 else '10')
+            self.assertEqual(settings['epochs'], '1' if index < 2 else '20')
+            self.assertEqual(settings['save_task_weights'], 'false')
+        path = output.split('Outputs:', 1)[1].splitlines()[0].strip()
+        self.assertIn('_t10_', path)
+        self.assertFalse(Path(path).exists())
+
+    def test_t10_mode_skips_already_completed_smokes_and_uses_ten_tasks(self):
+        with tempfile.TemporaryDirectory() as temporary, \
+                patch.object(queue, 'ROOT', Path(temporary)), \
+                patch.object(queue.sys, 'argv', ['run', '--mode', 't10', '--only', 'gradient', 'weight_prior']), \
+                patch.object(queue.subprocess, 'check_output', return_value='test_revision'), \
+                patch.object(queue, 'run', return_value=(0, 75.)) as run, \
+                patch.object(queue, 'summarize'):
+            self.assertEqual(queue.main(), 0)
+            self.assertEqual(run.call_count, 2)
+            for call, mode in zip(run.call_args_list, ('gradient', 'weight_prior')):
+                self.assertEqual(call.args[0], mode)
+                self.assertNotIn('smoke_', str(call.args[1]))
+                self.assertEqual(call.kwargs['tasks'], 10)
+
     def test_matched_three_groups_only_change_a_construction(self):
         base = queue.settings_for('random')
         for mode in queue.MODES:
