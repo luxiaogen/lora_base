@@ -1,0 +1,201 @@
+{
+  "name": "imgr10_p_functional_score_3090",
+  "log_dir": "logs/shell_logs/imgr10_p_functional_score_3090",
+  "datasets": [
+    {
+      "name": "imgr10",
+      "config": "exps/dlora/imgr10.json"
+    }
+  ],
+  "seeds": [
+    1993
+  ],
+  "common_overrides": {
+    "dataset": "ImageNet_R",
+    "memory_size": 0,
+    "memory_per_class": 0,
+    "fixed_memory": true,
+    "shuffle": true,
+    "init_cls": 20,
+    "increment": 20,
+    "model_name": "dual_mask_branch",
+    "embd_dim": 768,
+    "num_heads": 12,
+    "total_sessions": 10,
+    "batch_size": 48,
+    "init_epoch": 20,
+    "optim": "sgd",
+    "init_lr": 0.02,
+    "init_weight_decay": 0,
+    "epochs": 20,
+    "lrate": 0.02,
+    "weight_decay": 0,
+    "rank": 64,
+    "scale": 20,
+    "margin": 0.1,
+    "num_workers": 8,
+    "ca": true,
+    "ca_epochs": 5,
+    "ca_lrate": 0.01,
+    "logit_norm": 0.1,
+    "slora_gamma": 0.5,
+    "plora_gamma": 0.75,
+    "use_slora": true,
+    "use_plora": true,
+    "lora_A_init": "kaiming",
+    "dual_mask_importance": "svd",
+    "dual_mask_svd_rank": 768,
+    "dual_mask_svd_energy_coverage": 0.95,
+    "dual_mask_general_ratio": 0.4,
+    "dual_mask_conflict_ratio": 0.1,
+    "dual_mask_conflict_strength": 0.5,
+    "dual_mask_conflict_granularity": "layer",
+    "dual_mask_reg_weight": 0.01,
+    "dual_mask_conflict_reg_enabled": true,
+    "dual_mask_competence_adaptive": true,
+    "dual_mask_plasticity_adaptive": true,
+    "dual_mask_protect_strength_mode": "competence",
+    "dual_mask_conflict_energy_adaptive": true,
+    "dual_mask_conflict_energy_ratio_floor": true,
+    "dual_mask_conflict_merge_mode": "suppress",
+    "dual_mask_competence_holdout_mod": 5,
+    "dual_mask_track_w0_metrics": true,
+    "dual_mask_metric_batches": 4,
+    "dual_mask_vis": false,
+    "dual_mask_vis_layers": [
+      0,
+      5,
+      11
+    ],
+    "dual_mask_vis_tasks": [
+      0,
+      1,
+      9
+    ],
+    "dual_mask_vis_dir": "visualizations/dual_mask_snapshots/imgr10",
+    "dual_mask_vis_save_weight": false,
+    "dual_mask_competence_all_seen": false,
+    "dual_mask_conflict_old_overlap_adaptive": true,
+    "dual_mask_private_conflict_mode": "global",
+    "dual_mask_task0_gate_mode": "unmasked",
+    "dual_mask_anchor_reg_enabled": true,
+    "dual_mask_anchor_reg_task0_only": true,
+    "dual_mask_competence_metric": "accuracy",
+    "experiment_tracker": "wandb",
+    "wandb_project": "LoDA_ICML2026",
+    "wandb_mode": "online",
+    "max_tasks": 10,
+    "disable_fused_sdpa": true,
+    "dual_mask_applied_budget_log": true,
+    "task0_validation_enabled": false,
+    "dual_mask_conflict_score_mode": "conflict",
+    "dual_mask_conflict_budget_multiplier": 1,
+    "dual_mask_s_conflict_enabled": true,
+    "dual_mask_p_conflict_enabled": true,
+    "dual_mask_s_protect_enabled": true,
+    "dual_mask_private_rank": 0,
+    "dual_mask_functional_merge_calibration": false,
+    "dual_mask_safe_residual_enabled": false,
+    "dual_mask_update_overlap": false,
+    "plora_lr_multiplier": 1,
+    "dual_mask_reg_grad_diagnostic": false,
+    "dual_mask_s_reg_enabled": true,
+    "dual_mask_p_reg_enabled": true,
+    "task0_rs_weight": 0,
+    "task0_margin": 0.1,
+    "stage_audit": false,
+    "p_step_direction": "off",
+    "old_competition_weight": 0,
+    "old_competition_detach_old": false,
+    "ca_real_new_features": false,
+    "dual_mask_conflict_exact_topk": false,
+    "head_balance_weight": 0,
+    "ca_boundary_shadow": false,
+    "history_audit": false,
+    "plora_train_a": false,
+    "incremental_holdout": false,
+    "incremental_holdout_mod": 5,
+    "old_model_distill_temperature": 2,
+    "old_model_distill_weight": 0,
+    "head_start_init": "random",
+    "head_start_epochs": 0,
+    "head_start_stage": "pre",
+    "slora_lr_multiplier": 1,
+    "save_task_weights": false,
+    "ca_cross_task_margin_weight": 0,
+    "ca_cov_shrinkage": 0,
+    "dual_mask_anchor_reg_weight": 2.5,
+    "ca_stats_transport": false,
+    "ca_stats_transport_mean_only": false,
+    "plora_a_init_batches": 4,
+    "plora_a_init_mode": "off",
+    "pair_separation_weight": 0,
+    "pair_separation_scope": "p",
+    "pair_separation_margin": 0.1,
+    "ca_two_centers": false,
+    "sp_staged_s_epochs": 0,
+    "late_weight_average_epochs": 0,
+    "p_conflict_freeze_epoch": 0,
+    "dual_mask_uniform_norm_matched": false,
+    "p_conflict_strength_warmup": false,
+    "p_hard_zero_mode": "off",
+    "p_old_gradient_oracle": false,
+    "task0_repro_diagnostic": false,
+    "task0_repro_batch_diagnostic": false,
+    "wandb_group": "imgr10_p_functional_score_3090",
+    "branch_choice_mode": "off",
+    "two_expert_oracle_diagnostic": false,
+    "seed": [
+      1993
+    ],
+    "dual_mask_composed_conflict": "off",
+    "wpre_distill_weight": 0,
+    "ridge_fusion_enabled": false,
+    "two_expert_calibration_holdout_mod": 0,
+    "p_score_counterfactual_report": true
+  },
+  "variants": [
+    {
+      "name": "coordinate",
+      "description": "Matched P magnitude control",
+      "overrides": {
+        "p_direction_score": "coordinate"
+      }
+    },
+    {
+      "name": "wpre_product",
+      "description": "Original W_pre importance times P magnitude with norm matching",
+      "overrides": {
+        "p_direction_score": "wpre_product"
+      }
+    },
+    {
+      "name": "wpre_input",
+      "description": "Positive P contributions to W_pre input-Gram change, fixed S context",
+      "overrides": {
+        "p_direction_score": "wpre_input"
+      }
+    },
+    {
+      "name": "wpre_output",
+      "description": "Positive P contributions to W_pre output-Gram change, fixed S context",
+      "overrides": {
+        "p_direction_score": "wpre_output"
+      }
+    },
+    {
+      "name": "wpre_qk",
+      "description": "Positive P contributions to immutable W_pre Q/K kernel change; V magnitude",
+      "overrides": {
+        "p_direction_score": "wpre_qk"
+      }
+    },
+    {
+      "name": "task_qk",
+      "description": "Same Q/K score anchored at task-start weights; V magnitude",
+      "overrides": {
+        "p_direction_score": "task_qk"
+      }
+    }
+  ]
+}

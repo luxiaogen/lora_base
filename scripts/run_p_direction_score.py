@@ -1,4 +1,4 @@
-"""Three full-T10 P scoring controls; no replay, teacher, checkpoint or task-ID inference."""
+"""Full-T10 P scoring controls; no replay, teacher, checkpoint or task-ID inference."""
 import argparse
 import csv
 import datetime
@@ -42,7 +42,7 @@ def read_direction_rows(path):
 
 
 def summarize(directory, records):
-    summaries, diagnostics = [], []
+    summaries, diagnostics, interventions = [], [], []
     for record in records:
         log = directory / record['mode'] / 'training.log'
         metrics, _ = read_metrics(log)
@@ -63,8 +63,20 @@ def summarize(directory, records):
                     for key, value in zip(('enhancement', 'attenuation', 'mixing'), row['spectral_fractions'][index]):
                         point[key] = value
                 diagnostics.append(point)
+        for row in re.findall(r'PScoreCounterfactual (\{[^\n]+\})', log.read_text()):
+            row = json.loads(row)
+            point = dict(trained_mode=record['mode'], task=row['task'], applied_mode=row['applied_mode'],
+                reference_mode=row['reference_mode'],
+                source=row['source'], sample_sha256=row['sample_sha256'],
+                max_relative_removed_norm_error=row['max_relative_removed_norm_error'])
+            for group in ('total', 'old', 'new'):
+                point.update({group + '_' + key: value for key, value in row['metrics'][group].items()})
+            for key in ('wpre_input', 'wpre_output', 'wpre_qk', 'task_qk'):
+                for stage in ('ungated', 'gated'):
+                    point[key + '_' + stage] = sum(layer[stage][key] for layer in row['layers']) / len(row['layers'])
+            interventions.append(point)
     (directory / 'results.json').write_text(json.dumps(summaries, indent=2) + '\n')
-    for name, rows in (('results', summaries), ('direction_diagnostics', diagnostics)):
+    for name, rows in (('results', summaries), ('direction_diagnostics', diagnostics), ('mechanism_interventions', interventions)):
         if rows:
             keys = list(dict.fromkeys(key for row in rows for key in row))
             with (directory / (name + '.csv')).open('w', newline='') as stream:
@@ -84,7 +96,8 @@ def run(mode, directory, revision, smoke=False, dry_run=False):
     effective = json.loads((ROOT / 'exps/dlora/imgr10.json').read_text())
     effective.update(settings)
     paths = ('models/attention.py', 'utils/p_direction_score.py', 'methods/dlora.py',
-             'scripts/run_p_direction_score.py', 'scripts/sweeps/imgr10_p_direction_score_3090.json')
+             'utils/p_functional_score.py', 'utils/p_score_diagnostic.py',
+             'scripts/run_p_direction_score.py', str(SPEC.relative_to(ROOT)))
     (directory / 'run.json').write_text(json.dumps(dict(code_revision=revision,
         effective_config=effective, command=command,
         source_sha256={p: hashlib.sha256((ROOT / p).read_bytes()).hexdigest() for p in paths}), indent=2) + '\n')
@@ -103,21 +116,27 @@ def run(mode, directory, revision, smoke=False, dry_run=False):
 
 
 def main():
+    global SPEC
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--mode', choices=('run', 'smoke', 't10', 'dry-run'), default='run')
-    parser.add_argument('--only', nargs='+', choices=MODES)
+    parser.add_argument('--spec', type=Path, default=SPEC)
+    parser.add_argument('--only', nargs='+', choices=MODES + ('wpre_product', 'wpre_input', 'wpre_output', 'wpre_qk', 'task_qk'))
     args = parser.parse_args()
-    directory = ROOT / 'logs/shell_logs/imgr10_p_direction_score_3090' / datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+    SPEC = args.spec.resolve()
+    specification = json.loads(SPEC.read_text())
+    modes = args.only or [variant['name'] for variant in specification['variants']]
+    directory = ROOT / specification['log_dir'] / datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')
     revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
     print('Code revision:', revision, '\nOutputs:', directory, flush=True)
     print('P ONLY; seed1993; anchor2.5; full T10; 20 epochs; CA5; math SDPA. '
-          'S unchanged, no teacher/replay/checkpoints/task-ID inference. No baseline rerun.', flush=True)
+          'S unchanged, no teacher/replay/checkpoints/task-ID inference.', flush=True)
     dry_run = args.mode == 'dry-run'
     if not dry_run:
         directory.mkdir(parents=True)
-        (directory / 'manifest.json').write_text(json.dumps(dict(revision=revision, options=vars(args)), indent=2) + '\n')
+        (directory / 'manifest.json').write_text(json.dumps(dict(revision=revision,
+            options={**vars(args), 'spec': str(SPEC)}), indent=2) + '\n')
     if args.mode in ('run', 'smoke', 'dry-run'):
-        for mode in args.only or MODES:
+        for mode in modes:
             code, _ = run(mode, directory / ('smoke_' + mode), revision, True, dry_run)
             if code:
                 print('Smoke failed; full queue not started.', flush=True)
@@ -125,7 +144,7 @@ def main():
         if args.mode == 'smoke':
             return 0
     records = []
-    for mode in args.only or MODES:
+    for mode in modes:
         code, minutes = run(mode, directory / mode, revision, dry_run=dry_run)
         records.append(dict(mode=mode, status='completed' if code == 0 else 'failed', exit_code=code, minutes=minutes))
         if not dry_run:

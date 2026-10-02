@@ -1341,6 +1341,10 @@ class Learner(BaseLearner):
             self._network = self._network.module
 
         lora_modules = list(self._iter_lora_modules())
+        if self._cur_task in (1, 5, 9) and self.args.get('p_score_counterfactual_report', False):
+            from utils.p_score_diagnostic import report_score_counterfactuals
+            report_score_counterfactuals(self._network, test_loader.dataset, self._device,
+                self._cur_task, self._known_classes)
         if bool(self.args.get("dual_mask_functional_merge_calibration", False)):
             calibration_loader = getattr(self, "w0_loader", train_loader)
             self._calibrate_functional_merge(calibration_loader)

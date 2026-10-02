@@ -289,6 +289,8 @@ class Attention_LoRA(nn.Module):
         self.register_buffer("p_direction_right", None, persistent=False)
         self._p_direction_state = None
 
+        self._p_score_diagnostic_gate = None
+
         self.register_buffer("pretrained_weight", torch.zeros(shape), persistent=True)
         self.register_buffer("pretrained_anchor_captured", torch.tensor(False, dtype=torch.bool), persistent=True)
 
@@ -1155,6 +1157,8 @@ class Attention_LoRA(nn.Module):
     @torch.no_grad()
     def _p_direction_gate(self, delta, conflict_ratio=None, conflict_strength=None):
         from utils.p_direction_score import norm_matched_gate, spectral_score
+        if self._p_score_diagnostic_gate is not None:
+            return self._p_score_diagnostic_gate
         plastic = (1.0 - self.general_mask.to(delta)).reshape(3, self.dim, self.dim)
         base = delta.detach().reshape_as(plastic) * plastic
         _, reference = self._branch_conflict(delta, isolated=True, conflict_ratio=conflict_ratio)
@@ -1163,9 +1167,10 @@ class Attention_LoRA(nn.Module):
             conflict_strength = self._conflict_parameters()[1]
         mode = self.args["p_direction_score"]
         fractions = None
+        functional = None
         if mode == "coordinate":
             score = base.abs()
-        else:
+        elif mode in ("spectral", "signed"):
             if self.p_direction_left is None:
                 left, singular, vh = torch.linalg.svd(
                     self.pretrained_weight.detach().float().reshape_as(base), full_matrices=False)
@@ -1173,12 +1178,23 @@ class Attention_LoRA(nn.Module):
                 self.p_direction_right = vh.transpose(-2, -1).contiguous()
             score, fractions, _ = spectral_score(base, self.p_direction_left,
                 self.p_direction_singular, self.p_direction_right, signed=mode == "signed")
+        else:
+            from utils.p_functional_score import functional_score
+            anchor = self.qkv.weight if mode == "task_qk" else self.pretrained_weight
+            unit = self.S_lora[self.cur_task]
+            raw_s = self.slora_gamma * (unit.B_weight.detach() @ unit.A_weight.detach())
+            context = self._safe_delta(raw_s, isolated=False).reshape_as(base)
+            if mode != "task_qk":
+                context = context + self.qkv.weight.detach().reshape_as(base) - anchor.detach().reshape_as(base)
+            bias = None if self.qkv.bias is None else self.qkv.bias.detach().float().reshape(3, self.dim)
+            score, functional = functional_score(mode, base, anchor.detach().reshape_as(base),
+                context, self.num_heads, self.w0_importance.reshape_as(base), bias)
         gate, selected, strengths = norm_matched_gate(base, score, reference,
                                                     conflict_strength, plastic)
         actual_gate = (plastic * gate).reshape_as(delta).to(delta)
         self._p_direction_state = dict(base=base, gate=gate, selected=selected,
             reference=reference, strengths=strengths, reference_strength=conflict_strength,
-            fractions=fractions)
+            fractions=fractions, functional=functional)
         return actual_gate, selected.reshape_as(delta).to(delta)
 
     def _composed_base_gate(self, delta, isolated):
@@ -2042,7 +2058,7 @@ class Attention_LoRA(nn.Module):
         actual = base - safe.reshape_as(base)
         reference = base * state["reference"] * state["reference_strength"]
         jaccard = None
-        if self.args["p_direction_score"] != "coordinate":
+        if self.args["p_direction_score"] in ("spectral", "signed"):
             from utils.p_direction_score import norm_matched_gate, spectral_score
             alternative, _, _ = spectral_score(base, self.p_direction_left,
                 self.p_direction_singular, self.p_direction_right,
@@ -2062,6 +2078,8 @@ class Attention_LoRA(nn.Module):
             base_norm=base.norm(dim=(-2, -1)).tolist(),
             spectral_fractions=None if state["fractions"] is None else state["fractions"].tolist(),
             signed_absolute_jaccard=jaccard,
+            functional_risk=None if state.get("functional") is None else state["functional"]["risk"].tolist(),
+            positive_contribution_fraction=None if state.get("functional") is None else state["functional"]["positive_fraction"].tolist(),
             merge_error=float((safe - raw * (1.0 - self.general_mask.to(raw)) *
                                state["gate"].reshape_as(raw).to(raw)).abs().max()))))
 
