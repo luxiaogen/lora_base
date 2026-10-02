@@ -284,6 +284,10 @@ class Attention_LoRA(nn.Module):
         self.register_buffer("p_hard_zero_random_mask", None, persistent=False)
         self.register_buffer("composed_random_score", None, persistent=False)
         self._composed_forward_gate = None
+        self.register_buffer("p_direction_left", None, persistent=False)
+        self.register_buffer("p_direction_singular", None, persistent=False)
+        self.register_buffer("p_direction_right", None, persistent=False)
+        self._p_direction_state = None
 
         self.register_buffer("pretrained_weight", torch.zeros(shape), persistent=True)
         self.register_buffer("pretrained_anchor_captured", torch.tensor(False, dtype=torch.bool), persistent=True)
@@ -498,6 +502,9 @@ class Attention_LoRA(nn.Module):
         with torch.no_grad():
             self.pretrained_weight.copy_(self.qkv.weight.detach())  # W_pre = W0.clone() 永远不变的 W_pre
             self.pretrained_anchor_captured.fill_(True)
+            self.p_direction_left = None
+            self.p_direction_singular = None
+            self.p_direction_right = None
 
     def set_pretrained_anchor_mode(self, enabled: bool):
         self.pretrained_anchor_mode = bool(enabled)
@@ -1141,6 +1148,39 @@ class Attention_LoRA(nn.Module):
                 and self.S_lora[self.cur_task] is not None
                 and self.P_lora[self.cur_task] is not None)
 
+    def _p_direction_active(self):
+        return (self.cur_task > 0 and self.args.get("p_direction_score", "off") != "off"
+                and self.dual_mask_p_conflict_enabled and self._effective_gate_mode() == "full")
+
+    @torch.no_grad()
+    def _p_direction_gate(self, delta, conflict_ratio=None, conflict_strength=None):
+        from utils.p_direction_score import norm_matched_gate, spectral_score
+        plastic = (1.0 - self.general_mask.to(delta)).reshape(3, self.dim, self.dim)
+        base = delta.detach().reshape_as(plastic) * plastic
+        _, reference = self._branch_conflict(delta, isolated=True, conflict_ratio=conflict_ratio)
+        reference = reference.reshape_as(plastic).bool() & plastic.bool()
+        if conflict_strength is None:
+            conflict_strength = self._conflict_parameters()[1]
+        mode = self.args["p_direction_score"]
+        fractions = None
+        if mode == "coordinate":
+            score = base.abs()
+        else:
+            if self.p_direction_left is None:
+                left, singular, vh = torch.linalg.svd(
+                    self.pretrained_weight.detach().float().reshape_as(base), full_matrices=False)
+                self.p_direction_left, self.p_direction_singular = left, singular
+                self.p_direction_right = vh.transpose(-2, -1).contiguous()
+            score, fractions, _ = spectral_score(base, self.p_direction_left,
+                self.p_direction_singular, self.p_direction_right, signed=mode == "signed")
+        gate, selected, strengths = norm_matched_gate(base, score, reference,
+                                                    conflict_strength, plastic)
+        actual_gate = (plastic * gate).reshape_as(delta).to(delta)
+        self._p_direction_state = dict(base=base, gate=gate, selected=selected,
+            reference=reference, strengths=strengths, reference_strength=conflict_strength,
+            fractions=fractions)
+        return actual_gate, selected.reshape_as(delta).to(delta)
+
     def _composed_base_gate(self, delta, isolated):
         protect = self.general_mask.to(delta)
         if isolated:
@@ -1208,6 +1248,10 @@ class Attention_LoRA(nn.Module):
             state = self._composed_conflict_state()
             gate = self._composed_base_gate(delta, isolated) * state["gate"]
             applied = torch.ones_like(delta) if self.dual_mask_composed_conflict == "uniform" else state["selected"]
+            safe = delta * gate
+            return (safe, gate, applied) if return_details else safe
+        if isolated and self._p_direction_active():
+            gate, applied = self._p_direction_gate(delta, conflict_ratio, conflict_strength)
             safe = delta * gate
             return (safe, gate, applied) if return_details else safe
 
@@ -1289,6 +1333,10 @@ class Attention_LoRA(nn.Module):
             base_delta = delta * (1.0 - protect_strength * protect_mask)
         else:
             base_delta = delta
+
+        if isolated and self._p_direction_active() and compute_conflict:
+            _, applied = self._p_direction_gate(delta, conflict_ratio)
+            return base_delta, applied
 
         private_conflict_disabled = (isolated and self.dual_mask_private_conflict_mode == "none")
         if gate_mode == "protect_only" or private_conflict_disabled or not self._conflict_gate_enabled(isolated):
@@ -1397,6 +1445,9 @@ class Attention_LoRA(nn.Module):
 
         if self._composed_conflict_active() and self._composed_forward_gate is not None:
             safe_delta = delta * self._composed_base_gate(delta, isolated) * self._composed_forward_gate
+        elif isolated and self._p_direction_active() and self._p_direction_state is not None:
+            plastic = 1.0 - self.general_mask.to(delta)
+            safe_delta = delta * plastic * self._p_direction_state["gate"].reshape_as(delta).to(delta)
         else:
             safe_delta = self._safe_delta(delta, isolated=isolated)
         w0_importance = self.w0_importance.to(device=delta.device, dtype=delta.dtype)
@@ -1627,7 +1678,7 @@ class Attention_LoRA(nn.Module):
         conflict_strength = min(max(conflict_strength, 0.0), 1.0)
         # 总分支的冲突门削弱程度  把raw_total = S_raw + P_raw作为整体，估算只施加冲突门后，整体增量范数下降多少
         conflict_gate_suppression = self._conflict_gate_suppression(raw_total,conflict_mask,conflict_strength,)
-        if self.dual_mask_uniform_norm_matched or not (self.dual_mask_s_conflict_enabled and self.dual_mask_p_conflict_enabled):
+        if self._p_direction_active() or self.dual_mask_uniform_norm_matched or not (self.dual_mask_s_conflict_enabled and self.dual_mask_p_conflict_enabled):
             base_total = torch.stack([
                 self._merge_base_and_conflict(item["raw_delta"], item["isolated"], conflict_ratio)[0]
                 for item in branch_deltas
@@ -1638,7 +1689,7 @@ class Attention_LoRA(nn.Module):
         private_energy_overlap = raw_total.new_zeros(())
         private_gate_suppression = 0.0
         private_item = next((item for item in branch_deltas if item["isolated"]),None,)
-        if private_item is not None:
+        if private_item is not None and not self._p_direction_active():
             private_raw = private_item["raw_delta"]
             applied = self._private_merge_diagnostic(
                 private_raw,
@@ -1708,6 +1759,15 @@ class Attention_LoRA(nn.Module):
                 private_mask_overlap = plastic_mask.float().mean()
                 private_energy_overlap = (private_score * plastic_mask).sum() / private_score.sum().clamp_min(1e-12)
             private_gate_suppression = self._conflict_gate_suppression(private_plastic_delta,actual_private_mask,actual_private_strength,)
+
+        if private_item is not None and self._p_direction_active():
+            state = self._p_direction_state
+            selected = state["selected"].reshape_as(protect_mask).float()
+            private_mask_overlap = raw_total.new_tensor(1.0 if selected.any() else 0.0)
+            private_energy_overlap = private_mask_overlap
+            private_base = private_item["raw_delta"] * (1.0 - protect_mask.to(raw_total))
+            private_gate_suppression = float((private_base - private_item["safe_delta"]).norm()
+                                            / private_base.norm().clamp_min(1e-12))
 
 
         with torch.no_grad():
@@ -1790,6 +1850,7 @@ class Attention_LoRA(nn.Module):
         self._composed_forward_gate = None
 
         zero_output = x.new_zeros((*x.shape[:-1], self.dim * 3))
+        self._p_direction_state = None
 
         if self.pretrained_anchor_mode:
             return zero_output
@@ -1822,7 +1883,11 @@ class Attention_LoRA(nn.Module):
 
         if t_idx > 0 and self.use_plora and unit_p is not None:
             ## P_lora 只能在 W0 非重要区域更新
-            out = out + plora_gamma * self._masked_unit_forward(x, unit_p, isolated=True, residual_scale=plora_gamma)
+            if self._p_direction_active():
+                raw_p = plora_gamma * (unit_p.B_weight @ unit_p.A_weight)
+                out = out + F.linear(x, self._safe_delta(raw_p, isolated=True))
+            else:
+                out = out + plora_gamma * self._masked_unit_forward(x, unit_p, isolated=True, residual_scale=plora_gamma)
 
         self._finalize_safe_residual(x)
         return out
@@ -1885,9 +1950,13 @@ class Attention_LoRA(nn.Module):
             else:
                 for item in branch_deltas:
                     mask_delta(item, conflict_ratio, conflict_strength)
+                    if item["isolated"] and self._p_direction_active():
+                        self._log_p_direction_merge(t, item["raw_delta"], item["safe_delta"])
 
             if self.dual_mask_applied_budget_log and composed is None:
                 for item in branch_deltas:
+                    if item["isolated"] and self._p_direction_active():
+                        continue  # PDirectionScore below uses the actual norm-matched gate.
                     raw, safe = item["raw_delta"], item["safe_delta"]
                     base, applied = self._merge_base_and_conflict(raw, item["isolated"], conflict_ratio)
                     _, reference = self._joint_conflict(raw, conflict_ratio=conflict_ratio)
@@ -1963,7 +2032,38 @@ class Attention_LoRA(nn.Module):
         self.p_hard_zero_random_mask = None
         self.composed_random_score = None
         self._composed_forward_gate = None
+        self._p_direction_state = None
         return None
+
+    @torch.no_grad()
+    def _log_p_direction_merge(self, task, raw, safe):
+        state = self._p_direction_state
+        base = state["base"]
+        actual = base - safe.reshape_as(base)
+        reference = base * state["reference"] * state["reference_strength"]
+        jaccard = None
+        if self.args["p_direction_score"] != "coordinate":
+            from utils.p_direction_score import norm_matched_gate, spectral_score
+            alternative, _, _ = spectral_score(base, self.p_direction_left,
+                self.p_direction_singular, self.p_direction_right,
+                signed=self.args["p_direction_score"] == "spectral")
+            _, alternative_mask, _ = norm_matched_gate(base, alternative, state["reference"],
+                state["reference_strength"], (1.0 - self.general_mask).reshape_as(base))
+            intersection = (alternative_mask & state["selected"]).sum((-2, -1))
+            union = (alternative_mask | state["selected"]).sum((-2, -1)).clamp_min(1)
+            jaccard = (intersection / union).tolist()
+        logging.info("PDirectionScore %s", json.dumps(dict(
+            task=int(task), layer=int(self.layer_idx), mode=self.args["p_direction_score"],
+            selected_k=state["selected"].sum((-2, -1)).tolist(),
+            reference_k=state["reference"].sum((-2, -1)).tolist(),
+            strength=state["strengths"].tolist(),
+            reference_removed_norm=reference.norm(dim=(-2, -1)).tolist(),
+            actual_removed_norm=actual.norm(dim=(-2, -1)).tolist(),
+            base_norm=base.norm(dim=(-2, -1)).tolist(),
+            spectral_fractions=None if state["fractions"] is None else state["fractions"].tolist(),
+            signed_absolute_jaccard=jaccard,
+            merge_error=float((safe - raw * (1.0 - self.general_mask.to(raw)) *
+                               state["gate"].reshape_as(raw).to(raw)).abs().max()))))
 
     @torch.no_grad()
     def _log_composed_merge(self, task, state, strength):
