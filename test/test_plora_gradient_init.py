@@ -181,6 +181,24 @@ class GradientBasisTests(unittest.TestCase):
                     if name != 'attention.P_lora.1.A.weight' or mode == 'random':
                         self.assertTrue(torch.equal(value, before[name]), name)
 
+    @unittest.skipUnless(torch.cuda.is_available(), 'CUDA server check')
+    def test_cuda_real_dimension_frame_preserves_gram_with_tf32_enabled(self):
+        original = torch.randn(39, 768, device='cuda') * .02
+        gradient = torch.randn(2304, 768, device='cuda')
+        wpre, history = torch.randn_like(gradient), torch.randn_like(gradient)
+        before = torch.backends.cuda.matmul.allow_tf32
+        try:
+            torch.backends.cuda.matmul.allow_tf32 = True
+            for mode in ('gradient', 'weight_prior'):
+                a, record = gradient_a_basis(gradient, wpre, history, original, mode)
+                reference = original.double() @ original.double().T
+                actual = a.double() @ a.double().T
+                relative_error = ((actual - reference).norm() / reference.norm()).item()
+                self.assertLess(relative_error, 1e-6)
+                self.assertAlmostEqual(record['a_gram_relative_error'], relative_error, places=12)
+        finally:
+            torch.backends.cuda.matmul.allow_tf32 = before
+
     def test_effective_update_can_escape_raw_a_space_after_elementwise_gate(self):
         a = torch.tensor([[1., 1.]])
         raw = torch.tensor([[1., 1.], [2., 2.]])

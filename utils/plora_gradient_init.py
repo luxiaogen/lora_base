@@ -27,17 +27,18 @@ def gradient_a_basis(gradient, wpre, residual, original_a, mode):
             old_energy = (residual @ vectors.T).square().sum(0) / residual.square().sum().clamp_min(1e-12)
             score = score / (1 + dim * (pre_energy + old_energy))
         selected = score.argsort(descending=True, stable=True)[:rank]
-        directions = vectors[selected]
+        # Small double-precision QR/frame products avoid TF32 rounding of A's Gram.
+        directions = torch.linalg.qr(vectors[selected].double().T, mode='reduced').Q.T
         pivots = directions.abs().argmax(1, keepdim=True)
         directions = directions * directions.gather(1, pivots).sign()
-        left, scale, _ = torch.linalg.svd(original_a.detach().float(), full_matrices=False)
+        left, scale, _ = torch.linalg.svd(original_a.detach().double(), full_matrices=False)
         replacement = ((left * scale) @ directions).to(original_a)
     record = {}
     for name, matrix in (('gradient', gradient), ('wpre', wpre), ('history', residual)):
         record[name + '_energy_fraction'] = float(
-            (matrix @ directions.T).square().sum() / matrix.square().sum().clamp_min(1e-12))
-    original = original_a.detach().float()
-    new = replacement.float()
+            (matrix @ directions.float().T).square().sum() / matrix.square().sum().clamp_min(1e-12))
+    original = original_a.detach().double()
+    new = replacement.double()
     record['row_norm_max_error'] = float((new.norm(dim=1) - original.norm(dim=1)).abs().max())
     record['a_gram_relative_error'] = float(
         (new @ new.T - original @ original.T).norm() / (original @ original.T).norm().clamp_min(1e-12))
