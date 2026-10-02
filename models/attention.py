@@ -1970,10 +1970,10 @@ class Attention_LoRA(nn.Module):
                         self._log_p_direction_merge(t, item["raw_delta"], item["safe_delta"])
 
             basis_mode = self.args.get("plora_a_init_mode", "off")
-            if t > 0 and basis_mode in ("random", "gradient", "weight_prior"):
-                from utils.plora_gradient_init import log_basis_update
+            if t > 0 and basis_mode != "off":
+                from utils.plora_gradient_init import GRADIENT_A_MODES, log_basis_update
                 for item in branch_deltas:
-                    if item["isolated"]:
+                    if item["isolated"] and basis_mode in GRADIENT_A_MODES:
                         log_basis_update(self, item["raw_delta"], item["safe_delta"], t, basis_mode)
 
             if self.dual_mask_applied_budget_log and composed is None:

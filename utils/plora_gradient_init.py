@@ -10,6 +10,10 @@ import torch
 from torch.utils.data import DataLoader, Subset
 
 
+GRADIENT_A_MODES = ('random', 'gradient', 'weight_prior', 'wpre_prior',
+                    'history_prior', 'wpre_reuse', 'weight_whiten')
+
+
 @torch.no_grad()
 def gradient_a_basis(gradient, wpre, residual, original_a, mode):
     """Change the input span, preserving A A^T (scale and conditioning)."""
@@ -19,16 +23,33 @@ def gradient_a_basis(gradient, wpre, residual, original_a, mode):
         replacement = original_a.detach().clone()  # Exact existing Kaiming control.
         directions = torch.linalg.qr(replacement.float().T, mode='reduced').Q.T
     else:
-        _, singular, vectors = torch.linalg.svd(gradient, full_matrices=False)
-        score = singular.square()
-        if mode == 'weight_prior':
-            # Unit-mean directional energies keep the two weight priors scale-independent.
-            pre_energy = (wpre @ vectors.T).square().sum(0) / wpre.square().sum().clamp_min(1e-12)
-            old_energy = (residual @ vectors.T).square().sum(0) / residual.square().sum().clamp_min(1e-12)
-            score = score / (1 + dim * (pre_energy + old_energy))
-        selected = score.argsort(descending=True, stable=True)[:rank]
+        if mode == 'weight_whiten':
+            metric = torch.eye(dim, device=gradient.device)
+            for prior in (wpre, residual):
+                metric = metric + dim * (prior.T @ prior) / prior.square().sum().clamp_min(1e-12)
+            values, vectors = torch.linalg.eigh(metric.double())
+            inverse_root = (vectors * values.rsqrt()) @ vectors.T
+            _, _, vectors = torch.linalg.svd(gradient @ inverse_root.float(), full_matrices=False)
+            candidates = (inverse_root @ vectors[:rank].double().T).T
+        else:
+            _, singular, vectors = torch.linalg.svd(gradient, full_matrices=False)
+            score = singular.square()
+            if mode in ('weight_prior', 'wpre_prior', 'history_prior', 'wpre_reuse'):
+                # Unit-mean energies; not old-data sensitivity estimates.
+                pre_energy = (wpre @ vectors.T).square().sum(0) / wpre.square().sum().clamp_min(1e-12)
+                old_energy = (residual @ vectors.T).square().sum(0) / residual.square().sum().clamp_min(1e-12)
+                if mode == 'weight_prior':
+                    score = score / (1 + dim * (pre_energy + old_energy))
+                elif mode == 'wpre_prior':
+                    score = score / (1 + dim * pre_energy)
+                elif mode == 'history_prior':
+                    score = score / (1 + dim * old_energy)
+                else:  # Test reusing strong pretrained responses instead of avoiding them.
+                    score = score * (1 + dim * pre_energy)
+            selected = score.argsort(descending=True, stable=True)[:rank]
+            candidates = vectors[selected].double()
         # Small double-precision QR/frame products avoid TF32 rounding of A's Gram.
-        directions = torch.linalg.qr(vectors[selected].double().T, mode='reduced').Q.T
+        directions = torch.linalg.qr(candidates.T, mode='reduced').Q.T
         pivots = directions.abs().argmax(1, keepdim=True)
         directions = directions * directions.gather(1, pivots).sign()
         left, scale, _ = torch.linalg.svd(original_a.detach().double(), full_matrices=False)
@@ -46,7 +67,7 @@ def gradient_a_basis(gradient, wpre, residual, original_a, mode):
 
 
 def initialize_gradient_a(network, modules, dataset, device, task, mode, known_classes, loss_fn,
-                          batch_size=48, batches=4, seed=1993):
+                          batch_size=48, batches=4, seed=1993, probe_head='random'):
     """Probe classification gradients only; never step an optimizer or retain features."""
     started = time.perf_counter()
     generator = torch.Generator().manual_seed(seed)
@@ -60,19 +81,44 @@ def initialize_gradient_a(network, modules, dataset, device, task, mode, known_c
     py_state, np_state = random.getstate(), np.random.get_state()
     devices = sorted({param.device.index for param in network.parameters() if param.is_cuda})
     samples = 0
+    loss_total, correct, seen_classes = 0., 0, set()
+    head = network.classifier_pool[task] if probe_head == 'prototype' else None
+    original_head = head.weight.detach().clone() if head is not None else None
     try:
         with torch.random.fork_rng(devices=devices), torch.enable_grad():
             network.eval()
+            if head is not None:
+                # Only these current-task images; discard sums and restore the head after probing.
+                with torch.no_grad():
+                    sums = torch.zeros_like(head.weight)
+                    counts = torch.zeros(len(sums), device=device)
+                    for _, inputs, targets in loader:
+                        local = targets.to(device) - known_classes
+                        features = torch.nn.functional.normalize(network(inputs.to(device))['features'], dim=1)
+                        for label in range(len(sums)):
+                            selected = local == label
+                            sums[label].add_(features[selected].sum(0))
+                            counts[label].add_(selected.sum())
+                    prototypes = torch.nn.functional.normalize(sums / counts.clamp_min(1)[:, None], dim=1)
+                    head.weight.copy_(torch.where(counts[:, None] > 0,
+                        prototypes * original_head.norm(dim=1, keepdim=True), original_head))
             for weight in weights:
                 weight.requires_grad_(True)
             for _, inputs, targets in loader:
                 targets = targets.to(device) - known_classes
-                loss = loss_fn(network(inputs.to(device))['logits'], targets)
+                logits = network(inputs.to(device))['logits']
+                loss = loss_fn(logits, targets)
                 values = torch.autograd.grad(loss, weights)
                 for total, value in zip(gradients, values):
                     total.add_(value.detach().float(), alpha=len(targets))
+                loss_total += float(loss.detach()) * len(targets)
+                correct += int((logits.detach().argmax(1) == targets).sum())
+                seen_classes.update(targets.tolist())
                 samples += len(targets)
     finally:
+        if head is not None:
+            with torch.no_grad():
+                head.weight.copy_(original_head)
         for weight, flag in zip(weights, flags):
             weight.requires_grad_(flag)
         for module, training in modes:
@@ -92,6 +138,8 @@ def initialize_gradient_a(network, modules, dataset, device, task, mode, known_c
                 unit.A.weight.copy_(replacement)
             record.update(task=task, layer=layer, mode=mode, images=samples, rank=unit.A.weight.shape[0],
                 source='current_train_classification_gradient',
+                probe_head=probe_head, probe_loss=loss_total / samples,
+                probe_accuracy=100 * correct / samples, probe_classes_present=len(seen_classes),
                 sample_hash=hashlib.sha256(indices.numpy().tobytes()).hexdigest()[:16],
                 masked_gradient_energy_fraction=float(
                     plastic_gradient.square().sum() / gradient.square().sum().clamp_min(1e-12)),

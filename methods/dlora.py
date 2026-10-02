@@ -1221,14 +1221,16 @@ class Learner(BaseLearner):
         modules = list(self._iter_lora_modules())
         options = dict(batch_size=self.batch_size, batches=int(self.args.get('plora_a_init_batches', 4)),
                        seed=int(self.args['seed']) + self._cur_task)
-        if mode in ('random', 'gradient', 'weight_prior'):
+        from utils.plora_gradient_init import GRADIENT_A_MODES
+        if mode in GRADIENT_A_MODES:
             from utils.plora_gradient_init import initialize_gradient_a
             smoothing = (0.0 if self.args.get('label_smoothing_task0_only', False)
                          else float(self.args.get('label_smoothing', 0.0)))
             loss_fn = AngularPenaltySMLoss(loss_type='cosface', s=self.scale, m=self.margin,
                                            label_smoothing=smoothing)
             initialize_gradient_a(network, modules, self._plora_a_init_dataset, self._device,
-                                  self._cur_task, mode, self._known_classes, loss_fn, **options)
+                                  self._cur_task, mode, self._known_classes, loss_fn,
+                                  probe_head=self.args.get('plora_a_probe_head', 'random'), **options)
         else:
             from utils.plora_a_init import initialize_plora_a
             initialize_plora_a(network, modules, self._plora_a_init_dataset,
