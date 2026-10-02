@@ -1217,12 +1217,22 @@ class Learner(BaseLearner):
         mode = self.args.get('plora_a_init_mode', 'off')
         if self._cur_task == 0 or mode == 'off':
             return
-        from utils.plora_a_init import initialize_plora_a
         network = self._network.module if isinstance(self._network, torch.nn.DataParallel) else self._network
-        initialize_plora_a(network, list(self._iter_lora_modules()), self._plora_a_init_dataset,
-                           self._device, self._cur_task, mode, batch_size=self.batch_size,
-                           batches=int(self.args.get('plora_a_init_batches', 4)),
-                           seed=int(self.args['seed']) + self._cur_task)
+        modules = list(self._iter_lora_modules())
+        options = dict(batch_size=self.batch_size, batches=int(self.args.get('plora_a_init_batches', 4)),
+                       seed=int(self.args['seed']) + self._cur_task)
+        if mode in ('random', 'gradient', 'weight_prior'):
+            from utils.plora_gradient_init import initialize_gradient_a
+            smoothing = (0.0 if self.args.get('label_smoothing_task0_only', False)
+                         else float(self.args.get('label_smoothing', 0.0)))
+            loss_fn = AngularPenaltySMLoss(loss_type='cosface', s=self.scale, m=self.margin,
+                                           label_smoothing=smoothing)
+            initialize_gradient_a(network, modules, self._plora_a_init_dataset, self._device,
+                                  self._cur_task, mode, self._known_classes, loss_fn, **options)
+        else:
+            from utils.plora_a_init import initialize_plora_a
+            initialize_plora_a(network, modules, self._plora_a_init_dataset,
+                               self._device, self._cur_task, mode, **options)
         self._plora_a_init_dataset = None
 
     def _lora_optimizer_groups(self, flora_params, other_params, lr, weight_decay):
