@@ -49,3 +49,18 @@ bash scripts/10_02_imgr10_wpre_complement_5090.sh --hours 8
 ## 验证状态（提交前）
 
 31项相关测试通过，Python编译和Bash语法检查通过；代码审查所发现的导入问题已修复并重新测试。本机全量发现491项：488项通过、1项跳过，另2个模块因缺少 easydict 无法导入。以上不等于 CUDA 或性能验证，GPU短测及正式实验状态另记启动记录。
+
+## 5090 启动记录
+
+- 实际训练代码：`b49b5cdfbe472b500e16babf1e483f93ab2f821e`；原项目 `/mnt/disk1/lys/CIL/code/baseline/lora_base`，环境 `/mnt/disk1/envs/lys_cil`。五份本地 JSON 修改保留，没有新建项目，也没有改动3090。
+- 服务器59项相关测试通过；六组 CUDA 短测全部退出0，每组约1.55–1.59分钟，确认 S/P/SP 辅助梯度分别进入指定 B 参数。
+- 后台主 PID：`2205329`（conda）；队列 PID：`2205414`。2026-10-02 08:07:32（北京时间）第一组 `complement_s` 开始完整 T10，08:09已运行到Task0第9/20轮；这不是一轮短测或缓存分析。完整结果尚未产生，不宣称性能有效。
+- 外层日志：`logs/10_02_imgr10_wpre_complement_5090_20261002_075800.log`。
+- 队列与逐组配置/日志：`logs/shell_logs/imgr10_wpre_complement_5090/20261002_075803_874256/`。
+- 第一组 [W&B记录](https://wandb.ai/202512491198-nuist/LoDA_ICML2026/runs/19wbhbsw)。运行期间不要更新算法文件；各组都有源码哈希供核对。
+
+服务器查看总日志：
+
+```bash
+tail -f /mnt/disk1/lys/CIL/code/baseline/lora_base/logs/10_02_imgr10_wpre_complement_5090_20261002_075800.log
+```
