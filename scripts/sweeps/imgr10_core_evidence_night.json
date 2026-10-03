@@ -1,0 +1,32 @@
+{
+  "common_overrides": {
+    "dual_mask_mechanism_audit": true,
+    "dual_mask_position_norm_match": "off",
+    "dual_mask_permission_mode": "asymmetric",
+    "dual_mask_protect_position": "wpre",
+    "dual_mask_conflict_score_mode": "conflict",
+    "dual_mask_conflict_reg_original_score": true,
+    "dual_mask_position_audit": true,
+    "save_task_weights": false,
+    "stage_audit": false
+  },
+  "3090": [
+    {"name": "R0", "label": "Original baseline", "overrides": {}},
+    {"name": "R1", "label": "Wpre / paired norm / product", "overrides": {"dual_mask_position_norm_match": "paired_min"}},
+    {"name": "R2", "label": "Permuted / paired norm / product", "overrides": {"dual_mask_position_norm_match": "paired_min", "dual_mask_protect_position": "permuted"}},
+    {"name": "R3", "label": "Symmetric soft permissions", "overrides": {"dual_mask_permission_mode": "symmetric_soft"}},
+    {"name": "R4", "label": "Symmetric hard permissions", "overrides": {"dual_mask_permission_mode": "symmetric_hard"}},
+    {"name": "R5", "label": "Wpre / paired norm / magnitude", "overrides": {"dual_mask_position_norm_match": "paired_min", "dual_mask_conflict_score_mode": "magnitude"}},
+    {"name": "R6", "label": "Permuted / paired norm / magnitude", "overrides": {"dual_mask_position_norm_match": "paired_min", "dual_mask_protect_position": "permuted", "dual_mask_conflict_score_mode": "magnitude"}}
+  ],
+  "5090": [
+    {"name": "S0", "label": "Original baseline", "overrides": {}},
+    {"name": "S1", "label": "Conflict penalty off", "overrides": {"dual_mask_conflict_reg_enabled": false}},
+    {"name": "S2", "label": "Conflict gates off", "overrides": {"dual_mask_s_conflict_enabled": false, "dual_mask_p_conflict_enabled": false}},
+    {"name": "S3", "label": "Conflict gates and penalty off", "overrides": {"dual_mask_conflict_reg_enabled": false, "dual_mask_s_conflict_enabled": false, "dual_mask_p_conflict_enabled": false}},
+    {"name": "S4", "label": "All mask penalties off", "overrides": {"dual_mask_reg_weight": 0}},
+    {"name": "S5", "label": "Uniform removed-norm-matched conflict gate", "overrides": {"dual_mask_uniform_norm_matched": true}},
+    {"name": "S6", "label": "S mask penalty only", "overrides": {"dual_mask_p_reg_enabled": false}},
+    {"name": "S7", "label": "P mask penalty only", "overrides": {"dual_mask_s_reg_enabled": false}}
+  ]
+}

@@ -21,6 +21,7 @@ from models.losses import AngularPenaltySMLoss, representation_steering_loss
 from contextlib import ExitStack
 from utils.task0_repro import tensor_hash, model_fingerprint, log_record, log_environment
 from utils.task0_validation import evaluate_task0_holdout
+from utils.dualmask_core_audit import stage_cost
 from utils.dual_mask_budget import (
     select_global_budget_masks,
     select_projection_budget_masks,
@@ -1087,7 +1088,8 @@ class Learner(BaseLearner):
                 pin_memory=True,
             )
             self._network.to(self._device)
-            self._prepare_w0_prototypes(self.w0_loader)
+            with stage_cost(self, 'competence'):
+                self._prepare_w0_prototypes(self.w0_loader)
 
         ca_transport_before = None
         if self._cur_task > 0 and self.args['ca'] and self.args.get('ca_stats_transport', False):
@@ -1111,7 +1113,8 @@ class Learner(BaseLearner):
             del ca_transport_before
 
         # update mean and cov and classifier alignment
-        self._compute_class_mean(data_manager, check_diff=False, oracle=False)
+        with stage_cost(self, 'ca_statistics'):
+            self._compute_class_mean(data_manager, check_diff=False, oracle=False)
         if self._cur_task > 0 and self.args['ca'] is True:
             if self.args.get('ca_boundary_shadow', False):
                 from utils.ca_boundary import temporary_classifier
@@ -1120,8 +1123,9 @@ class Learner(BaseLearner):
                     self._stage2_compact_classifier(self.task_sizes[-1], boundary=True)
                     shadow = StageAudit(self._cur_task, self._known_classes)
                     shadow.record('boundary_shadow_post_ca', self._network, self.test_loader, self._device)
-            self._stage2_compact_classifier( # CA 分类器对齐
-                self.task_sizes[-1],ca_epochs=int(self.args.get("ca_epochs", 5)),)
+            with stage_cost(self, 'ca'):
+                self._stage2_compact_classifier( # CA 分类器对齐
+                    self.task_sizes[-1],ca_epochs=int(self.args.get("ca_epochs", 5)),)
         if self._stage_audit is not None:
             self._stage_audit.record('post_ca', self._network, self.test_loader, self._device)
             self._stage_audit = None
@@ -1276,8 +1280,11 @@ class Learner(BaseLearner):
             if name.startswith(current_classifier):
                 param.requires_grad_(True)  # 将 分类头打开可训
 
-        for module in self._iter_lora_modules():
-            module.before_task(task=self._cur_task)
+        if self.args.get('dual_mask_mechanism_audit', False) and self._device.type == 'cuda':
+            torch.cuda.reset_peak_memory_stats(self._device)
+        with stage_cost(self, 'protection_and_adapter_setup'):
+            for module in self._iter_lora_modules():
+                module.before_task(task=self._cur_task)
 
         if len(self._multiple_gpus) > 1:
             self._network = torch.nn.DataParallel(self._network, self._multiple_gpus)
@@ -1337,7 +1344,8 @@ class Learner(BaseLearner):
             else:
                 raise Exception
             self.run_epoch = self.init_epoch
-            self.train_function(train_loader, test_loader, optimizer, scheduler)
+            with stage_cost(self, 'training'):
+                self.train_function(train_loader, test_loader, optimizer, scheduler)
         else:
             if self.optim == 'sgd':
                 optimizer = optim.SGD(params=param_groups)
@@ -1348,7 +1356,8 @@ class Learner(BaseLearner):
             else:
                 raise Exception
             self.run_epoch = self.epochs
-            self.train_function(train_loader, test_loader, optimizer, scheduler)
+            with stage_cost(self, 'training'):
+                self.train_function(train_loader, test_loader, optimizer, scheduler)
         if len(self._multiple_gpus) > 1:
             self._network = self._network.module
 
@@ -1635,6 +1644,14 @@ class Learner(BaseLearner):
                            train_accuracy=float(train_acc),
                            trainable_sha256=tensor_hash((n, p) for n, p in self._network.named_parameters() if p.requires_grad))
 
+            if self.args.get('dual_mask_mechanism_audit', False):
+                from utils.dualmask_core_audit import epoch_updates, position_diagnostic, storage_bytes
+                with stage_cost(self, 'update_telemetry'):
+                    epoch_updates(self, epoch + 1)
+                position_diagnostic(self, test_loader.dataset, epoch + 1)
+                if epoch == 0:
+                    storage_bytes(self, 'adapters_allocated')
+
         self._head_balance_pool = None
         if self._cur_task == 0 and getattr(self, 'task0_validation_loader', None) is not None:
             logging.info('Task0 Holdout loss curve: %s', self._task0_holdout_loss_curve)
@@ -1705,7 +1722,11 @@ class Learner(BaseLearner):
         return ret
 
     def eval_task(self):
-        result = super().eval_task()
+        with stage_cost(self, 'inference'):
+            result = super().eval_task()
+        if self.args.get('dual_mask_mechanism_audit', False):
+            from utils.dualmask_core_audit import storage_bytes
+            storage_bytes(self, 'post_ca_merged')
         if self._ridge_fusion_ready:
             self._ridge_fusion.report(self._cur_task, self._ridge_fusion_eval_base,
                                       self._ridge_fusion_eval_candidate, self._ridge_fusion_eval_targets,
