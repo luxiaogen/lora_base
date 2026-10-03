@@ -870,6 +870,24 @@ class Attention_LoRA(nn.Module):
                         offset = -offset
                     protect_ratio = min(max(protect_ratio + offset, 0.0), 1.0)
                 protect = _top_ratio_mask(score, protect_ratio)  # mask
+            reference_protect = protect
+            position = self.args.get("dual_mask_protect_position", "wpre")
+            if self.cur_task > 0 and position == "permuted":
+                from utils.protect_position import permute_protect_mask
+                protect = permute_protect_mask(protect, self.args.get("seed", 1993), self.layer_idx)
+            if self.args.get("dual_mask_position_audit", False):
+                union = (protect.bool() | reference_protect.bool()).sum().clamp_min(1)
+                logging.info("ProtectionPositionMask %s", json.dumps({
+                    "task": self.cur_task, "layer": self.layer_idx,
+                    "position": position if self.cur_task > 0 else "wpre",
+                    "seed": int(self.args.get("seed", 1993)),
+                    "qkv_protect_counts": [int(part.sum()) for part in protect.chunk(3)],
+                    "qkv_reference_counts": [int(part.sum()) for part in reference_protect.chunk(3)],
+                    "reference_jaccard": float((protect.bool() & reference_protect.bool()).sum() / union),
+                    "protected_importance_fraction": float((score * protect).sum() / score.sum().clamp_min(1e-12)),
+                    "protect_strength": self.effective_protect_strength,
+                    "private_rank": self.current_private_rank,
+                }))
             # plastic[i, j] = 1 表示这个位置可以给 P_lora 使用
             # plastic[i, j] = 0 表示这个位置是保护区
             plastic = 1.0 - protect  # 可塑性区域
@@ -1475,9 +1493,12 @@ class Attention_LoRA(nn.Module):
         if isolated and self.dual_mask_private_conflict_mode == "none":
             return protection
 
-        conflict_score, _ = self._joint_conflict(
-            delta,
-            valid_mask=(self.isolated_mask if isolated and self.dual_mask_private_conflict_mode == "plastic" else None),)
+        if self.args.get("dual_mask_conflict_reg_original_score", False):
+            conflict_score = _normalize_score(w0_importance * _normalize_score(delta.detach().abs()))
+        else:
+            conflict_score, _ = self._joint_conflict(
+                delta,
+                valid_mask=(self.isolated_mask if isolated and self.dual_mask_private_conflict_mode == "plastic" else None),)
 
         # 如果某个位置 conflict_score 高，那么 safe_delta 在这个位置越大，惩罚越大
         conflict = (conflict_score.detach() * safe_delta.pow(2)).mean()
@@ -2018,6 +2039,23 @@ class Attention_LoRA(nn.Module):
                         "removed_norm": float((base - safe).norm()),
                         "merge_error": float(error),
                     }))
+
+            if self.args.get("dual_mask_position_audit", False):
+                from utils.protect_position import update_rows
+                for item in branch_deltas:
+                    raw, safe = item["raw_delta"], item["safe_delta"]
+                    base, _ = self._merge_base_and_conflict(
+                        raw, item["isolated"], conflict_ratio, compute_conflict=False,
+                    )
+                    reconstructed, _, applied = self._safe_delta(
+                        raw, item["isolated"], conflict_ratio, conflict_strength, return_details=True,
+                    )
+                    for row in update_rows(raw, base, safe, applied, self.general_mask,
+                            task=t, layer=self.layer_idx, branch=item["name"],
+                            position=self.args.get("dual_mask_protect_position", "wpre") if t > 0 else "wpre",
+                            score_mode=self.dual_mask_conflict_score_mode,
+                            merge_error=float((safe - reconstructed).abs().max())):
+                        logging.info("ProtectionPositionUpdate %s", json.dumps(row))
 
             if self.dual_mask_update_overlap:
                 from utils.update_overlap import UpdateOverlapRecorder
