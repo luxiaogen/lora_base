@@ -54,6 +54,7 @@ class CADiagnosticsTests(unittest.TestCase):
         learner.topk = 1
         learner.task_sizes = [2, 2]
         learner.logit_norm = None
+        learner._ridge_fusion_ready = False
         learner.acc_matrix = np.zeros((2, 2))
         learner._class_means = torch.eye(4)
         learner._class_covs = torch.eye(4).repeat(4, 1, 1) * 0.1
