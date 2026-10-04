@@ -293,6 +293,9 @@ class Attention_LoRA(nn.Module):
         self._core_audit_position = None
         self.register_buffer("core_reference_protect", None, persistent=False)
         self.register_buffer("core_permuted_protect", None, persistent=False)
+        self.register_buffer("p_permission_protect", None, persistent=False)
+        self.register_buffer("p_permission_release_mask", None, persistent=False)
+        self._p_release_disabled = False
 
         self.register_buffer("pretrained_weight", torch.zeros(shape), persistent=True)
         self.register_buffer("pretrained_anchor_captured", torch.tensor(False, dtype=torch.bool), persistent=True)
@@ -706,6 +709,9 @@ class Attention_LoRA(nn.Module):
 
         t = int(task)
         self.cur_task = t
+        self.p_permission_release_mask = None
+        if t > 0 and self.args.get('dual_mask_fixed_protect_strength') is not None:
+            self.effective_protect_strength = self.args['dual_mask_fixed_protect_strength']
         device = next(self.parameters()).device
         dtype = self.qkv.weight.dtype
         rs = self.rank # 64
@@ -737,6 +743,11 @@ class Attention_LoRA(nn.Module):
         )
 
         self.rebuild_dual_masks()  # Dual masks rebuilt: W0 protect density 0.5000, plastic density 0.5000
+        if t > 0 and any(self.args.get(key) is not None for key in
+                ('dual_mask_fixed_coverage', 'dual_mask_fixed_protect_strength', 'dual_mask_fixed_conflict_strength')):
+            logging.info('FixedTaskControls %s', json.dumps(dict(task=t, layer=self.layer_idx,
+                coverage=self.effective_energy_coverage, protect_strength=self.effective_protect_strength,
+                private_rank=p_rank, conflict_strength=self._conflict_parameters()[1])))
         logging.info(
             "Task %s LoRA allocation: S_rank=%s, P_rank=%s, controller_P_rank=%s, fixed_P_rank=%s, S_params=%s, P_params=%s, P_active=%s",
             t, rs, p_rank, controller_rank, self.dual_mask_private_rank,
@@ -853,11 +864,13 @@ class Attention_LoRA(nn.Module):
             ## score 剩下的 50% 位置 -> protect = 0 | 0 表示这个位置可以改
             coverage_mode = str(self.args.get("dual_mask_coverage_mode", "energy")).strip().lower()
             use_adaptive_coverage = (self.dual_mask_competence_adaptive and coverage_mode == "energy")
+            fixed_coverage = self.args.get('dual_mask_fixed_coverage') if self.cur_task > 0 else None
 
-            if use_adaptive_coverage:
+            if use_adaptive_coverage or fixed_coverage is not None:
                 # 使用能量覆盖，而不是固定 top ratio
                 ## M_g = general_mask = Task 0 时 W_pre 的重要保护区
-                mask_coverage = self.effective_energy_coverage
+                mask_coverage = self.effective_energy_coverage if fixed_coverage is None else fixed_coverage
+                self.effective_energy_coverage = mask_coverage
                 protect = _energy_coverage_mask(score, mask_coverage)
             else:
                 # 使用固定 top ratio
@@ -900,6 +913,10 @@ class Attention_LoRA(nn.Module):
             # plastic[i, j] = 1 表示这个位置可以给 P_lora 使用
             # plastic[i, j] = 0 表示这个位置是保护区
             plastic = 1.0 - protect  # 可塑性区域
+            self.p_permission_protect = None
+            if self.cur_task > 0 and self.args.get('p_permission_position', 'wpre') == 'permuted':
+                from utils.protect_position import permute_protect_mask
+                self.p_permission_protect = permute_protect_mask(protect, self.args.get('seed', 1993), self.layer_idx)
 
             self.w0_importance.copy_(score.to(device=self.w0_importance.device, dtype=self.w0_importance.dtype))
             self.general_mask.copy_(protect.to(device=self.general_mask.device, dtype=self.general_mask.dtype))  # 50% 位置被保护
@@ -925,6 +942,8 @@ class Attention_LoRA(nn.Module):
 
         if self._functional_merge_strength_override is not None:
             return base_ratio, self._functional_merge_strength_override
+        if self.cur_task > 0 and self.args.get('dual_mask_fixed_conflict_strength') is not None:
+            return base_ratio, self.args['dual_mask_fixed_conflict_strength']
         # 基础抑制强度
         base_strength = min(max(self.dual_mask_conflict_strength, 0.0), 1.0)
         if self.dual_mask_conflict_old_overlap_adaptive: # 是否使用R_old
@@ -1287,6 +1306,10 @@ class Attention_LoRA(nn.Module):
         gate_mode = self._effective_gate_mode()
         if gate_mode == "unmasked":
             return (delta, torch.ones_like(delta), torch.zeros_like(delta)) if return_details else delta
+        if isolated and self.cur_task > 0 and (self.args.get('p_permission_release', 'off') != 'off'
+                or self.args.get('p_permission_position', 'wpre') == 'permuted'):
+            safe, gate, applied = self._p_permission_delta(delta, conflict_ratio, conflict_strength)
+            return (safe, gate, applied) if return_details else safe
         if self._core_policy_active():
             safe, gate, applied = self._core_policy_delta(delta, isolated, conflict_ratio, conflict_strength)
             return (safe, gate, applied) if return_details else safe
@@ -1351,6 +1374,26 @@ class Attention_LoRA(nn.Module):
         safe = delta * gate
         return (safe, gate, conflict_mask) if return_details else safe
 
+    def _p_protect_mask(self):
+        return self.general_mask if self.p_permission_protect is None else self.p_permission_protect
+
+    def _p_permission_delta(self, delta, conflict_ratio=None, conflict_strength=None):
+        from utils.p_permission_release import permission_release_gate
+        protect = self._p_protect_mask().to(delta)
+        if conflict_strength is None:
+            conflict_strength = self._conflict_parameters()[1]
+        if self._conflict_gate_enabled(True):
+            _, applied = self._branch_conflict(delta, isolated=True, conflict_ratio=conflict_ratio)
+        else:
+            applied = torch.zeros_like(delta)
+        conflict = 1 - conflict_strength * applied.to(delta)
+        release = self.p_permission_release_mask
+        if self._p_release_disabled or release is None:
+            release = torch.zeros_like(protect, dtype=torch.bool)
+        gate, _ = permission_release_gate(delta, protect, release,
+            self.effective_protect_strength, conflict, self.args.get('p_permission_norm_match', True))
+        return delta * gate, gate, applied
+
     def _core_policy_active(self):
         return self.cur_task > 0 and (
             self.args.get('dual_mask_position_norm_match', 'off') == 'paired_min'
@@ -1405,6 +1448,16 @@ class Attention_LoRA(nn.Module):
         gate_mode = self._effective_gate_mode()
         if gate_mode == "unmasked":
             return delta, torch.zeros_like(delta)
+
+        if isolated and self.cur_task > 0 and (self.args.get('p_permission_release', 'off') != 'off'
+                or self.args.get('p_permission_position', 'wpre') == 'permuted'):
+            protect = self._p_protect_mask().to(delta)
+            release = self.p_permission_release_mask
+            if self._p_release_disabled or release is None:
+                release = torch.zeros_like(protect)
+            base = delta * ((1 - protect) + (1 - self.effective_protect_strength) * release * protect)
+            applied = self._p_permission_delta(delta, conflict_ratio)[2] if compute_conflict else torch.zeros_like(delta)
+            return base, applied
 
         if self._core_policy_active():
             from utils.dualmask_core import permission_gate
@@ -2007,20 +2060,28 @@ class Attention_LoRA(nn.Module):
         dtype = self.qkv.weight.dtype
         # s=0.5 p=0.75
         def raw_delta(name: str, unit, gamma: float, isolated: bool):
-            delta = gamma * (unit.B_weight.detach() @ unit.A_weight.detach())
+            factor = unit.B_weight.detach() @ unit.A_weight.detach()
+            delta = gamma * factor
             return {
                 "name": name,
                 "isolated": isolated,
                 "gamma": gamma,
                 "raw_delta": delta,
+                "factor_delta": factor,
             }
 
         def mask_delta(item, conflict_ratio: float, conflict_strength: float):
-            if self._core_policy_active():
-                unit = self.P_lora[t] if item['isolated'] else self.S_lora[t]
-                unscaled = unit.B_weight.detach() @ unit.A_weight.detach()
-                safe_delta = item['gamma'] * self._safe_delta(unscaled, item['isolated'],
-                    conflict_ratio, conflict_strength)
+            unscaled = self._core_policy_active() or (item['isolated'] and t > 0 and (
+                self.args.get('p_permission_release', 'off') != 'off'
+                or self.args.get('p_permission_position', 'wpre') == 'permuted'))
+            value = item['factor_delta'] if unscaled else item['raw_delta']
+            if self.dual_mask_conflict_merge_mode == 'suppress' or self._core_policy_active():
+                actual, gate, applied = self._safe_delta(value, item['isolated'],
+                    conflict_ratio, conflict_strength, return_details=True)
+                multiplier = item['gamma'] if unscaled else 1.0
+                safe_delta = multiplier * actual
+                item['gate_value'], item['gate_multiplier'] = value, multiplier
+                item['actual_gate'], item['actual_mask'] = gate, applied
             else:
                 safe_delta = self._compose_merge_delta(item["raw_delta"], isolated=item["isolated"], conflict_ratio=conflict_ratio, conflict_strength=conflict_strength)
             item["safe_delta"] = safe_delta
@@ -2065,17 +2126,18 @@ class Attention_LoRA(nn.Module):
                     if item["isolated"] and self._p_direction_active():
                         continue  # PDirectionScore below uses the actual norm-matched gate.
                     raw, safe = item["raw_delta"], item["safe_delta"]
-                    base, applied = self._merge_base_and_conflict(raw, item["isolated"], conflict_ratio)
+                    if 'actual_gate' in item:
+                        base, _ = self._merge_base_and_conflict(item['gate_value'], item['isolated'],
+                            conflict_ratio, compute_conflict=False)
+                        base = item['gate_multiplier'] * base
+                        applied = item['actual_mask']
+                        error = (safe - item['gate_multiplier'] * (item['gate_value'] * item['actual_gate'])).abs().max()
+                    else:
+                        base, applied = self._merge_base_and_conflict(raw, item["isolated"], conflict_ratio)
+                        error = (safe - base * (1 - conflict_strength * applied)).abs().max()
                     _, reference = self._joint_conflict(raw, conflict_ratio=conflict_ratio)
                     if self._effective_gate_mode() == "unmasked":
                         reference = torch.zeros_like(reference)
-                    error = (safe - base * (1 - conflict_strength * applied)).abs().max()
-                    if self._core_policy_active():
-                        unit = self.P_lora[t] if item['isolated'] else self.S_lora[t]
-                        unscaled = unit.B_weight.detach() @ unit.A_weight.detach()
-                        actual, _, applied = self._safe_delta(unscaled, item['isolated'],
-                            conflict_ratio, conflict_strength, return_details=True)
-                        error = (safe - item['gamma'] * actual).abs().max()
                     if item["isolated"] and self.cur_task > 0 and self._effective_gate_mode() == "full" and self.args.get("p_hard_zero_mode", "off") != "off":
                         error = (safe - base * (1 - applied)).abs().max()
                         plastic_count = int((1.0 - self.general_mask).bool().sum())
@@ -2107,33 +2169,42 @@ class Attention_LoRA(nn.Module):
                         "qkv_density": [float(p.float().mean()) for p in applied.chunk(3, dim=0)],
                         "removed_norm": float((base - safe).norm()),
                         "removed_norm_definition": ("post_permission_conflict_and_norm_control"
-                            if self.args.get('dual_mask_position_norm_match', 'off') == 'paired_min' and t > 0
+                            if t > 0 and (self.args.get('dual_mask_position_norm_match', 'off') == 'paired_min'
+                                or (item['isolated'] and self.p_permission_release_mask is not None
+                                    and self.args.get('p_permission_norm_match', True)))
                             else "conflict_only"),
                         "merge_error": float(error),
+                        "merge_error_definition": ("same_factor_cached_gate_arithmetic" if 'actual_gate' in item
+                            else "recomputed_gate"),
                     }))
 
             if self.args.get("dual_mask_position_audit", False):
                 from utils.protect_position import update_rows
                 for item in branch_deltas:
                     raw, safe = item["raw_delta"], item["safe_delta"]
-                    base, _ = self._merge_base_and_conflict(
-                        raw, item["isolated"], conflict_ratio, compute_conflict=False,
-                    )
-                    reconstructed, _, applied = self._safe_delta(
-                        raw, item["isolated"], conflict_ratio, conflict_strength, return_details=True,
-                    )
-                    if self._core_policy_active():
-                        unit = self.P_lora[t] if item['isolated'] else self.S_lora[t]
-                        reconstructed, _, applied = self._safe_delta(
-                            unit.B_weight.detach() @ unit.A_weight.detach(), item['isolated'],
+                    if 'actual_gate' in item:
+                        base, _ = self._merge_base_and_conflict(item['gate_value'], item['isolated'],
+                            conflict_ratio, compute_conflict=False)
+                        base = item['gate_multiplier'] * base
+                        reconstructed = item['gate_multiplier'] * (item['gate_value'] * item['actual_gate'])
+                        applied = item['actual_mask']
+                    else:
+                        base, _ = self._merge_base_and_conflict(raw, item['isolated'],
+                            conflict_ratio, compute_conflict=False)
+                        reconstructed, _, applied = self._safe_delta(raw, item['isolated'],
                             conflict_ratio, conflict_strength, return_details=True)
-                        reconstructed = item['gamma'] * reconstructed
-                    for row in update_rows(raw, base, safe, applied, self.general_mask,
+                    protect = self._p_protect_mask() if item['isolated'] else self.general_mask
+                    release = self.p_permission_release_mask if item['isolated'] and t > 0 else None
+                    allowed = None if release is None else ((1 - protect).bool() | release.bool())
+                    for row in update_rows(raw, base, safe, applied, protect, allowed_mask=allowed,
                             task=t, layer=self.layer_idx, branch=item["name"],
-                            position=self.args.get("dual_mask_protect_position", "wpre") if t > 0 else "wpre",
+                            position=(self.args.get('p_permission_position', 'wpre') if item['isolated']
+                                and self.p_permission_protect is not None else self.args.get("dual_mask_protect_position", "wpre")) if t > 0 else "wpre",
                             score_mode=self.dual_mask_conflict_score_mode,
                             permission_mode=self.args.get('dual_mask_permission_mode', 'asymmetric'),
                             position_norm_match=self.args.get('dual_mask_position_norm_match', 'off') if t > 0 else 'off',
+                            p_permission_norm_match=self.args.get('p_permission_norm_match', True) if release is not None else False,
+                            merge_error_definition='same_factor_cached_gate_arithmetic' if 'actual_gate' in item else 'recomputed_gate',
                             merge_error=float((safe - reconstructed).abs().max())):
                         logging.info("ProtectionPositionUpdate %s", json.dumps(row))
 
@@ -2174,6 +2245,8 @@ class Attention_LoRA(nn.Module):
         self.composed_random_score = None
         self._composed_forward_gate = None
         self._p_direction_state = None
+        self.p_permission_release_mask = None
+        self.p_permission_protect = None
         return None
 
     @torch.no_grad()

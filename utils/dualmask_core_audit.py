@@ -29,7 +29,7 @@ def stage_cost(learner, stage):
         if device.type == 'cuda':
             torch.cuda.synchronize(device)
         seconds = time.perf_counter() - started
-        if stage in ('mechanism_diagnostic', 'update_telemetry'):
+        if stage in ('mechanism_diagnostic', 'update_telemetry', 'release_probe'):
             learner._core_diagnostic_seconds = before_diagnostic + seconds
         excluded = (getattr(learner, '_core_diagnostic_seconds', 0.0) - before_diagnostic
                     if stage == 'training' else 0.0)
@@ -126,7 +126,6 @@ def position_diagnostic(learner, dataset, epoch):
 @torch.no_grad()
 def epoch_updates(learner, epoch):
     from utils.protect_position import update_rows
-    from utils.dualmask_core import permission_gate
     for module in learner._iter_lora_modules():
         task = learner._cur_task
         mode = learner.args.get('dual_mask_permission_mode', 'asymmetric')
@@ -140,15 +139,33 @@ def epoch_updates(learner, epoch):
             if task == 0:
                 base = delta
             else:
-                base = delta * permission_gate(module.general_mask.to(delta),
-                    min(max(module.effective_protect_strength, 0.0), 1.0), isolated, mode,
-                    module.dual_mask_s_protect_enabled)
+                base, _ = module._merge_base_and_conflict(delta, isolated,
+                    module._conflict_parameters()[0], compute_conflict=False)
+            protect = module._p_protect_mask() if isolated else module.general_mask
+            release = module.p_permission_release_mask if task > 0 and isolated else None
+            allowed = None if release is None else ((1 - protect).bool() | release.bool())
             for row in update_rows(gamma * delta, gamma * base, gamma * effective,
-                    selected, module.general_mask, task=task, epoch=epoch,
+                    selected, protect, allowed_mask=allowed, task=task, epoch=epoch,
                     layer=module.layer_idx, branch=branch, permission_mode=mode,
                     position_norm_match=learner.args.get('dual_mask_position_norm_match', 'off') if task else 'off',
-                    position=learner.args.get('dual_mask_protect_position', 'wpre') if task else 'wpre'):
+                    p_permission_norm_match=learner.args.get('p_permission_norm_match', True) if release is not None else False,
+                    position=(learner.args.get('p_permission_position', 'wpre') if isolated
+                        and module.p_permission_protect is not None else learner.args.get('dual_mask_protect_position', 'wpre')) if task else 'wpre'):
                 logging.info('CoreEpochUpdate %s', json.dumps(row))
+            if task > 0 and isolated and learner.args.get('p_permission_release', 'off') != 'off':
+                protect = module._p_protect_mask().to(delta)
+                release = module.p_permission_release_mask
+                if release is None:
+                    release = torch.zeros_like(protect)
+                reference = delta * (1 - protect) * (1 - module._conflict_parameters()[1] * selected)
+                for projection, raw_part, ref, actual, released, protected in zip(('Q', 'K', 'V'),
+                        delta.chunk(3), reference.chunk(3), effective.chunk(3), release.chunk(3), protect.chunk(3)):
+                    logging.info('PPermissionUpdate %s', json.dumps(dict(task=task, epoch=epoch,
+                        layer=module.layer_idx, projection=projection, released=int(released.sum()),
+                        raw_norm=float(gamma * raw_part.norm()), reference_norm=float(gamma * ref.norm()),
+                        effective_norm=float(gamma * actual.norm()),
+                        protected_effective_norm=float(gamma * (actual * protected).norm()),
+                        norm_match=learner.args.get('p_permission_norm_match', True))))
 
 
 def storage_bytes(learner, stage):
@@ -169,7 +186,7 @@ def storage_bytes(learner, stage):
             group = 'temporary_adapters'
         elif 'classifier_pool' in name:
             group = 'classifier'
-        elif any(key in name for key in ('importance', 'mask', 'core_reference', 'core_permuted')):
+        elif any(key in name for key in ('importance', 'mask', 'core_reference', 'core_permuted', 'p_permission_protect')):
             group = 'importance_and_masks'
         else:
             group = 'encoder_and_other_buffers'

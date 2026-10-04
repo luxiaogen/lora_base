@@ -19,6 +19,7 @@ from analyze_core_evidence import METRICS, read_run, summarize
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = ROOT / 'scripts/sweeps/imgr10_core_evidence_night.json'
 BASE = ROOT / 'scripts/sweeps/imgr10_protect_position_3090.json'
+EXTRA_SOURCE_PATHS = []
 
 
 def variants(machine):
@@ -58,6 +59,7 @@ def run(machine, name, directory, revision, smoke=False, dry_run=False):
     paths = ['main.py', 'trainer.py', str(BASE.relative_to(ROOT)), str(SPEC.relative_to(ROOT)),
              'scripts/run_core_evidence_night.py', 'scripts/analyze_core_evidence.py']
     paths.append('scripts/analyze_protect_position.py')
+    paths += EXTRA_SOURCE_PATHS
     paths += sorted(str(path.relative_to(ROOT)) for folder in ('models', 'methods', 'utils')
                     for path in (ROOT / folder).rglob('*.py'))
     hardware = dict(hostname=platform.node(), cuda_visible_devices=os.environ.get('CUDA_VISIBLE_DEVICES'),

@@ -1088,7 +1088,9 @@ class Learner(BaseLearner):
                 pin_memory=True,
             )
             self._network.to(self._device)
-            with stage_cost(self, 'competence'):
+            fixed_controller = self._cur_task > 0 and all(self.args.get(key) is not None for key in
+                ('dual_mask_fixed_coverage', 'dual_mask_fixed_protect_strength', 'dual_mask_fixed_conflict_strength')) and self.args.get('dual_mask_private_rank', 0) > 0
+            with stage_cost(self, 'wpre_diagnostic' if fixed_controller else 'competence'):
                 self._prepare_w0_prototypes(self.w0_loader)
 
         ca_transport_before = None
@@ -1098,8 +1100,12 @@ class Learner(BaseLearner):
         if self._cur_task > 0 and self.args.get('plora_a_init_mode', 'off') != 'off':
             self._plora_a_init_dataset = data_manager.get_dataset(
                 np.arange(self._known_classes, self._total_classes), source='train', mode='test')
+        if self._cur_task > 0 and self.args.get('p_permission_release', 'off') != 'off':
+            self._p_release_dataset = data_manager.get_dataset(
+                np.arange(self._known_classes, self._total_classes), source='train', mode='test')
         self._prepare_incremental_head(data_manager, 'pre')
         self._train(self.train_loader, self.test_loader)
+        self._p_release_dataset = None
         self._branch_choice = None
         self._p_old_gradient_oracle = None
         self._old_teacher = None
@@ -1644,11 +1650,18 @@ class Learner(BaseLearner):
                            train_accuracy=float(train_acc),
                            trainable_sha256=tensor_hash((n, p) for n, p in self._network.named_parameters() if p.requires_grad))
 
+            if self._cur_task > 0 and self.args.get('p_permission_release', 'off') != 'off':
+                from utils.p_permission_release import refresh_release, report_release
+                if epoch + 1 in (1, 5, 10):
+                    refresh_release(self, self._p_release_dataset, epoch + 1, loss_cos)
+                report_release(self, test_loader.dataset, epoch + 1)
+
             if self.args.get('dual_mask_mechanism_audit', False):
                 from utils.dualmask_core_audit import epoch_updates, position_diagnostic, storage_bytes
                 with stage_cost(self, 'update_telemetry'):
                     epoch_updates(self, epoch + 1)
-                position_diagnostic(self, test_loader.dataset, epoch + 1)
+                if self.args.get('p_permission_position', 'wpre') == 'wpre' and self.args.get('p_permission_release', 'off') == 'off':
+                    position_diagnostic(self, test_loader.dataset, epoch + 1)
                 if epoch == 0:
                     storage_bytes(self, 'adapters_allocated')
 

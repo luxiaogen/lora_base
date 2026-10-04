@@ -13,14 +13,16 @@ def permute_protect_mask(mask, seed, layer):
     return torch.cat(parts, dim=0)
 
 
-def update_rows(raw, base, safe, conflict_mask, protect_mask, **identity):
+def update_rows(raw, base, safe, conflict_mask, protect_mask, allowed_mask=None, **identity):
     rows = []
     parts = zip(raw.chunk(3), base.chunk(3), safe.chunk(3), conflict_mask.chunk(3), protect_mask.chunk(3))
-    for projection, (r, b, s, c, p) in zip(('Q', 'K', 'V'), parts):
+    for index, (projection, (r, b, s, c, p)) in enumerate(zip(('Q', 'K', 'V'), parts)):
         raw_norm, base_norm, safe_norm = (float(x.float().norm()) for x in (r, b, s))
         mode = identity.get('permission_mode', 'asymmetric')
         hard = mode == 'symmetric_hard' or (mode == 'asymmetric' and identity['branch'] == 'P')
         allowed = (1 - p).bool() if hard else torch.ones_like(p, dtype=torch.bool)
+        if allowed_mask is not None:
+            allowed = allowed_mask.chunk(3)[index].bool()
         selected = c.bool() & allowed
         total_removed = float((r - s).float().norm())
         conflict_removed = float((b - s).float().norm())
@@ -33,7 +35,7 @@ def update_rows(raw, base, safe, conflict_mask, protect_mask, **identity):
             selected_coordinates=int(c.sum()), effective_selected_coordinates=int(selected.sum()),
             conflict_density=float(c.float().mean()),
             effective_conflict_density=float(selected.float().mean()))
-        if identity.get('position_norm_match', 'off') == 'paired_min':
+        if identity.get('position_norm_match', 'off') == 'paired_min' or identity.get('p_permission_norm_match', False):
             # This residual combines conflict suppression and paired norm control.
             row.update(post_permission_removed_norm=conflict_removed,
                        post_permission_removed_ratio=conflict_removed / max(base_norm, 1e-12),
