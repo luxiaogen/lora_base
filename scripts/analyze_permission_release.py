@@ -158,7 +158,11 @@ def summarize(directory, machine, records):
         content = (directory / record['mode'] / 'training.log').read_text()
         for name, marker in (('release_masks', 'PPermissionRelease'), ('release_updates', 'PPermissionUpdate'),
                              ('release_train', 'PPermissionTrainDiagnostic'), ('release_diagnostics', 'PPermissionTestDiagnostic')):
-            data[name] = [dict(mode=record['mode'], **r) for r in json_rows(content, marker)]
+            data[name] = json_rows(content, marker)
+            for row in data[name]:
+                if 'mode' in row:
+                    row['release_selection_mode'] = row.pop('mode')
+                row['mode'] = record['mode']
         release = snapshot['effective_config'].get('p_permission_release', 'off') != 'off'
         summary['release_mask_records_complete'] = (len(data['release_masks']) == 9 * 3 * 12) if release else None
         expected = {(task, epoch, partition) for task in (1, 5, 9) for epoch in (1, 5, 10, 20)

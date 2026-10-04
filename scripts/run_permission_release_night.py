@@ -46,8 +46,12 @@ def main():
     parser.add_argument('--machine', choices=('3090', '5090'), required=True)
     parser.add_argument('--mode', choices=('run', 'smoke', 't10', 'dry-run'), default='run')
     parser.add_argument('--hours', type=float, default=10)
+    parser.add_argument('--modes', nargs='+', help='Run only these named groups, in the supplied order.')
     args = parser.parse_args()
-    modes = [row['name'] for row in variants(args.machine)]
+    available = [row['name'] for row in variants(args.machine)]
+    modes = args.modes or available
+    if len(modes) != len(set(modes)) or any(name not in available for name in modes):
+        parser.error('--modes must be unique groups for machine ' + args.machine)
     revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
     directory = ROOT / ('logs/shell_logs/imgr10_permission_release_' + args.machine) / datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')
     print('Code revision:', revision, '\nOutputs:', directory, '\nQueue PID:', os.getpid(), flush=True)

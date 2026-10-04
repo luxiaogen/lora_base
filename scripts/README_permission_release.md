@@ -84,6 +84,20 @@ manifest/active/smoke_queue/queue JSON 记录真实 PID 和状态；每组 run.j
 python scripts/analyze_permission_release.py <输出目录> --machine 3090
 ```
 
+### 仅续跑未完成的实验组
+
+2026-10-04 原3090队列已完成 A0/A1，汇总字段重名后退出；不重复训练这两组。
+修复后汇总中的 `mode` 是实验组，日志内的策略 `mode` 单独保留为 `release_selection_mode`。
+模型、训练代码和实验设置没有改变。七组GPU短测已通过，此次只改汇总与选组入口，续跑跳过重复短测：
+
+```bash
+python scripts/run_permission_release_night.py --machine 3090 --mode t10 --hours 6.5 --modes A2 A3 A4 A5 A6
+```
+
+输出到新的时间戳目录，保留旧目录及 A0/A1 原始日志。`--modes` 不会自动检查其他目录或自动重跑失败组。
+新旧提交与脚本指纹分别记录；跨目录归因前核对训练源码、有效配置和环境，不冒称同提交结果。
+原目录可以单独重新运行汇总命令恢复 A0/A1 结果，无需训练。
+
 合并遥测使用同一次 BA 与实际 gate，merge_error 字段的定义为缓存算术重构误差，不能拿零误差证明训练/交付独立一致。
 独立的前向与合并输出一致性放在 CUDA 测试和完整模型 GPU 短测的 StageAudit 中核验。
 成本中的 release_probe 包含算法必需的当前梯度估计和额外训练集诊断，单独列出，不当作免费。

@@ -1,5 +1,6 @@
 import contextlib
 import copy
+import csv
 import io
 import json
 from pathlib import Path
@@ -68,6 +69,59 @@ class NightTests(unittest.TestCase):
             self.assertEqual(report['runs'], [])
             self.assertEqual(report['contrasts'], {})
             self.assertIn('time_budget_pending', (directory / 'results.json').read_text())
+
+    def test_release_payload_mode_is_preserved_without_shadowing_run_mode(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            records = [dict(mode=name, status='completed', exit_code=0) for name in ('A0', 'A1')]
+            for record in records:
+                name = record['mode']
+                path = directory / name
+                path.mkdir()
+                snapshot = dict(code_revision='revision', source_sha256={'a': 'hash'},
+                    machine='3090', phase='formal', software={}, hardware={},
+                    effective_config=night.settings_for('3090', name))
+                (path / 'run.json').write_text(json.dumps(snapshot))
+                content = '\n'.join("[trainer.py] => CNN: {'total': 80, 'old': 79, 'new': 81}"
+                                    for _ in range(10))
+                content += '\n[trainer.py] => Average Accuracy: 80\n[trainer.py] => Forgetting: 2\n'
+                if name == 'A1':
+                    content += 'PPermissionRelease {"task": 1, "epoch": 1, "layer": 0, "mode": "benefit", "protected": [10], "released": [1]}\n'
+                    content += 'PPermissionUpdate {"task": 1, "epoch": 1, "layer": 0, "reference_norm": 1, "effective_norm": 1}\n'
+                (path / 'training.log').write_text(content)
+            with patch.object(analysis, 'draw'):
+                result = analysis.summarize(directory, '3090', records)
+            self.assertEqual(result['matching_issues'], [])
+            self.assertEqual(result['contrasts']['A1_minus_A0']['Average'], 0)
+            with (directory / 'release_masks.csv').open() as stream:
+                mask = next(csv.DictReader(stream))
+            self.assertEqual((mask['mode'], mask['release_selection_mode']), ('A1', 'benefit'))
+            with (directory / 'release_updates.csv').open() as stream:
+                self.assertEqual(next(csv.DictReader(stream))['mode'], 'A1')
+
+    def test_cli_selected_modes_only_schedule_unfinished_runs(self):
+        old = (engine.SPEC, engine.settings_for, engine.command_for, engine.summarize, engine.EXTRA_SOURCE_PATHS)
+        try:
+            with patch.object(sys, 'argv', ['run', '--machine', '3090', '--mode', 'dry-run',
+                    '--modes', 'A2', 'A3', 'A4', 'A5', 'A6']), \
+                    patch.object(night.subprocess, 'check_output', return_value='revision'), \
+                    contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(night.main(), 0)
+            text = output.getvalue()
+            self.assertIn("Order: ['A2', 'A3', 'A4', 'A5', 'A6']", text)
+            self.assertNotIn('Starting A0', text)
+            self.assertNotIn('Starting A1', text)
+            self.assertIn('Starting A6 REAL FULL T10', text)
+        finally:
+            engine.SPEC, engine.settings_for, engine.command_for, engine.summarize, engine.EXTRA_SOURCE_PATHS = old
+
+    def test_cli_rejects_wrong_machine_and_duplicate_modes(self):
+        for modes in (['B0'], ['A2', 'A2']):
+            with self.subTest(modes=modes), patch.object(sys, 'argv',
+                    ['run', '--machine', '3090', '--mode', 'dry-run', '--modes'] + modes), \
+                    contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+                night.main()
+            self.assertEqual(error.exception.code, 2)
 
     def test_cli_dry_run_uses_new_settings_without_gpu_or_outputs(self):
         old = (engine.SPEC, engine.settings_for, engine.command_for, engine.summarize, engine.EXTRA_SOURCE_PATHS)
