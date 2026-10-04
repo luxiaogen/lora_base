@@ -1,0 +1,24 @@
+{
+  "revision": "e7e9d5c4f2f1022e95c3198fbd2bf2371fa18fed",
+  "machine": "5090",
+  "queue_pid": 139659,
+  "modes": [
+    "B0",
+    "B1",
+    "B2",
+    "B3",
+    "B4",
+    "B5",
+    "B6",
+    "B7",
+    "B8",
+    "B9",
+    "B10",
+    "B11"
+  ],
+  "options": {
+    "machine": "5090",
+    "mode": "run",
+    "hours": 10.0
+  }
+}

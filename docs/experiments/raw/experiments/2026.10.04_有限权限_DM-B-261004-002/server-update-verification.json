@@ -1,0 +1,28 @@
+{
+  "definition": "Authenticated SSH output transcribed; configuration hashes were identical before and after fast-forward",
+  "training_commit": "e7e9d5c4f2f1022e95c3198fbd2bf2371fa18fed",
+  "3090": {
+    "project": "/home/shengqin/lys/baseline/LoDA_ICML2026",
+    "update_method": "verified Git bundle fast-forward after GitHub publickey fetch failure",
+    "gpu_tests": {"count": 35, "status": "passed", "skipped": 0},
+    "unchanged_sha256": {
+      "exps/dlora/cifar10.json": "960b2eb6daae80036d87e72cfcf8c1c7099cf1eb5be76878602fd5dabcd9c0d6",
+      "exps/dlora/cub10.json": "586f95eb2c332432be309defd62c0da35bef6beb165904ce0f3d478f52d69ce1",
+      "exps/dlora/imga10.json": "cd0a111da220356dd997b4a5910f0138eece210ea0229aa8d78bc53d099873e2",
+      "exps/dlora/imgr10.json": "fac0d1e7c6fb383d22d98f110d9e024c679daa2febf3873af6007987c29f30b9",
+      "exps/dlora/imgr20.json": "edf6c51dc334671b6da2013125b0fe2d2466bb043eba71c04d87375ba0adc83d"
+    }
+  },
+  "5090": {
+    "project": "/mnt/disk1/lys/CIL/code/baseline/lora_base",
+    "update_method": "GitHub HTTPS fetch and fast-forward",
+    "gpu_tests": {"count": 35, "status": "passed", "skipped": 0},
+    "unchanged_sha256": {
+      "exps/dlora/cifar10.json": "27881700840ba23a6c5c64fd6bb2ba64ad83752ceb4a00feb8f9995243fb28f2",
+      "exps/dlora/cub10.json": "574ed1e77f5bd1f7cef6b982648e09db8b6ee1a5d0a78428d13bcb7099e5f535",
+      "exps/dlora/imga10.json": "a56b45198ee1aa62ef5624441da0d9949ac097d25645ed3e3e02b3e18d6101cc",
+      "exps/dlora/imgr10.json": "346c0a69e10628c9d2d3b7e8d149c62e4290f32b59eb578cab52fe80e444720a",
+      "exps/dlora/imgr20.json": "d90a54af85f3937c12c7df356c9f872dfc6236fad8f034b0592d443e2e50a19e"
+    }
+  }
+}
