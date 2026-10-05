@@ -1,7 +1,5 @@
-import logging
-import json
+"""Original DualMask attention: fixed W_pre, asymmetric S/P gates, one merge."""
 import math
-import os
 from contextlib import contextmanager
 from typing import Optional
 
@@ -13,21 +11,16 @@ import torch.nn.functional as F
 class FrozenA_TrainableB(nn.Module):
     def __init__(self, dim_in: int, dim_out: int, r: int, A_init: torch.Tensor, B_init: torch.Tensor, device=None, dtype=None):
         super().__init__()
-        assert A_init.shape == (r, dim_in)   # 64,768
-        assert B_init.shape == (dim_out, r) # 2304,64
         self.dim_in = dim_in
         self.dim_out = dim_out
         self.r = r
-        # ** 表示对字典进行关键字解包（Unpacking）。这一行代码完全等价于nn.Linear(dim_in, r, bias=False, device=device, dtype=dtype)
         factory = dict(device=device if device is not None else A_init.device,
-                       dtype=dtype if dtype is not None else A_init.dtype) # {'device': device(type='cuda', index=0), 'dtype': torch.float32}
+                       dtype=dtype if dtype is not None else A_init.dtype)
         self.A = nn.Linear(dim_in, r, bias=False, **factory)
         self.B = nn.Linear(r, dim_out, bias=False, **factory)
-        # 所有对 param.data 或 param.copy_() 进行初始化赋值的操作，内部都会强制包裹在 with torch.no_grad(): 下。这是标准且最安全的参数初始化写法
-        with torch.no_grad(): # 参数赋值不是推理/前向传播
+        with torch.no_grad():
             self.A.weight.copy_(A_init.to(self.A.weight.device, dtype=self.A.weight.dtype))
             self.B.weight.copy_(B_init.to(self.B.weight.device, dtype=self.B.weight.dtype))
-        # A冻结 B训练
         for p in self.A.parameters():
             p.requires_grad_(False)
         for p in self.B.parameters():
@@ -40,14 +33,13 @@ class FrozenA_TrainableB(nn.Module):
     def B_weight(self): return self.B.weight
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.B(self.A(x))  # (..., dim)
-
+        return self.B(self.A(x))
 
 
 def _random_fixed_A_init(dim: int, r: int, device, dtype) -> torch.Tensor:
     M = torch.randn(dim, r, device=device, dtype=dtype)
     Q, _ = torch.linalg.qr(M, mode="reduced")
-    return Q.T.contiguous()  # (r, dim)
+    return Q.T.contiguous()
 
 def _kaiming_A_init(dim: int, r: int, device, dtype) -> torch.Tensor:
     A = torch.empty(r, dim, device=device, dtype=dtype)
@@ -57,76 +49,12 @@ def _kaiming_A_init(dim: int, r: int, device, dtype) -> torch.Tensor:
 def _zero_B_init(dim: int, r: int, device, dtype) -> torch.Tensor:
     return torch.zeros(dim, r, device=device, dtype=dtype)
 
-# 固定的跨数据集平衡策略。它复现旧版默认控制器，但不再暴露为独立超参数。
-_BALANCED_COVERAGE_BASE = 0.70
-_BALANCED_COVERAGE_SPAN = 0.25
-_BALANCED_STRENGTH_BASE = 0.30
-_BALANCED_STRENGTH_SPAN = 0.60
-_BALANCED_PRIVATE_MIN_RATIO = 0.25
-_BALANCED_STATIC_STRENGTH = 0.70
-_CONFLICT_ENERGY_COVERAGE = 0.50
-
-
 
 def _normalize_score(score: torch.Tensor) -> torch.Tensor:
     score = score.float()
     score = score - score.min()
     denom = score.max().clamp_min(1e-12)
     return score / denom
-
-# 从 score 中选出分数最高的 ratio 比例坐标，并返回 0/1 mask
-def _top_ratio_mask(score: torch.Tensor, ratio: float) -> torch.Tensor:
-    ratio = min(max(float(ratio), 0.0), 1.0)  # 0.5 / 0.1  | ratio = 0.5 → 选择分数最高的 50%
-    flat = score.flatten()  # 2304*768
-    if flat.max() <= flat.min():
-        return torch.zeros_like(score)
-    if ratio <= 0.0:
-        return torch.zeros_like(score)
-    if ratio >= 1.0:
-        return torch.ones_like(score)
-    k = max(1, int(flat.numel() * ratio))  # k = int(1,769,472 × 0.5)= 884,736
-    threshold = torch.topk(flat, k, largest=True).values.min()  # 最大的 k 个分数里面，最小的那个就是第 k 大分数，也就是选择阈值 | 选这50%中要保护的区域的最小值
-    return (score >= threshold).to(score.dtype)  # 大于这个阈值的就是要保护的区域
-
-
-def _exact_top_ratio_mask(score, ratio, valid_mask=None):
-    """Select exactly floor(ratio * candidate_count), including tied scores."""
-    flat = score.detach().flatten()
-    indices = None if valid_mask is None else valid_mask.detach().bool().flatten().nonzero(as_tuple=True)[0]
-    values = flat if indices is None else flat[indices]
-    k = min(values.numel(), max(0, int(values.numel() * ratio)))
-    selected = torch.zeros_like(flat)
-    if k == values.numel():
-        if indices is None:
-            selected.fill_(1)
-        else:
-            selected[indices] = 1
-    elif k > 0:
-        top = torch.topk(values, k, largest=True, sorted=False).indices
-        selected[top if indices is None else indices[top]] = 1
-    return selected.reshape_as(score)
-
-
-def _masked_top_ratio_mask(
-        score: torch.Tensor,
-        valid_mask: torch.Tensor,
-        ratio: float,
-) -> torch.Tensor:
-    """Select Top-r only among valid coordinates."""
-    ratio = min(max(float(ratio), 0.0), 1.0)
-    valid = valid_mask.detach().bool().flatten()
-    selected = torch.zeros_like(score).flatten()
-    valid_count = int(valid.sum().item())
-    if ratio <= 0.0 or valid_count == 0:
-        return selected.reshape_as(score)
-    if ratio >= 1.0:
-        return valid.reshape_as(score).to(dtype=score.dtype, device=score.device)
-
-    valid_scores = score.flatten()[valid]
-    k = max(1, int(valid_count * ratio))
-    threshold = torch.topk(valid_scores, k, largest=True).values.min()
-    selected[valid] = (valid_scores >= threshold).to(selected.dtype)
-    return selected.reshape_as(score)
 
 
 def _energy_coverage_mask(
@@ -161,7 +89,8 @@ def _energy_coverage_mask(
     k = int(torch.searchsorted(cumulative, coverage * total).item()) + 1
     selected[valid_indices[indices[:k]]] = 1.0
     return selected.reshape_as(score).to(dtype=score.dtype, device=score.device)
-# 根据冲突分数生成二值 conflict_mask,同时满足: 选中坐标数量 ≥ ratio 指定的最低比例 && 选中坐标分数之和 ≥ coverage 指定的能量比例
+
+
 def _energy_coverage_with_ratio_floor_mask(
         score: torch.Tensor,
         ratio: float,
@@ -171,8 +100,8 @@ def _energy_coverage_with_ratio_floor_mask(
     """Select enough coordinates for both the ratio floor and score coverage."""
     ratio = min(max(float(ratio), 0.0), 1.0)
     coverage = min(max(float(coverage), 0.0), 1.0)
-    selected = torch.zeros_like(score).flatten() # 2304*768=1,769,472
-    if ratio <= 0.0: # selected[i] = 1 → 第 i 个参数属于冲突区     selected[i] = 0 → 不属于冲突区
+    selected = torch.zeros_like(score).flatten()
+    if ratio <= 0.0:
         return selected.reshape_as(score)
 
     if valid_mask is None:
@@ -189,18 +118,19 @@ def _energy_coverage_with_ratio_floor_mask(
         return selected.reshape_as(score)
 
     values, _ = torch.sort(valid_scores, descending=True)
-    ratio_k = valid_count if ratio >= 1.0 else max(1, int(valid_count * ratio)) # 计算 Top-ratio 最低数量  (固定比例 e.g.10%)
+    ratio_k = valid_count if ratio >= 1.0 else max(1, int(valid_count * ratio))
     if coverage <= 0.0:
         coverage_k = 0
     elif coverage >= 1.0:
         coverage_k = valid_count
-    else: # 扩大范围,直到覆盖50%冲突分数
+    else:
         cumulative = torch.cumsum(values, dim=0)
-        coverage_k = int(torch.searchsorted(cumulative, coverage * total).item()) + 1 # 覆盖率选中的坐标数量
+        coverage_k = int(torch.searchsorted(cumulative, coverage * total).item()) + 1
     k = max(ratio_k, coverage_k)
     threshold = values[k - 1]
     selected[valid] = (valid_scores >= threshold).to(selected.dtype)
     return selected.reshape_as(score).to(dtype=score.dtype, device=score.device)
+
 
 def _select_svd_rank(
         singular_values: torch.Tensor,
@@ -208,8 +138,7 @@ def _select_svd_rank(
         energy_coverage: float,
 ) -> int:
     max_rank = max(1, min(int(max_rank), singular_values.numel()))
-    # 选取能够覆盖 95% 奇异值平方能量的最小 rank k | 预定义的谱覆盖率
-    coverage = min(max(float(energy_coverage), 0.0), 1.0)  #
+    coverage = min(max(float(energy_coverage), 0.0), 1.0)
     if coverage <= 0.0:
         return max_rank
 
@@ -218,1831 +147,232 @@ def _select_svd_rank(
     if total <= 0.0:
         return 1
     cumulative = torch.cumsum(energy, dim=0)
-    k = int(torch.searchsorted(cumulative, coverage * total).item()) + 1   # 一般都是大于32
+    k = int(torch.searchsorted(cumulative, coverage * total).item()) + 1
     return max(1, min(k, max_rank))
 
-class Attention_LoRA(nn.Module):
-    """
-        带W0保护与BA冲突控制的双掩码LoRA分支
-        第一个掩码标记了重要的预训练权重 W₀ 方向，这些方向在训练中应受到保护。
-        第二个掩码标记了重要性较低的塑性区域，在这些区域中，独立的 BA 更新可以更自由地移动。
-        两者之间的交互作用通过一个轻量级的联合得分 normalize(I_W₀) × normalize(I_BA) 进行近似估计
-    """
 
+class Attention_LoRA(nn.Module):
     def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None,
                  attn_drop=0.0, proj_drop=0.0, r=64, n_tasks=10, eps=1e-12):
         super().__init__()
         self.num_heads = num_heads
         self.dim = dim
         self.rank = r
-        self.n_tasks = n_tasks # 20 任务数
-
-        head_dim = dim // num_heads
-        self.scale = qk_scale or head_dim ** -0.5
-
+        self.n_tasks = n_tasks
+        self.scale = qk_scale or (dim // num_heads) ** -0.5
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
-
         self.S_lora = nn.ModuleList([None for _ in range(n_tasks)])
+        self.P_lora = nn.ModuleList([None for _ in range(n_tasks)])
         self.cur_task = 0
-        shape = (self.dim * 3, self.dim)
-
-        self.P_lora = torch.nn.ModuleList([None for _ in range(self.n_tasks)])
-        # W0 重要性生成保护区 general_mask；其补集 isolated_mask 供 P 分支使用。
-        self.register_buffer("w0_importance", torch.zeros(shape), persistent=False)
-        # general_mask[i, j] = 1  表示这个 W0 位置重要，要保护 | general_mask[i, j] = 0  表示这个位置相对不重要，可以改   W_pre/W_0 保护区域
-        self.register_buffer("general_mask", torch.ones(shape), persistent=False)
-        # isolated_mask[i, j] = 1  表示这个位置不太重要，可以给 isolated branch 改 | isolated_mask[i, j] = 0  表示这个位置重要，不给 P_lora 改  可塑区域
-        self.register_buffer("isolated_mask", torch.ones(shape), persistent=False)
-
-        # Final per-task conflict-distribution diagnostics.  They are populated
-        # at merge time and never participate in forward/backward computation.
-        self.register_buffer("last_conflict_entropy", torch.tensor(0.0), persistent=False)
-        self.register_buffer("last_conflict_top10_energy", torch.tensor(0.0), persistent=False)
-        self.register_buffer("last_conflict_energy50_ratio", torch.tensor(0.0), persistent=False)
-
-        self.register_buffer("last_conflict_gate_suppression", torch.tensor(0.0), persistent=False)
-        self.register_buffer("last_safe_suppression", torch.tensor(0.0), persistent=False)
-
-        self.register_buffer("last_effective_conflict_ratio", torch.tensor(0.0), persistent=False)
-        self.register_buffer("last_effective_conflict_strength", torch.tensor(0.0), persistent=False)
-
-        self.register_buffer("last_private_conflict_mask_overlap", torch.tensor(0.0), persistent=False)
-        self.register_buffer("last_private_conflict_energy_overlap", torch.tensor(0.0), persistent=False)
-        self.register_buffer("last_private_conflict_gate_suppression", torch.tensor(0.0), persistent=False)
-
-        # Allocate the dense boolean masks only in model-budget mode. The
-        # default layer mode therefore keeps its original memory footprint.
-        self.register_buffer("global_s_conflict_mask", torch.empty(0, dtype=torch.bool), persistent=False)
-        self.register_buffer("global_p_conflict_mask", torch.empty(0, dtype=torch.bool), persistent=False)
-        self.global_conflict_masks_active = False
-
-        self.register_buffer("frozen_p_conflict_mask", None, persistent=False)
-        self.register_buffer("previous_p_conflict_mask", None, persistent=False)
-        self.register_buffer("p_hard_zero_random_mask", None, persistent=False)
-        self.register_buffer("composed_random_score", None, persistent=False)
-        self._composed_forward_gate = None
-        self.register_buffer("p_direction_left", None, persistent=False)
-        self.register_buffer("p_direction_singular", None, persistent=False)
-        self.register_buffer("p_direction_right", None, persistent=False)
-        self._p_direction_state = None
-
-        self._p_score_diagnostic_gate = None
-        self._core_audit_position = None
-        self.register_buffer("core_reference_protect", None, persistent=False)
-        self.register_buffer("core_permuted_protect", None, persistent=False)
-        self.register_buffer("p_permission_protect", None, persistent=False)
-        self.register_buffer("p_permission_release_mask", None, persistent=False)
-        self._p_release_disabled = False
-
-        self.register_buffer("pretrained_weight", torch.zeros(shape), persistent=True)
-        self.register_buffer("pretrained_anchor_captured", torch.tensor(False, dtype=torch.bool), persistent=True)
-
-
-        # 先判断 W0 哪里重要，再决定 LoRA 的 BA 哪里能加、哪里不能加。
-        self.dual_mask_importance = "svd"
-        self.dual_mask_general_ratio = 0.5  # 决定 W0 保护区多大
-        self.dual_mask_layerwise_ratio_mode = "none"
-
-        self.dual_mask_svd_rank = self.rank  # 决定 SVD 重要性用多少主方向
-        self.last_svd_rank = self.rank
-
-        self.last_svd_energy_coverage = 0.0
-
-        self.dual_mask_conflict_ratio = 0.25  # 决定 BA-W0 冲突区多大
-        self.dual_mask_conflict_budget_multiplier = 1.0
-        self.dual_mask_conflict_score_mode = "conflict"
-        self.dual_mask_composed_conflict = "off"
-        self.dual_mask_conflict_exact_topk = False
-        self.dual_mask_uniform_norm_matched = False
-        self.dual_mask_conflict_strength = 1.0  # 决定冲突区压制多强
-        self.p_conflict_strength_scale = 1.0
-
-        self.dual_mask_conflict_reg_enabled = True
-        self.dual_mask_s_conflict_enabled = True
-        self.dual_mask_p_conflict_enabled = True
-        self.dual_mask_update_overlap = False
-        self.dual_mask_applied_budget_log = False
-        self._update_overlap_recorder = None
-
-        self.dual_mask_conflict_energy_adaptive = False
-
-        # 冲突区域的重叠是否自适应
-        self.dual_mask_conflict_old_overlap_adaptive = False
-
-        self.dual_mask_private_conflict_mode = "global"
-        self.dual_mask_conflict_granularity = "layer"
-
-        # task0的学习方式 放开学/没有冲突部分/正常
-        self.dual_mask_task0_gate_mode = "full"
-        self.dual_mask_s_protect_enabled = True
-
-        self.dual_mask_conflict_merge_mode = "suppress"
-
-        self._functional_merge_strength_override = None
-        self.last_functional_merge_strength = float("nan")
-
-        self.dual_mask_safe_residual_enabled = False
-        self.dual_mask_safe_residual_vectors = 64
-        self._pending_safe_residual_deltas = []
-        self._last_safe_residual_loss = None
-
-        self.dual_mask_svd_energy_coverage = 0.0
-        self.dual_mask_competence_adaptive = False
-
-        self.dual_mask_plasticity_adaptive = False
-
-        self.dual_mask_plasticity_discount_weight = 1.0
-
-        self.dual_mask_protect_strength_mode = "legacy_linear"
-
-        self.pretrained_competence = 0.0
-
-        self.pretrained_plasticity_demand = 0.0
-        self.pretrained_control_competence = 0.0
-
-        self.pretrained_old_overlap_risk = 0.0
-
-        self.effective_energy_coverage = 0.0
-        self.effective_protect_strength = _BALANCED_STATIC_STRENGTH
-        self.current_private_rank = self.rank
-        self.dual_mask_private_rank = 0  # 0: 原有策略；正整数: Task1 起固定 P rank。
-        self.plora_train_a = False
-        self.pretrained_anchor_mode = False
-        # 掩码可视化配置。
-        self.dual_mask_vis = False
-        self.dual_mask_vis_dir = "visualizations/dual_mask_snapshots"
-        self.dual_mask_vis_layers = {0, 5, 11}
-        self.dual_mask_vis_tasks = {0, 1}
-        self.dual_mask_vis_save_weight = False
-        self.lora_A_init = "kaiming"
         self.layer_idx = -1
+        shape = (dim * 3, dim)
+        self.register_buffer("w0_importance", torch.zeros(shape), persistent=False)
+        self.register_buffer("general_mask", torch.ones(shape), persistent=False)
+        self.register_buffer("isolated_mask", torch.ones(shape), persistent=False)
+        self.register_buffer("pretrained_weight", torch.zeros(shape), persistent=True)
+        self.register_buffer("pretrained_anchor_captured", torch.tensor(False), persistent=True)
+        self.pretrained_anchor_mode = False
 
     def _init_params(self, args):
         self.args = args
-        self.use_slora: bool = args["use_slora"]
-        self.use_plora: bool = args["use_plora"]
-        self.plora_train_a = bool(args.get("plora_train_a", False))
-        # msg = f'Use slora:{self.use_slora} and Use plora:{self.use_plora}'
-        # print(msg)
-        # logging.info(msg)
-
-        # slora_gamma: S_lora 分支的缩放系数  0.5
-        self.slora_gamma = float(args.get("slora_gamma", 1.0))
-        # plora_gamma: P_lora 分支的缩放系数  0.75
-        self.plora_gamma = float(args.get("plora_gamma", 1.0))
-        # LoRA_output = slora_gamma * S_lora(x) + plora_gamma * P_lora(x)
-        if self.use_slora and self.use_plora and args.get("avg", False):
-            self.slora_gamma *= 0.5
-            self.plora_gamma *= 0.5
-        # svd 使用截断方向；soft_svd 对全部奇异方向连续加权。
-        self.dual_mask_importance = str(args.get("dual_mask_importance", "svd")).lower()
-        self.dual_mask_general_ratio = float(args.get("dual_mask_general_ratio", 0.5))  # 0.4
-
-        self.dual_mask_layerwise_ratio_mode = str(args.get("dual_mask_layerwise_ratio_mode", "none")).lower()
-
-        self.dual_mask_svd_rank = int(args.get("dual_mask_svd_rank", self.rank))  # 32
-        self.dual_mask_svd_energy_coverage = float(args.get("dual_mask_svd_energy_coverage", 0.0))
-
-        self.dual_mask_conflict_ratio = float(args.get("dual_mask_conflict_ratio", 0.25)) # Top-k 的比例参数  0.1
-        self.dual_mask_conflict_budget_multiplier = float(args.get("dual_mask_conflict_budget_multiplier", 1.0))
-        self.dual_mask_conflict_score_mode = str(args.get("dual_mask_conflict_score_mode", "conflict")).lower()
-        self.dual_mask_composed_conflict = str(args.get("dual_mask_composed_conflict", "off")).lower()
-        self.dual_mask_conflict_exact_topk = bool(args.get("dual_mask_conflict_exact_topk", False))
-        self.dual_mask_uniform_norm_matched = bool(args.get("dual_mask_uniform_norm_matched", False))
-        self.dual_mask_conflict_strength = float(args.get("dual_mask_conflict_strength", 1.0))  # 冲突区压制多强  也就是beta
-
-        self.dual_mask_conflict_reg_enabled = bool(args.get("dual_mask_conflict_reg_enabled", True))
-        self.dual_mask_s_conflict_enabled = bool(args.get("dual_mask_s_conflict_enabled", True))
-        self.dual_mask_p_conflict_enabled = bool(args.get("dual_mask_p_conflict_enabled", True))
-        self.dual_mask_update_overlap = bool(args.get("dual_mask_update_overlap", False))
-        self.dual_mask_applied_budget_log = bool(args.get("dual_mask_applied_budget_log", False))
-        self._update_overlap_dir = os.path.join(args.get("logdir", "logs"), "update_overlap")
-
-        self.dual_mask_conflict_energy_adaptive = bool(args.get("dual_mask_conflict_energy_adaptive", False))
-
-        self.dual_mask_conflict_energy_ratio_floor = bool(args.get("dual_mask_conflict_energy_ratio_floor", True))
-
-        self.dual_mask_conflict_old_overlap_adaptive = bool(args.get("dual_mask_conflict_old_overlap_adaptive", False))
-
-        self.dual_mask_private_conflict_mode = str(args.get("dual_mask_private_conflict_mode", "global")).lower()
-        if (self.dual_mask_private_conflict_mode == "plastic_norm_matched"
-                and str(args.get("dual_mask_conflict_granularity", "layer")).lower() != "layer"):
-            raise ValueError("plastic_norm_matched requires layer conflict granularity")
-        self.dual_mask_conflict_granularity = str(
-            args.get("dual_mask_conflict_granularity", "layer")
-        ).lower()
-        if self.dual_mask_conflict_granularity not in {"layer", "model", "projection", "mixed"}:
-            raise ValueError(
-                "dual_mask_conflict_granularity must be layer, model, projection, or mixed"
-            )
-
-        self.dual_mask_task0_gate_mode = str(args.get("dual_mask_task0_gate_mode", "full")).lower()
-        self.dual_mask_s_protect_enabled = bool(args.get("dual_mask_s_protect_enabled", True))
-
-        self.dual_mask_conflict_merge_mode = str(args.get("dual_mask_conflict_merge_mode", "suppress")).lower()
-        self.dual_mask_safe_residual_enabled = bool(args.get("dual_mask_safe_residual_enabled", False))
-        self.dual_mask_safe_residual_vectors = max(1, int(args.get("dual_mask_safe_residual_vectors", 64)))
-
-        # 保护区的强度是否根据W0_competence自适应
-        self.dual_mask_competence_adaptive = bool(args.get("dual_mask_competence_adaptive", False))
-        self.dual_mask_plasticity_adaptive = bool(args.get("dual_mask_plasticity_adaptive", False))
-        self.dual_mask_private_rank = int(args.get("dual_mask_private_rank", 0))
-
-        self.dual_mask_protect_strength_mode = str(args.get("dual_mask_protect_strength_mode", "legacy_linear")).lower()
-        # 固定保存初始预训练权重；自适应模式只改变覆盖率、强度和 private rank。
+        self.slora_gamma = float(args["slora_gamma"])
+        self.plora_gamma = float(args["plora_gamma"])
+        self.dual_mask_svd_rank = int(args["dual_mask_svd_rank"])
+        self.dual_mask_svd_energy_coverage = float(args["dual_mask_svd_energy_coverage"])
+        self.dual_mask_conflict_ratio = float(args["dual_mask_conflict_ratio"])
+        self.dual_mask_conflict_strength = float(args["dual_mask_conflict_strength"])
         self.capture_pretrained_anchor()
         self.set_pretrained_competence(0.0)
 
-        # 可视化对应的超参数。
-        self.dual_mask_vis = bool(args.get("dual_mask_vis", False))
-        self.dual_mask_vis_dir = str(args.get("dual_mask_vis_dir", self.dual_mask_vis_dir))
-        self.dual_mask_vis_layers = self._parse_vis_indices(args.get("dual_mask_vis_layers", [0, 5, 11]))
-        self.dual_mask_vis_tasks = self._parse_vis_indices(args.get("dual_mask_vis_tasks", [0, 1]))
-        self.dual_mask_vis_save_weight = bool(args.get("dual_mask_vis_save_weight", False))
-        self.lora_A_init = str(args.get("lora_A_init", "orthogonal")).lower()
-        logging.info(
-            "Dual-mask branch: importance=%(importance)s, "
-            "protect_ratio=%(protect_ratio).3f, svd_rank=%(svd_rank)s, "
-            "conflict_strength=%(conflict_strength).3f, "
-            "conflict_budget_multiplier=%(conflict_budget_multiplier).3f, "
-            "conflict_score_mode=%(conflict_score_mode)s, "
-            "conflict_exact_topk=%(conflict_exact_topk)s, "
-            "conflict_energy_adaptive=%(conflict_energy_adaptive)s, "
-            "conflict_energy_ratio_floor=%(conflict_energy_ratio_floor)s, "
-            "task0_gate_mode=%(task0_gate_mode)s, "
-            "private_conflict_mode=%(private_conflict_mode)s, "
-            "conflict_granularity=%(conflict_granularity)s, "
-            "old_overlap_conflict_adaptive=%(old_overlap_conflict_adaptive)s, "
-            "plasticity_adaptive=%(plasticity_adaptive)s, "
-            "protect_strength_mode=%(protect_strength_mode)s, "
-            "conflict_merge_mode=%(conflict_merge_mode)s, "
-            "A_init=%(a_init)s",
-            {
-                "importance": self.dual_mask_importance,
-                "protect_ratio": self.dual_mask_general_ratio,
-                "svd_rank": self.dual_mask_svd_rank,
-                "conflict_ratio": self.dual_mask_conflict_ratio,
-                "conflict_strength": self.dual_mask_conflict_strength,
-                "conflict_budget_multiplier": self.dual_mask_conflict_budget_multiplier,
-                "conflict_score_mode": self.dual_mask_conflict_score_mode,
-                "conflict_exact_topk": self.dual_mask_conflict_exact_topk,
-                "conflict_energy_adaptive": self.dual_mask_conflict_energy_adaptive,
-                "conflict_energy_ratio_floor": self.dual_mask_conflict_energy_ratio_floor,
-                "private_conflict_mode": self.dual_mask_private_conflict_mode,
-                "conflict_granularity": self.dual_mask_conflict_granularity,
-                "task0_gate_mode": self.dual_mask_task0_gate_mode,
-                "s_protect_enabled": self.dual_mask_s_protect_enabled,
-                "layerwise_ratio_mode": self.dual_mask_layerwise_ratio_mode,
-                "old_overlap_conflict_adaptive": self.dual_mask_conflict_old_overlap_adaptive,
-                "plasticity_adaptive": self.dual_mask_plasticity_adaptive,
-                "protect_strength_mode": self.dual_mask_protect_strength_mode,
-                "conflict_merge_mode": self.dual_mask_conflict_merge_mode,
-                "a_init": self.lora_A_init,
-            },
-        )
-
-    def capture_pretrained_anchor(self, force: bool = False):
-        if bool(self.pretrained_anchor_captured.item()) and not force:
-            return  # 已经保存后面不再保存
+    def capture_pretrained_anchor(self):
+        if bool(self.pretrained_anchor_captured.item()):
+            return
         with torch.no_grad():
-            self.pretrained_weight.copy_(self.qkv.weight.detach())  # W_pre = W0.clone() 永远不变的 W_pre
+            self.pretrained_weight.copy_(self.qkv.weight.detach())
             self.pretrained_anchor_captured.fill_(True)
-            self.p_direction_left = None
-            self.p_direction_singular = None
-            self.p_direction_right = None
 
-    def set_pretrained_anchor_mode(self, enabled: bool):
+    def set_pretrained_anchor_mode(self, enabled):
         self.pretrained_anchor_mode = bool(enabled)
 
     @contextmanager
     def use_pretrained_anchor(self):
         already_in_anchor = self.pretrained_anchor_mode
-        if not already_in_anchor:  # 尚未处于 anchor 模式
-            # 保存 W_current：W_pre + 历史安全增量
+        if not already_in_anchor:
             accumulated_weight = self.qkv.weight.detach().clone()
 
-            # 临时切回原始预训练权重 W_pre / W0
             self.set_pretrained_anchor_mode(True)
             with torch.no_grad():
                 self.qkv.weight.copy_(self.pretrained_weight)
         try:
-            yield  # 把控制权交给 with 里面的代码执行；等它执行完，再回来执行 finally
+            yield
         finally:
             if not already_in_anchor:
-                # 无论 with 内部正常结束还是报错，都恢复当前累计权重
                 with torch.no_grad():
                     self.qkv.weight.copy_(accumulated_weight)
                 self.set_pretrained_anchor_mode(False)
 
-    def relative_weight_drift(self) -> float:
-        anchor = self.pretrained_weight.detach().float()
-        delta = self.qkv.weight.detach().float() - anchor
-        # 衡量持续学习后 QKV 权重偏离原始预训练空间的相对幅度
-        ## delta = W_current - W_pre  ,   drift = ||delta|| / ||W_pre||
-        ## drift 小：当前模型仍接近 W_pre | drift 大：LoRA 合并后已明显偏离 W_pre
-        return float((delta.norm() / anchor.norm().clamp_min(1e-12)).item())
-
-    def set_pretrained_competence(self,competence: float,plasticity_demand: float = 0.0,):
+    def set_pretrained_competence(self, competence, plasticity_demand=0.0):
         competence = min(max(float(competence), 0.0), 1.0)
-
         plasticity_demand = min(max(float(plasticity_demand), 0.0), 1.0)
-        control_competence = (
-            competence * (1.0 - plasticity_demand)
-            if self.dual_mask_plasticity_adaptive
-            else competence
-        )
-
+        control = competence * (1.0 - plasticity_demand)
         self.pretrained_competence = competence
-
         self.pretrained_plasticity_demand = plasticity_demand
-        self.pretrained_control_competence = control_competence
+        self.pretrained_control_competence = control
+        self.effective_energy_coverage = 0.70 + 0.25 * control
+        self.effective_protect_strength = control
+        self.current_private_rank = max(1, int(round(self.rank * (1.0 - control * 0.75))))
+        self.pretrained_old_overlap_risk = 0.0
 
-        if self.dual_mask_competence_adaptive:  # 保护掩码相应的topk, 保护强度自适应
-            ## W0 能力强：说明预训练空间已经适合当前任务，所以保护更多、压制更强  \ W0 能力弱：说明必须依赖 LoRA 学习，所以保护更少、压制更弱
-            ### W0 competence 越高 → 越相信预训练空间 → 越偏向稳定性  \ W0 competence 越低 → 越需要任务学习 → 越偏向可塑性
-            self.effective_energy_coverage = ( # 单调线性控制器
-                _BALANCED_COVERAGE_BASE
-                + _BALANCED_COVERAGE_SPAN * control_competence
-            ) # 0.7 + 0.25 * ct
-            if self.dual_mask_protect_strength_mode == "competence":
-                self.effective_protect_strength = control_competence
-            else:
-                self.effective_protect_strength = (
-                    _BALANCED_STRENGTH_BASE
-                    + _BALANCED_STRENGTH_SPAN * control_competence
-                )
-
-            rank_ratio = 1.0 - control_competence * (1.0 - _BALANCED_PRIVATE_MIN_RATIO) # 1 - ct*(1 - 0.25)
-            self.current_private_rank = max(1,int(round(self.rank * rank_ratio)),)
-        else:
-            self.effective_energy_coverage = 0.0
-            self.current_private_rank = self.rank
-
-    def set_pretrained_old_overlap_risk(self, risk: float):
+    def set_pretrained_old_overlap_risk(self, risk):
         self.pretrained_old_overlap_risk = min(max(float(risk), 0.0), 1.0)
 
-    def set_functional_merge_strength(self, strength: Optional[float]):
-        if strength is None:
-            self._functional_merge_strength_override = None
-            return
-        self._functional_merge_strength_override = min(max(float(strength), 0.0),1.0,)
-
-    @staticmethod
-    def _parse_vis_indices(value):
-        if value is None:
-            return None
-        if isinstance(value, str):
-            value = value.strip()
-            if value.lower() in ("all", "*"):
-                return None
-            if not value:
-                return set()
-            return {int(item.strip()) for item in value.split(",") if item.strip()}
-        if isinstance(value, int):
-            return {int(value)}
-        return {int(item) for item in value}
-
-    def _should_save_dual_mask_snapshot(self, task: int) -> bool:
-        if not self.dual_mask_vis:
-            return False
-        if self.dual_mask_vis_layers is not None and self.layer_idx not in self.dual_mask_vis_layers:
-            return False
-        if self.dual_mask_vis_tasks is not None and int(task) not in self.dual_mask_vis_tasks:
-            return False
-        return True
-
-    def _save_dual_mask_snapshot(
-            self,
-            task: int,
-            branch_deltas,
-            conflict_ratio: Optional[float] = None,
-            conflict_strength: Optional[float] = None,
-    ):
-        if not self._should_save_dual_mask_snapshot(task):
-            return
-
-        raw_delta = torch.stack([item["raw_delta"] for item in branch_deltas]).sum(dim=0)
-        safe_delta = torch.stack([item["safe_delta"] for item in branch_deltas]).sum(dim=0)
-        # conflict_score, conflict_mask = self._joint_conflict(raw_delta)
-        conflict_score, conflict_mask = self._joint_conflict(
-            raw_delta,
-            conflict_ratio=conflict_ratio,
-        )
-        if conflict_ratio is None:
-            conflict_ratio = self.dual_mask_conflict_ratio
-        if conflict_strength is None:
-            conflict_strength = self.dual_mask_conflict_strength
-
-        seed = self.args.get("seed", "unknown")
-        task_dir = os.path.join(
-            self.dual_mask_vis_dir,
-            "seed_{}".format(seed),
-            "task_{:02d}".format(int(task)),
-        )
-        os.makedirs(task_dir, exist_ok=True)
-        save_path = os.path.join(task_dir, "layer_{:02d}.pt".format(int(self.layer_idx)))
-
-        payload = {
-            "task": int(task),
-            "layer": int(self.layer_idx),
-            "seed": seed,
-            "importance_mode": self.dual_mask_importance,
-            "general_ratio": float(self.dual_mask_general_ratio),
-            "conflict_ratio": float(conflict_ratio),
-            "effective_conflict_ratio": float(conflict_mask.float().mean().item()),
-            "protect_strength": float(self.effective_protect_strength),
-            "conflict_strength": float(conflict_strength),
-
-            "pretrained_competence": float(self.pretrained_competence),
-            "pretrained_plasticity_demand": float(self.pretrained_plasticity_demand),
-            "pretrained_control_competence": float(self.pretrained_control_competence),
-
-            "private_rank": int(self.current_private_rank),
-            "svd_rank": int(self.last_svd_rank),
-            "svd_energy_coverage": float(self.last_svd_energy_coverage),
-            "w0_importance": self.w0_importance.detach().cpu().float(),
-            "general_mask": self.general_mask.detach().cpu().float(),
-            "isolated_mask": self.isolated_mask.detach().cpu().float(),
-            "conflict_score": conflict_score.detach().cpu().float(),
-            "conflict_mask": conflict_mask.detach().cpu().float(),
-            "conflict_granularity": self.dual_mask_conflict_granularity,
-            "global_conflict_masks_active": bool(self.global_conflict_masks_active),
-            "global_s_conflict_mask": self.global_s_conflict_mask.detach().cpu().float(),
-            "global_p_conflict_mask": self.global_p_conflict_mask.detach().cpu().float(),
-            "raw_delta": raw_delta.detach().cpu().float(),
-            "safe_delta": safe_delta.detach().cpu().float(),
-            "branches": [
-                {
-                    "name": item["name"],
-                    "isolated": bool(item["isolated"]),
-                    "gamma": float(item["gamma"]),
-                    "raw_delta": item["raw_delta"].detach().cpu().float(),
-                    "safe_delta": item["safe_delta"].detach().cpu().float(),
-                }
-                for item in branch_deltas
-            ],
-        }
-        if self.dual_mask_vis_save_weight:
-            payload["pretrained_weight"] = self.pretrained_weight.detach().cpu().float()
-            payload["accumulated_weight"] = self.qkv.weight.detach().cpu().float()
-
-        torch.save(payload, save_path)
-        logging.info("Saved dual-mask visualization snapshot: %s", save_path)
-
-    def _init_A_weight(self, dim: int, rank: int, device, dtype) -> torch.Tensor:
-        if self.lora_A_init in ("kaiming", "kaiming_uniform"):
-            return _kaiming_A_init(dim, rank, device, dtype)
-        if self.lora_A_init not in ("orthogonal", "qr"):
-            logging.info("Unknown lora_A_init=%s; using orthogonal A init.", self.lora_A_init)
-        return _random_fixed_A_init(dim, rank, device, dtype)
-
-    def before_task(self, task: int):
-
-        self.clear_global_conflict_masks()
-        self.frozen_p_conflict_mask = None
-        self.previous_p_conflict_mask = None
-        self.p_hard_zero_random_mask = None
-        self.p_conflict_strength_scale = 1.0
-
-        t = int(task)
-        self.cur_task = t
-        self.p_permission_release_mask = None
-        if t > 0 and self.args.get('dual_mask_fixed_protect_strength') is not None:
-            self.effective_protect_strength = self.args['dual_mask_fixed_protect_strength']
+    def before_task(self, task):
+        self.cur_task = int(task)
         device = next(self.parameters()).device
         dtype = self.qkv.weight.dtype
-        rs = self.rank # 64
-
-        # init P_q / P_v
-        A_rand_pq = _random_fixed_A_init(self.dim, rs, device, dtype)  # 随机QR分解正交初始化 A--Q  [rs,768]
-        B_zero_pq = _zero_B_init(self.dim*3, rs, device, dtype) # 初始化 B 为全 0  # [768*3=2304,rs]
-        self.S_lora[t] = FrozenA_TrainableB(self.dim, self.dim*3, rs, A_rand_pq, B_zero_pq, device=device, dtype=dtype)
-
-        # freeze backbone  双重保险
-        for p in self.qkv.parameters(): p.requires_grad_(False)
-        for p in self.proj.parameters(): p.requires_grad_(False)
-        if self.lora_A_init in ("kaiming", "kaiming_uniform"):
-            with torch.no_grad():  # A 初始化正态分布
-                self.S_lora[t].A.weight.copy_(self._init_A_weight(self.dim, self.rank, device, dtype).to(self.S_lora[t].A.weight.device,dtype=self.S_lora[t].A.weight.dtype,))
-                self.S_lora[t].B.weight.zero_()  # B初始化为0
-
-        # 保留原始初始化顺序，避免改变同一 seed 后续任务的随机数轨迹
-        # Task0 的 P 虽不参与前向，仍会消耗随机数，因此不覆盖它的初始化 rank。
-        controller_rank = self.current_private_rank
-        if t > 0 and self.dual_mask_private_rank > 0:
-            self.current_private_rank = self.dual_mask_private_rank
-        p_rank = self.current_private_rank
-        a_rand = self._init_A_weight(self.dim, p_rank, device, dtype)
-        b_zero = _zero_B_init(self.dim * 3, p_rank, device, dtype)
-        self.P_lora[t] = FrozenA_TrainableB(
-            self.dim,self.dim * 3,p_rank,a_rand,b_zero,
-            device=device,dtype=dtype,
-        )
-
-        self.rebuild_dual_masks()  # Dual masks rebuilt: W0 protect density 0.5000, plastic density 0.5000
-        if t > 0 and any(self.args.get(key) is not None for key in
-                ('dual_mask_fixed_coverage', 'dual_mask_fixed_protect_strength', 'dual_mask_fixed_conflict_strength')):
-            logging.info('FixedTaskControls %s', json.dumps(dict(task=t, layer=self.layer_idx,
-                coverage=self.effective_energy_coverage, protect_strength=self.effective_protect_strength,
-                private_rank=p_rank, conflict_strength=self._conflict_parameters()[1])))
-        logging.info(
-            "Task %s LoRA allocation: S_rank=%s, P_rank=%s, controller_P_rank=%s, fixed_P_rank=%s, S_params=%s, P_params=%s, P_active=%s",
-            t, rs, p_rank, controller_rank, self.dual_mask_private_rank,
-            sum(p.numel() for p in self.S_lora[t].parameters()),
-            sum(p.numel() for p in self.P_lora[t].parameters()), t > 0 and self.use_plora,
-        )
-
-    def _init_lora_weight(self, task, layer_idx:int=0):
-
-        # Sequential baseline trains both A and B from a fresh initialization.
-        if not self.use_plora and not self.use_slora: ## sequential tuning
-            nn.init.kaiming_uniform_(self.S_lora[task].A.weight, a=math.sqrt(5))
-            nn.init.zeros_(self.S_lora[task].B.weight)
-
-    def set_task_and_stage(self, task: int, layer_idx: int, stage: int = 0):
-        task = int(task)
-        ##################
-        self.layer_idx = int(layer_idx)
-
-        self.cur_task = task
+        # Keep the original draws, including the initial QR and unused Task0 P.
+        a = _random_fixed_A_init(self.dim, self.rank, device, dtype)
+        b = _zero_B_init(self.dim * 3, self.rank, device, dtype)
+        self.S_lora[task] = FrozenA_TrainableB(
+            self.dim, self.dim * 3, self.rank, a, b, device=device, dtype=dtype)
         for p in self.qkv.parameters():
             p.requires_grad_(False)
         for p in self.proj.parameters():
-            p.requires_grad_(False) # 把所有 attention head 的结果重新混合
+            p.requires_grad_(False)
+        with torch.no_grad():
+            self.S_lora[task].A_weight.copy_(_kaiming_A_init(self.dim, self.rank, device, dtype))
+            self.S_lora[task].B_weight.zero_()
+        p_rank = self.current_private_rank
+        a = _kaiming_A_init(self.dim, p_rank, device, dtype)
+        b = _zero_B_init(self.dim * 3, p_rank, device, dtype)
+        self.P_lora[task] = FrozenA_TrainableB(
+            self.dim, self.dim * 3, p_rank, a, b, device=device, dtype=dtype)
+        self.rebuild_dual_masks()
 
+    def set_task_and_stage(self, task, layer_idx):
+        self.cur_task = int(task)
+        self.layer_idx = int(layer_idx)
+        for p in self.qkv.parameters():
+            p.requires_grad_(False)
+        for p in self.proj.parameters():
+            p.requires_grad_(False)
         for unit in list(self.S_lora) + list(self.P_lora):
-            if unit is None:
-                continue
-            unit.A.weight.requires_grad_(False)
-            unit.B.weight.requires_grad_(False)
-
-        if not self.use_slora and not self.use_plora:
-            self.S_lora[task].A.weight.requires_grad_(True)
-            self.S_lora[task].B.weight.requires_grad_(True)
-            return
-
-        if task == 0:
-            self.S_lora[task].A.weight.requires_grad_(True)
-            self.S_lora[task].B.weight.requires_grad_(True)
-            return
-
-        if self.use_slora:
-            self.S_lora[task].B.weight.requires_grad_(True)
-        if self.use_plora and self.P_lora[task] is not None:
-            self.P_lora[task].A.weight.requires_grad_(self.plora_train_a)
-            self.P_lora[task].B.weight.requires_grad_(True)
-
-    def _soft_svd_importance(self, weight: torch.Tensor) -> torch.Tensor:
-        """Use all singular directions with continuous energy weights."""
-        weight_f = weight.detach().float()
-        u, s, vh = torch.linalg.svd(weight_f, full_matrices=False)
-
-        energy = s.clamp_min(0.0).pow(2)
-        # 计算每个奇异方向的能量权重  p_l = s_l² / Σ_k s_k² 奇异值越大，该方向对 W0 越重要，权重 p_l 越大
-        spectral_weights = energy / energy.sum().clamp_min(1e-12)
-        row_score = (u.pow(2) * spectral_weights.unsqueeze(0)).sum(dim=1) # ^2:消除正负号
-        col_score = (vh.t().pow(2) * spectral_weights.unsqueeze(0)).sum(dim=1)
-
-        self.last_svd_rank = int(s.numel())
-        self.last_svd_energy_coverage = 1.0
-        # score[i,j] 越大，表示 W0[i,j] 所在行和列都更参与高能量奇异方向
-        score = row_score.unsqueeze(1) * col_score.unsqueeze(0)
-        return score.to(device=weight.device, dtype=weight.dtype)
+            if unit is not None:
+                unit.A_weight.requires_grad_(False)
+                unit.B_weight.requires_grad_(False)
+        self.S_lora[task].A_weight.requires_grad_(task == 0)
+        self.S_lora[task].B_weight.requires_grad_(True)
+        if task > 0:
+            self.P_lora[task].B_weight.requires_grad_(True)
 
     def _svd_importance(self, weight: torch.Tensor) -> torch.Tensor:
         weight_f = weight.detach().float()
-        # s 里的值越大，说明对应方向越重要
         u, s, vh = torch.linalg.svd(weight_f, full_matrices=False)
-        # 对 W0 的 QKV 权重做 SVD 时，保留多少个奇异方向来计算 W0 importance map
         k = _select_svd_rank(
             s,
             max_rank=self.dual_mask_svd_rank,
             energy_coverage=(self.dual_mask_svd_energy_coverage),
-        )  # energy coverage 只能在配置的最大 rank 内选择
+        )
         self.last_svd_rank = int(k)
         energy = s.detach().float().pow(2)
-        self.last_svd_energy_coverage = float((energy[:k].sum() / energy.sum().clamp_min(1e-12)).item())    # 0.53
+        self.last_svd_energy_coverage = float((energy[:k].sum() / energy.sum().clamp_min(1e-12)).item())
         s_top = s[:k].clamp_min(0.0)
 
         row_score = (u[:, :k].pow(2) * s_top.unsqueeze(0)).sum(dim=1)
         col_score = (vh[:k, :].t().pow(2) * s_top.unsqueeze(0)).sum(dim=1)
 
-        # 把行重要性和列重要性做外积，得到每个位置的综合重要性分数
-        ## score[i, j] = row_score[i] * col_score[j]
         score = row_score.unsqueeze(1) * col_score.unsqueeze(0)
         return score.to(device=weight.device, dtype=weight.dtype)
 
-    def _combined_importance(self) -> torch.Tensor:
-        # 取当前 attention 层的 qkv.weight，detach() 表示不让这一步进入反向传播图。因为 mask 是一个启发式统计量，不需要通过它反传梯度
-        weight = self.pretrained_weight.detach() # 永远不变的 W_pre
-
-        mode = self.dual_mask_importance  # "dual_mask_importance": "svd"
-        if mode == "soft_svd":
-            svd_score = self._soft_svd_importance(weight)
-        else:
-            svd_score = self._svd_importance(weight) # 硬截断rank=32  覆盖率大概54%
-        return svd_score
-
     def rebuild_dual_masks(self):
         with torch.no_grad():
-            # SVD-only 的 W_pre 分数跨任务不变，可以复用；但每个任务仍按
-            # 当前 competence 重新阈值化，使 adaptive coverage 真正生效
-            reuse_w0_score = (self.cur_task > 0
-                and self.dual_mask_importance in ("svd","soft_svd",)
-                and bool(torch.count_nonzero(self.w0_importance).item())
-            )
-            if reuse_w0_score:
+            if self.cur_task > 0 and bool(torch.count_nonzero(self.w0_importance).item()):
                 score = self.w0_importance.detach().clone()
             else:
-                score = _normalize_score(self._combined_importance())
+                score = _normalize_score(self._svd_importance(self.pretrained_weight.detach()))
+            protect = _energy_coverage_mask(score, self.effective_energy_coverage)
+            self.w0_importance.copy_(score.to(self.w0_importance))
+            self.general_mask.copy_(protect.to(self.general_mask))
+            self.isolated_mask.copy_((1.0 - protect).to(self.isolated_mask))
 
-            # 根据重要性分数，取 top ratio 作为保护区
-            ## score 最高的 50% 位置 -> protect = 1 | 1 表示这个位置是 W0 重要位置，不希望 LoRA 改
-            ## score 剩下的 50% 位置 -> protect = 0 | 0 表示这个位置可以改
-            coverage_mode = str(self.args.get("dual_mask_coverage_mode", "energy")).strip().lower()
-            use_adaptive_coverage = (self.dual_mask_competence_adaptive and coverage_mode == "energy")
-            fixed_coverage = self.args.get('dual_mask_fixed_coverage') if self.cur_task > 0 else None
-
-            if use_adaptive_coverage or fixed_coverage is not None:
-                # 使用能量覆盖，而不是固定 top ratio
-                ## M_g = general_mask = Task 0 时 W_pre 的重要保护区
-                mask_coverage = self.effective_energy_coverage if fixed_coverage is None else fixed_coverage
-                self.effective_energy_coverage = mask_coverage
-                protect = _energy_coverage_mask(score, mask_coverage)
-            else:
-                # 使用固定 top ratio
-                mask_coverage = 0.0
-                protect_ratio = self.dual_mask_general_ratio
-                if self.dual_mask_layerwise_ratio_mode != "none":
-                    # Keep the dataset-level ratio as the midpoint and move
-                    # protection toward shallow/deep layers without adding
-                    # another tunable endpoint.
-                    depth = min(max(int(self.layer_idx), 0), 11) / 11.0
-                    offset = 0.20 * (1.0 - 2.0 * depth)
-                    if self.dual_mask_layerwise_ratio_mode == "deep_high":
-                        offset = -offset
-                    protect_ratio = min(max(protect_ratio + offset, 0.0), 1.0)
-                protect = _top_ratio_mask(score, protect_ratio)  # mask
-            reference_protect = protect
-            if (self.args.get("dual_mask_mechanism_audit", False)
-                    or self.args.get("dual_mask_position_norm_match", "off") == "paired_min"):
-                from utils.protect_position import permute_protect_mask
-                self.core_reference_protect = reference_protect.detach().clone()
-                self.core_permuted_protect = permute_protect_mask(
-                    reference_protect, self.args.get("seed", 1993), self.layer_idx)
-            position = self.args.get("dual_mask_protect_position", "wpre")
-            if self.cur_task > 0 and position == "permuted":
-                from utils.protect_position import permute_protect_mask
-                protect = permute_protect_mask(protect, self.args.get("seed", 1993), self.layer_idx)
-            if self.args.get("dual_mask_position_audit", False):
-                union = (protect.bool() | reference_protect.bool()).sum().clamp_min(1)
-                logging.info("ProtectionPositionMask %s", json.dumps({
-                    "task": self.cur_task, "layer": self.layer_idx,
-                    "position": position if self.cur_task > 0 else "wpre",
-                    "seed": int(self.args.get("seed", 1993)),
-                    "qkv_protect_counts": [int(part.sum()) for part in protect.chunk(3)],
-                    "qkv_reference_counts": [int(part.sum()) for part in reference_protect.chunk(3)],
-                    "reference_jaccard": float((protect.bool() & reference_protect.bool()).sum() / union),
-                    "protected_importance_fraction": float((score * protect).sum() / score.sum().clamp_min(1e-12)),
-                    "protect_strength": self.effective_protect_strength,
-                    "private_rank": self.current_private_rank,
-                }))
-            # plastic[i, j] = 1 表示这个位置可以给 P_lora 使用
-            # plastic[i, j] = 0 表示这个位置是保护区
-            plastic = 1.0 - protect  # 可塑性区域
-            self.p_permission_protect = None
-            if self.cur_task > 0 and self.args.get('p_permission_position', 'wpre') == 'permuted':
-                from utils.protect_position import permute_protect_mask
-                self.p_permission_protect = permute_protect_mask(protect, self.args.get('seed', 1993), self.layer_idx)
-
-            self.w0_importance.copy_(score.to(device=self.w0_importance.device, dtype=self.w0_importance.dtype))
-            self.general_mask.copy_(protect.to(device=self.general_mask.device, dtype=self.general_mask.dtype))  # 50% 位置被保护
-            self.isolated_mask.copy_(plastic.to(device=self.isolated_mask.device, dtype=self.isolated_mask.dtype))  # 50% 位置可塑
-            logging.info(
-                "Dual masks rebuilt: layer %s, mask_coverage %.4f, "
-                "W0 protect density %.4f, plastic density %.4f, "
-                "protect_strength %.4f, protected_importance_mean %.4f, "
-                "svd_rank %s, achieved_svd_energy %.4f",
-                self.layer_idx,
-                mask_coverage,
-                self.general_mask.float().mean().item(), # density(M) = 选中坐标数量 / 全部坐标数量
-                self.isolated_mask.float().mean().item(),
-                self.effective_protect_strength,
-                (self.w0_importance * self.general_mask).float().mean().item(), # 保护区域保留下来的重要性，在整个 QKV 矩阵上的平均值
-                self.last_svd_rank, # 表示最终用于构造 W0 importance map 的实际 SVD rank，也就是保留的奇异方向数量 k
-                self.last_svd_energy_coverage, # 表示选出的前 k 个奇异方向，实际覆盖了多少谱能量
-            )
-    # 负责为冲突门控返回两个参数 """Return the fixed conflict range and optional old-overlap strength."""
     def _conflict_parameters(self):
-        # --set dual_mask_conflict_ratio=0.1
-        base_ratio = min(max(self.dual_mask_conflict_ratio, 0.0), 1.0)
+        ratio = min(max(self.dual_mask_conflict_ratio, 0.0), 1.0)
+        strength = min(max(self.dual_mask_conflict_strength, 0.0), 1.0)
+        strength = min(strength * (1.0 + self.pretrained_old_overlap_risk), 1.0)
+        return ratio, strength
 
-        if self._functional_merge_strength_override is not None:
-            return base_ratio, self._functional_merge_strength_override
-        if self.cur_task > 0 and self.args.get('dual_mask_fixed_conflict_strength') is not None:
-            return base_ratio, self.args['dual_mask_fixed_conflict_strength']
-        # 基础抑制强度
-        base_strength = min(max(self.dual_mask_conflict_strength, 0.0), 1.0)
-        if self.dual_mask_conflict_old_overlap_adaptive: # 是否使用R_old
-            base_strength = min(base_strength * (1.0 + self.pretrained_old_overlap_risk),1.0,)
-        return base_ratio, base_strength # 多大范围被划为冲突区 \ 冲突区中的 LoRA 更新被抑制多强
-
-    def _joint_conflict(
-            self,
-            delta: torch.Tensor,
-            conflict_ratio: Optional[float] = None,
-            valid_mask: Optional[torch.Tensor] = None,
-    ):
-        ## abs(delta[i, j]) 越大，说明 LoRA 越想修改这个位置
-        ## ba_importance[i, j] 越大，表示 BA 在这个位置的改动越强   _normalize_score 归一化到大概 [0, 1]
-        ba_importance = _normalize_score(delta.detach().abs())
-        w0_importance = self.w0_importance.to(device=delta.device, dtype=delta.dtype)
-
-        # 如果 W0 在这个位置很重要，并且 LoRA 也想大幅修改这个位置，那么这个位置就是高冲突位置
-        # 联合分数只在 W_pre 重要且当前 BA 改动大的位置取高值。
-        conflict_score = _normalize_score(w0_importance * ba_importance)
-        # 把冲突分数最高的一部分位置标出来
-        ## 比如配置 dual_mask_conflict_ratio = 0.25，就把冲突分数最高的 25% 位置标为 1，其他位置标为 0
-        ## conflict_mask[i, j] = 1  表示这个位置是高冲突区域 conflict_mask[i, j] = 0  表示这个位置冲突不高
+    def _joint_conflict(self, delta, conflict_ratio=None):
+        importance = self.w0_importance.to(delta)
+        score = _normalize_score(importance * _normalize_score(delta.detach().abs()))
         ratio = self.dual_mask_conflict_ratio if conflict_ratio is None else conflict_ratio
-        if self.dual_mask_conflict_exact_topk:
-            conflict_mask = _exact_top_ratio_mask(conflict_score, ratio, valid_mask)
-        elif self.dual_mask_conflict_energy_adaptive and float(ratio) > 0.0:
-            if self.dual_mask_conflict_energy_ratio_floor:
-                conflict_mask = _energy_coverage_with_ratio_floor_mask(
-                    conflict_score,
-                    ratio=ratio,
-                    coverage=_CONFLICT_ENERGY_COVERAGE,
-                    valid_mask=valid_mask,
-                )
-            else:
-                conflict_mask = _energy_coverage_mask(
-                    conflict_score,
-                    coverage=_CONFLICT_ENERGY_COVERAGE,
-                    valid_mask=valid_mask,
-                )
+        mask = _energy_coverage_with_ratio_floor_mask(score, ratio, coverage=0.50)
+        return score, mask
 
-        elif valid_mask is None:
-            conflict_mask = _top_ratio_mask(conflict_score, ratio)
-        else:
-            conflict_mask = _masked_top_ratio_mask(
-                conflict_score,
-                valid_mask,
-                ratio,
-            )
-        if self.dual_mask_conflict_score_mode == "magnitude":
-            selection_score = ba_importance
-        elif self.dual_mask_conflict_score_mode == "w_pre":
-            selection_score = _normalize_score(w0_importance)
-        else:
-            selection_score = conflict_score
-        if self.dual_mask_conflict_budget_multiplier != 1.0 or self.dual_mask_conflict_score_mode != "conflict":
-            reference_k = int(conflict_mask.bool().sum().item())
-            valid = (
-                torch.ones_like(conflict_mask, dtype=torch.bool).flatten()
-                if valid_mask is None else valid_mask.detach().bool().flatten()
-            )
-            valid_indices = valid.nonzero(as_tuple=True)[0]
-            budget = min(valid_indices.numel(), int(reference_k * self.dual_mask_conflict_budget_multiplier + 0.5))
-            selected = torch.zeros_like(conflict_mask).flatten()
-            if budget > 0:
-                selected_indices = torch.topk(
-                    selection_score.detach().float().flatten()[valid_indices],
-                    budget,
-                    largest=True,
-                    sorted=False,
-                ).indices
-                selected[valid_indices[selected_indices]] = 1
-            conflict_mask = selected.reshape_as(conflict_mask)
-        return selection_score, conflict_mask
-
-    def clear_global_conflict_masks(self):
-        self.global_conflict_masks_active = False
-        self.global_s_conflict_mask = self.global_s_conflict_mask.new_empty(0)
-        self.global_p_conflict_mask = self.global_p_conflict_mask.new_empty(0)
-
-    def set_global_conflict_masks(
-            self,
-            shared_mask: torch.Tensor,
-            private_mask: torch.Tensor,
-    ):
-        if shared_mask.shape != self.qkv.weight.shape or private_mask.shape != self.qkv.weight.shape:
-            raise ValueError("global conflict masks must match qkv.weight")
-        self.global_s_conflict_mask = shared_mask.detach().to(
-            device=self.qkv.weight.device,
-            dtype=torch.bool,
-        ).clone()
-        self.global_p_conflict_mask = private_mask.detach().to(
-            device=self.qkv.weight.device,
-            dtype=torch.bool,
-        ).clone()
-        self.global_conflict_masks_active = True
-
-    def global_conflict_candidate(self, task: int, isolated: bool):
-        """Return cross-layer score, local reference mask, and valid coordinates."""
-        task = int(task)
-        if self._effective_gate_mode() in {"unmasked", "protect_only"} or not self._conflict_gate_enabled(isolated):
-            return None
-        if isolated:
-            if task <= 0 or not self.use_plora or self.P_lora[task] is None:
-                return None
-            if self.dual_mask_private_conflict_mode == "none":
-                return None
-            unit = self.P_lora[task]
-            gamma = float(self.plora_gamma)
-        else:
-            if self.S_lora[task] is None:
-                return None
-            unit = self.S_lora[task]
-            gamma = float(self.slora_gamma)
-
-        delta = gamma * (unit.B_weight.detach() @ unit.A_weight.detach())
-        valid_mask = torch.ones_like(delta)
-        if isolated and self.dual_mask_private_conflict_mode == "plastic":
-            valid_mask = 1.0 - self.general_mask.to(delta)
-        _, local_mask = self._joint_conflict(
-            delta,
-            valid_mask=(valid_mask if isolated and self.dual_mask_private_conflict_mode == "plastic" else None),
-        )
-        # Both factors already lie in [0, 1]. Do not normalize their product
-        # per layer: its amplitude is the evidence used to move a fixed budget
-        # between layers.
-        ba_importance = _normalize_score(delta.detach().abs())
-        w0_importance = self.w0_importance.to(device=delta.device, dtype=delta.dtype)
-        if self.dual_mask_conflict_score_mode == "magnitude":
-            score = ba_importance
-        elif self.dual_mask_conflict_score_mode == "w_pre":
-            score = _normalize_score(w0_importance)
-        else:
-            score = w0_importance * ba_importance
-        return score, local_mask, valid_mask
-
-    def _branch_conflict(
-            self,
-            delta: torch.Tensor,
-            isolated: bool,
-            conflict_ratio: Optional[float] = None,
-            valid_mask: Optional[torch.Tensor] = None,
-    ):
-        if self.global_conflict_masks_active or (isolated and self.frozen_p_conflict_mask is not None):
-            ba_importance = _normalize_score(delta.detach().abs())
-            w0_importance = self.w0_importance.to(device=delta.device, dtype=delta.dtype)
-            if self.dual_mask_conflict_score_mode == "magnitude":
-                score = ba_importance
-            elif self.dual_mask_conflict_score_mode == "w_pre":
-                score = _normalize_score(w0_importance)
-            else:
-                score = w0_importance * ba_importance
-            mask = self.global_p_conflict_mask if isolated else self.global_s_conflict_mask
-            if isolated and self.frozen_p_conflict_mask is not None:
-                mask = self.frozen_p_conflict_mask
-            mask = mask.to(device=delta.device, dtype=delta.dtype)
-            if valid_mask is not None:
-                mask = mask * valid_mask.to(mask)
-            return score, mask
-        return self._joint_conflict(delta, conflict_ratio=conflict_ratio, valid_mask=valid_mask)
-
-    @torch.no_grad()
-    def update_p_conflict_freeze(self, completed_epochs):
-        """Epoch-end capture and read-only telemetry for the layer/global-P experiment."""
-        freeze_epoch = int(self.args.get("p_conflict_freeze_epoch", 0))
-        if self.cur_task == 0 or freeze_epoch <= 0:
-            return
-        unit = self.P_lora[self.cur_task]
-        raw = unit.B_weight.detach() @ unit.A_weight.detach()
-        safe, _, applied = self._safe_delta(raw, isolated=True, return_details=True)
-        applied = applied.bool()
-        if completed_epochs == freeze_epoch:
-            self.frozen_p_conflict_mask = applied.clone()
-        # Counterfactual selection for diagnostics only; never replaces the frozen mask.
-        _, dynamic = self._joint_conflict(raw, conflict_ratio=self._conflict_parameters()[0])
-        dynamic = dynamic.bool()
-        previous = self.previous_p_conflict_mask
-        base = raw * (1.0 - self.general_mask.to(raw))
-        denominator = base.norm().clamp_min(1e-12)
-        strength = self._conflict_parameters()[1]
-        logging.info("PConflictFreeze %s", json.dumps({
-            "task": self.cur_task, "layer": self.layer_idx, "epoch": completed_epochs,
-            "frozen": self.frozen_p_conflict_mask is not None,
-            "applied_density": float(applied.float().mean()),
-            "dynamic_density": float(dynamic.float().mean()),
-            "applied_switch_fraction": float((applied ^ previous).float().mean()) if previous is not None else None,
-            "applied_jaccard_previous": float((applied & previous).sum() / (applied | previous).sum().clamp_min(1)) if previous is not None else None,
-            "applied_jaccard_dynamic": float((applied & dynamic).sum() / (applied | dynamic).sum().clamp_min(1)),
-            "applied_suppression_ratio": float((base - safe).norm() / denominator),
-            "dynamic_suppression_ratio": float((base * dynamic * strength).norm() / denominator),
-        }))
-        self.previous_p_conflict_mask = applied.clone()
-
-    def _private_plastic_norm_matched_conflict(
-            self,
-            delta: torch.Tensor,
-            plastic_mask: torch.Tensor,
-            conflict_ratio: Optional[float],
-            conflict_strength: float,
-    ):
-        """Redistribute the baseline P suppression within plastic coordinates."""
-        _, baseline_mask = self._branch_conflict(
-            delta, isolated=True, conflict_ratio=conflict_ratio,
-        )
-        _, plastic_candidate = self._branch_conflict(
-            delta, isolated=True, conflict_ratio=conflict_ratio,
-            valid_mask=plastic_mask,
-        )
-        active_baseline = baseline_mask.bool() & plastic_mask.bool()
-        candidate = plastic_candidate.bool() | active_baseline
-        detached_delta = delta.detach()
-        baseline_norm = (detached_delta * active_baseline).norm()
-        candidate_norm = (detached_delta * candidate).norm().clamp_min(1e-12)
-        matched_strength = (conflict_strength * baseline_norm / candidate_norm).clamp(0.0, 1.0)
-        return candidate.to(delta.dtype), matched_strength
-
-    def _effective_gate_mode(self) -> str:
+    def _safe_delta(self, delta, isolated, conflict_ratio=None, conflict_strength=None):
         if self.cur_task == 0:
-            return self.dual_mask_task0_gate_mode
-        return "full"
-
-    @torch.no_grad()
-    def _p_hard_zero_mask(self, delta):
-        """Delete an exact fraction of plastic coordinates; random ranking is task-fixed."""
-        mode = self.args.get("p_hard_zero_mode", "off")
-        plastic = (1.0 - self.general_mask.to(delta)).bool()
-        ratio = self.args.get("p_hard_zero_ratio", .4)
-        if mode == "random":
-            if self.p_hard_zero_random_mask is None:
-                indices = plastic.flatten().nonzero(as_tuple=True)[0]
-                k = min(indices.numel(), max(0, int(indices.numel() * ratio)))
-                generator = torch.Generator(device=delta.device)
-                generator.manual_seed(int(self.args.get("seed", 1993)) + 1009 * self.cur_task + 9176 * self.layer_idx)
-                order = torch.randperm(indices.numel(), device=delta.device, generator=generator)
-                selected = torch.zeros_like(plastic).flatten()
-                selected[indices[order[:k]]] = True
-                self.p_hard_zero_random_mask = selected.reshape_as(plastic)
-            return self.p_hard_zero_random_mask.to(delta)
-        score = delta.detach().abs()
-        if mode == "conflict":
-            score = self.w0_importance.to(delta) * score
-        return _exact_top_ratio_mask(score, ratio, plastic)
-
-    def _conflict_gate_enabled(self, isolated):
-        return self.dual_mask_p_conflict_enabled if isolated else self.dual_mask_s_conflict_enabled
-
-    def _composed_conflict_active(self):
-        return (self.dual_mask_composed_conflict != "off" and self.cur_task > 0
-                and self.use_slora and self.use_plora
-                and self.S_lora[self.cur_task] is not None
-                and self.P_lora[self.cur_task] is not None)
-
-    def _p_direction_active(self):
-        return (self.cur_task > 0 and self.args.get("p_direction_score", "off") != "off"
-                and self.dual_mask_p_conflict_enabled and self._effective_gate_mode() == "full")
-
-    @torch.no_grad()
-    def _p_direction_gate(self, delta, conflict_ratio=None, conflict_strength=None):
-        from utils.p_direction_score import norm_matched_gate, spectral_score
-        if self._p_score_diagnostic_gate is not None:
-            return self._p_score_diagnostic_gate
-        plastic = (1.0 - self.general_mask.to(delta)).reshape(3, self.dim, self.dim)
-        base = delta.detach().reshape_as(plastic) * plastic
-        _, reference = self._branch_conflict(delta, isolated=True, conflict_ratio=conflict_ratio)
-        reference = reference.reshape_as(plastic).bool() & plastic.bool()
-        if conflict_strength is None:
-            conflict_strength = self._conflict_parameters()[1]
-        mode = self.args["p_direction_score"]
-        fractions = None
-        functional = None
-        if mode == "coordinate":
-            score = base.abs()
-        elif mode in ("spectral", "signed"):
-            if self.p_direction_left is None:
-                left, singular, vh = torch.linalg.svd(
-                    self.pretrained_weight.detach().float().reshape_as(base), full_matrices=False)
-                self.p_direction_left, self.p_direction_singular = left, singular
-                self.p_direction_right = vh.transpose(-2, -1).contiguous()
-            score, fractions, _ = spectral_score(base, self.p_direction_left,
-                self.p_direction_singular, self.p_direction_right, signed=mode == "signed")
-        else:
-            from utils.p_functional_score import functional_score
-            anchor = self.qkv.weight if mode == "task_qk" else self.pretrained_weight
-            unit = self.S_lora[self.cur_task]
-            raw_s = self.slora_gamma * (unit.B_weight.detach() @ unit.A_weight.detach())
-            context = self._safe_delta(raw_s, isolated=False).reshape_as(base)
-            if mode != "task_qk":
-                context = context + self.qkv.weight.detach().reshape_as(base) - anchor.detach().reshape_as(base)
-            bias = None if self.qkv.bias is None else self.qkv.bias.detach().float().reshape(3, self.dim)
-            score, functional = functional_score(mode, base, anchor.detach().reshape_as(base),
-                context, self.num_heads, self.w0_importance.reshape_as(base), bias)
-        gate, selected, strengths = norm_matched_gate(base, score, reference,
-                                                    conflict_strength, plastic)
-        actual_gate = (plastic * gate).reshape_as(delta).to(delta)
-        self._p_direction_state = dict(base=base, gate=gate, selected=selected,
-            reference=reference, strengths=strengths, reference_strength=conflict_strength,
-            fractions=fractions, functional=functional)
-        return actual_gate, selected.reshape_as(delta).to(delta)
-
-    def _composed_base_gate(self, delta, isolated):
+            return delta
         protect = self.general_mask.to(delta)
+        alpha = min(max(self.effective_protect_strength, 0.0), 1.0)
         if isolated:
-            return 1.0 - protect
-        strength = min(max(self.effective_protect_strength, 0.0), 1.0)
-        return 1.0 - strength * protect if self.dual_mask_s_protect_enabled else torch.ones_like(protect)
-
-    def _composed_conflict_state(self):
-        """Rank the composed update; apply the same detached conflict gate to S/P."""
-        s, p = self.S_lora[self.cur_task], self.P_lora[self.cur_task]
-        raw_s = self.slora_gamma * (s.B_weight @ s.A_weight)
-        raw_p = self.plora_gamma * (p.B_weight @ p.A_weight)
-        s_base = raw_s * self._composed_base_gate(raw_s, False)
-        p_base = raw_p * self._composed_base_gate(raw_p, True)
-        net = s_base + p_base
-        with torch.no_grad():
-            # Average the two original adaptive budgets, before changing how to rank.
-            # Thus each shared-mask branch has the same average coordinate budget.
-            _, s_reference = self._joint_conflict(raw_s)
-            _, p_reference = self._joint_conflict(raw_p)
-            k = (int(s_reference.sum() + p_reference.sum()) + 1) // 2
-            k = min(net.numel(), max(0, k))
-            mode = self.dual_mask_composed_conflict
-            magnitude = net.detach().abs()
-            if mode == "gross":
-                magnitude = s_base.detach().abs() + p_base.detach().abs()
-            importance = self.w0_importance.to(net)
-            score = importance * magnitude
-            if mode == "magnitude":
-                score = magnitude
-            elif mode == "w_pre":
-                score = importance
-            elif mode == "random":
-                if self.composed_random_score is None:
-                    generator = torch.Generator(device=net.device)
-                    generator.manual_seed(int(self.args.get("seed", 1993)) + 1009 * self.cur_task + 9176 * self.layer_idx)
-                    self.composed_random_score = torch.rand(net.shape, device=net.device,
-                                                           generator=generator, dtype=net.dtype)
-                score = self.composed_random_score
-            selected = torch.zeros_like(net).flatten()
-            if k:
-                selected[score.flatten().topk(k, sorted=False).indices] = 1
-            selected = selected.reshape_as(net)
-            strength = self._conflict_parameters()[1]
-            gate = 1.0 - strength * selected
-            if mode == "uniform":
-                alpha = self._uniform_conflict_strength(net, selected, strength)
-                gate = torch.ones_like(net) * (1.0 - alpha)
-        return dict(raw_s=raw_s, raw_p=raw_p, s_base=s_base, p_base=p_base, net=net, gate=gate, selected=selected,
-                    score=score, reference_k=k, s_reference=s_reference, p_reference=p_reference)
-
-    def _safe_delta(
-            self,
-            delta: torch.Tensor,
-            isolated: bool,
-            conflict_ratio: Optional[float] = None,
-            conflict_strength: Optional[float] = None,
-            return_details: bool = False,
-    ) -> torch.Tensor:
-
-        gate_mode = self._effective_gate_mode()
-        if gate_mode == "unmasked":
-            return (delta, torch.ones_like(delta), torch.zeros_like(delta)) if return_details else delta
-        if isolated and self.cur_task > 0 and (self.args.get('p_permission_release', 'off') != 'off'
-                or self.args.get('p_permission_position', 'wpre') == 'permuted'):
-            safe, gate, applied = self._p_permission_delta(delta, conflict_ratio, conflict_strength)
-            return (safe, gate, applied) if return_details else safe
-        if self._core_policy_active():
-            safe, gate, applied = self._core_policy_delta(delta, isolated, conflict_ratio, conflict_strength)
-            return (safe, gate, applied) if return_details else safe
-        if self._composed_conflict_active():
-            state = self._composed_conflict_state()
-            gate = self._composed_base_gate(delta, isolated) * state["gate"]
-            applied = torch.ones_like(delta) if self.dual_mask_composed_conflict == "uniform" else state["selected"]
-            safe = delta * gate
-            return (safe, gate, applied) if return_details else safe
-        if isolated and self._p_direction_active():
-            gate, applied = self._p_direction_gate(delta, conflict_ratio, conflict_strength)
-            safe = delta * gate
-            return (safe, gate, applied) if return_details else safe
-
-        # general_mask/protect_mask: W0 重要区域，应该保护
-        protect_mask = self.general_mask.to(device=delta.device, dtype=delta.dtype)
-        # isolated_mask/plastic_mask: W0 非重要区域，允许 P_lora 使用
-        plastic_mask = 1.0 - protect_mask
-        protect_strength = min(max(self.effective_protect_strength, 0.0), 1.0)
-
-        # This ablation disables only S-LoRA protection. P-LoRA still uses
-        # plastic_mask below, so its behavior is unchanged.
-        if isolated or not self.dual_mask_s_protect_enabled:
-            protect_gate = torch.ones_like(protect_mask)
+            protect_gate = torch.ones_like(protect)
         else:
-            # 保护区统一使用 competence-adaptive 强度，复现旧版平衡控制器。
-            protect_gate = 1.0 - protect_strength * protect_mask
-
-        private_conflict_disabled = (isolated and self.dual_mask_private_conflict_mode == "none")
-        conflict_mask = torch.zeros_like(delta) if return_details else None
-        if gate_mode == "protect_only" or private_conflict_disabled or not self._conflict_gate_enabled(isolated):
-            conflict_gate = torch.ones_like(protect_gate)
-        elif isolated and self.cur_task > 0 and self.args.get("p_hard_zero_mode", "off") != "off":
-            conflict_mask = self._p_hard_zero_mask(delta)
-            conflict_gate = 1.0 - conflict_mask
-        else:
-            # conflict 高表示,W0 很重要，而且 LoRA 也想大幅修改这个位置
-            if conflict_strength is None:
-                _, conflict_strength = self._conflict_parameters()
-            conflict_strength = min(max(conflict_strength, 0.0), 1.0)
-            if isolated and self.dual_mask_private_conflict_mode == "plastic_norm_matched":
-                conflict_mask, conflict_strength = self._private_plastic_norm_matched_conflict(
-                    delta, plastic_mask, conflict_ratio, conflict_strength,
-                )
-            else:
-                _, conflict_mask = self._branch_conflict(delta, isolated=isolated,
-                    conflict_ratio=conflict_ratio,
-                    valid_mask=(plastic_mask if isolated and self.dual_mask_private_conflict_mode == "plastic" else None),)
-            if self.dual_mask_uniform_norm_matched:
-                base = delta * (plastic_mask if isolated else protect_gate)
-                conflict_strength = self._uniform_conflict_strength(base, conflict_mask, conflict_strength)
-                conflict_mask = torch.ones_like(conflict_mask)
-            # 高冲突区域按 conflict_strength 压制；其余区域保持不变。
-            conflict_gate = 1.0 - conflict_strength * conflict_mask.to(delta.dtype)
-        # Private LoRA 只使用非保护区；在二值互补 mask 下，
-        # protect_gate * plastic_mask 恒等于 plastic_mask。
-
-        if isolated:
-            gate = plastic_mask * conflict_gate
-        else:
-            gate = protect_gate * conflict_gate  # [2304,768]
-        safe = delta * gate
-        return (safe, gate, conflict_mask) if return_details else safe
-
-    def _p_protect_mask(self):
-        return self.general_mask if self.p_permission_protect is None else self.p_permission_protect
-
-    def _p_permission_delta(self, delta, conflict_ratio=None, conflict_strength=None):
-        from utils.p_permission_release import permission_release_gate
-        protect = self._p_protect_mask().to(delta)
+            protect_gate = 1.0 - alpha * protect
         if conflict_strength is None:
-            conflict_strength = self._conflict_parameters()[1]
-        if self._conflict_gate_enabled(True):
-            _, applied = self._branch_conflict(delta, isolated=True, conflict_ratio=conflict_ratio)
-        else:
-            applied = torch.zeros_like(delta)
-        conflict = 1 - conflict_strength * applied.to(delta)
-        release = self.p_permission_release_mask
-        if self._p_release_disabled or release is None:
-            release = torch.zeros_like(protect, dtype=torch.bool)
-        gate, _ = permission_release_gate(delta, protect, release,
-            self.effective_protect_strength, conflict, self.args.get('p_permission_norm_match', True))
-        return delta * gate, gate, applied
+            _, conflict_strength = self._conflict_parameters()
+        beta = min(max(conflict_strength, 0.0), 1.0)
+        _, conflict = self._joint_conflict(delta, conflict_ratio)
+        conflict_gate = 1.0 - beta * conflict.to(delta.dtype)
+        gate = (1.0 - protect) * conflict_gate if isolated else protect_gate * conflict_gate
+        return delta * gate
 
-    def _core_policy_active(self):
-        return self.cur_task > 0 and (
-            self.args.get('dual_mask_position_norm_match', 'off') == 'paired_min'
-            or self.args.get('dual_mask_permission_mode', 'asymmetric') != 'asymmetric'
-            or self._core_audit_position is not None)
-
-    def _core_policy_delta(self, delta, isolated, conflict_ratio=None, conflict_strength=None):
-        from utils.dualmask_core import paired_min_gates, permission_gate
-        strength = min(max(self.effective_protect_strength, 0.0), 1.0)
-        mode = self.args.get('dual_mask_permission_mode', 'asymmetric')
-        if conflict_strength is None:
-            conflict_strength = self._conflict_parameters()[1]
-        if self._effective_gate_mode() == 'protect_only' or not self._conflict_gate_enabled(isolated):
-            applied = torch.zeros_like(delta)
-        else:
-            _, applied = self._branch_conflict(delta, isolated=isolated, conflict_ratio=conflict_ratio)
-        def make_gate(mask):
-            base = permission_gate(mask.to(delta), strength, isolated, mode,
-                                   self.dual_mask_s_protect_enabled)
-            if self.dual_mask_uniform_norm_matched:
-                alpha = self._uniform_conflict_strength(delta * base, applied, conflict_strength)
-                return base * (1 - alpha)
-            return base * (1 - conflict_strength * applied.to(delta))
-        paired = (self.args.get('dual_mask_position_norm_match', 'off') == 'paired_min'
-                  or self._core_audit_position is not None)
-        if paired:
-            gates = [make_gate(mask) for mask in (self.core_reference_protect, self.core_permuted_protect)]
-            gates, _, _, _ = paired_min_gates(delta, *gates)
-            position = self._core_audit_position or self.args.get('dual_mask_protect_position', 'wpre')
-            gate = gates[0 if position == 'wpre' else 1]
-        else:
-            gate = make_gate(self.general_mask)
-        if self.dual_mask_uniform_norm_matched:
-            applied = torch.ones_like(applied)
-        return delta * gate, gate, applied
-
-    @staticmethod
-    def _uniform_conflict_strength(base, mask, strength):
-        # Match the removed Frobenius norm on this update, without differentiating alpha.
-        with torch.no_grad():
-            value = base.detach().float()
-            return strength * (value * mask).norm() / value.norm().clamp_min(1e-12)
-
-    def _merge_base_and_conflict(
-            self,
-            delta: torch.Tensor,
-            isolated: bool,
-            conflict_ratio: float,
-            compute_conflict: bool = True,
-    ):
-        """Return the pre-conflict update and its conflict mask."""
-        gate_mode = self._effective_gate_mode()
-        if gate_mode == "unmasked":
-            return delta, torch.zeros_like(delta)
-
-        if isolated and self.cur_task > 0 and (self.args.get('p_permission_release', 'off') != 'off'
-                or self.args.get('p_permission_position', 'wpre') == 'permuted'):
-            protect = self._p_protect_mask().to(delta)
-            release = self.p_permission_release_mask
-            if self._p_release_disabled or release is None:
-                release = torch.zeros_like(protect)
-            base = delta * ((1 - protect) + (1 - self.effective_protect_strength) * release * protect)
-            applied = self._p_permission_delta(delta, conflict_ratio)[2] if compute_conflict else torch.zeros_like(delta)
-            return base, applied
-
-        if self._core_policy_active():
-            from utils.dualmask_core import permission_gate
-            base = delta * permission_gate(self.general_mask.to(delta),
-                min(max(self.effective_protect_strength, 0.0), 1.0), isolated,
-                self.args.get('dual_mask_permission_mode', 'asymmetric'), self.dual_mask_s_protect_enabled)
-            applied = (self._core_policy_delta(delta, isolated, conflict_ratio)[2]
-                       if compute_conflict else torch.zeros_like(delta))
-            return base, applied
-
-        protect_mask = self.general_mask.to(device=delta.device, dtype=delta.dtype)
-        plastic_mask = 1.0 - protect_mask
-        protect_strength = min(max(self.effective_protect_strength, 0.0), 1.0)
-        if isolated:
-            base_delta = delta * plastic_mask
-        elif self.dual_mask_s_protect_enabled:
-            base_delta = delta * (1.0 - protect_strength * protect_mask)
-        else:
-            base_delta = delta
-
-        if isolated and self._p_direction_active() and compute_conflict:
-            _, applied = self._p_direction_gate(delta, conflict_ratio)
-            return base_delta, applied
-
-        private_conflict_disabled = (isolated and self.dual_mask_private_conflict_mode == "none")
-        if gate_mode == "protect_only" or private_conflict_disabled or not self._conflict_gate_enabled(isolated):
-            return base_delta, torch.zeros_like(delta)
-
-        if isolated and self.cur_task > 0 and self.args.get("p_hard_zero_mode", "off") != "off":
-            return base_delta, self._p_hard_zero_mask(delta)
-
-        if isolated and self.dual_mask_private_conflict_mode == "plastic_norm_matched":
-            conflict_mask, _ = self._private_plastic_norm_matched_conflict(
-                delta, plastic_mask, conflict_ratio, self._conflict_parameters()[1],
-            )
-        else:
-            _, conflict_mask = self._branch_conflict(
-                delta,
-                isolated=isolated,
-                conflict_ratio=conflict_ratio,
-                valid_mask=(plastic_mask if isolated and self.dual_mask_private_conflict_mode == "plastic" else None),)
-        return base_delta, conflict_mask.to(dtype=delta.dtype)
-
-    def _compose_merge_delta(
-            self,
-            raw_delta: torch.Tensor,
-            isolated: bool,
-            conflict_ratio: float,
-            conflict_strength: float,
-    ) -> torch.Tensor:
-        """Compose one branch update according to the merge-only ablation."""
-        mode = self.dual_mask_conflict_merge_mode
-        if mode == "suppress":
-            return self._safe_delta(raw_delta, isolated=isolated, conflict_ratio=conflict_ratio, conflict_strength=conflict_strength)
-
-        base_delta, _ = self._merge_base_and_conflict(raw_delta, isolated=isolated, conflict_ratio=conflict_ratio)
-        return base_delta
-
-    def _masked_unit_forward(
-            self,
-            x: torch.Tensor,
-            unit,
-            isolated: bool,
-            residual_scale: float = 1.0,
-    ) -> torch.Tensor:
-        raw_delta = unit.B_weight @ unit.A_weight
-        ## isolated=True: safe_delta_p = BA_p * plastic_mask * conflict_gate
-        ## isolated=False: safe_delta_s = BA_s * protect_gate * conflict_gate
-        if isolated and self.training and self.p_conflict_strength_scale != 1.0:
-            strength = self._conflict_parameters()[1] * self.p_conflict_strength_scale
-            safe_delta = self._safe_delta(raw_delta, isolated=True, conflict_strength=strength)
-        else:
-            safe_delta = self._safe_delta(raw_delta, isolated=isolated)
-        if self.dual_mask_safe_residual_enabled and self.training and torch.is_grad_enabled():
-            base_delta, _ = self._merge_base_and_conflict(raw_delta, isolated=isolated, conflict_ratio=self._conflict_parameters()[0], compute_conflict=False)
-            self._pending_safe_residual_deltas.append(residual_scale * (base_delta - safe_delta))
-        return F.linear(x, safe_delta)  # 输出 = x @ safe_delta.T
-
-    def _finalize_safe_residual(self, x: torch.Tensor):
-        if not self._pending_safe_residual_deltas:
-            return
-        sampled_inputs = x.detach().reshape(-1, x.shape[-1])
-        if sampled_inputs.shape[0] > self.dual_mask_safe_residual_vectors:
-            indices = torch.linspace(0, sampled_inputs.shape[0] - 1, steps=self.dual_mask_safe_residual_vectors, device=sampled_inputs.device).long()
-            sampled_inputs = sampled_inputs.index_select(0, indices)
-        residual_delta = torch.stack(self._pending_safe_residual_deltas).sum(dim=0)
-        residual_output = F.linear(sampled_inputs, residual_delta)
-        input_energy = sampled_inputs.float().pow(2).sum(dim=-1).mean().detach().clamp_min(1e-12)
-        self._last_safe_residual_loss = residual_output.float().pow(2).sum(dim=-1).mean() / input_energy
-        self._pending_safe_residual_deltas = []
-
-    def safe_residual_regularization(self):
-        loss = self._last_safe_residual_loss
-        self._last_safe_residual_loss = None
-        return loss
-
-    def anchor_regularization(self) -> torch.Tensor:
-        """Penalize the effective current QKV weight drifting from W_pre."""
-        task = int(self.cur_task)
-        current_delta = torch.zeros_like(self.qkv.weight)
-
-        if not self.use_slora and not self.use_plora:
-            unit = self.S_lora[task]
-            if unit is not None:
-                raw_delta = unit.B_weight @ unit.A_weight
-                current_delta = current_delta + self._safe_delta(raw_delta,isolated=False,)
-        else:
-            unit_s = self.S_lora[task]
-            if unit_s is not None and (self.use_slora or task == 0):
-                raw_delta_s = self.slora_gamma * (unit_s.B_weight @ unit_s.A_weight)
-                current_delta = current_delta + self._safe_delta(raw_delta_s,isolated=False,)
-
-            unit_p = self.P_lora[task]
-            if task > 0 and self.use_plora and unit_p is not None:
-                raw_delta_p = self.plora_gamma * (unit_p.B_weight @ unit_p.A_weight)
-                current_delta = current_delta + self._safe_delta(raw_delta_p,isolated=True,)
-
+    def anchor_regularization(self):
+        task = self.cur_task
+        delta = torch.zeros_like(self.qkv.weight)
+        s = self.S_lora[task]
+        if s is not None:
+            raw = self.slora_gamma * (s.B_weight @ s.A_weight)
+            delta = delta + self._safe_delta(raw, isolated=False)
+        p = self.P_lora[task]
+        if task > 0 and p is not None:
+            raw = self.plora_gamma * (p.B_weight @ p.A_weight)
+            delta = delta + self._safe_delta(raw, isolated=True)
         anchor = self.pretrained_weight.detach().float()
-        effective_weight = self.qkv.weight.detach().float() + current_delta.float()
-        drift = effective_weight - anchor
-        return drift.pow(2).sum() / anchor.pow(2).sum().clamp_min(1e-12)
+        effective = self.qkv.weight.detach().float() + delta.float()
+        return (effective - anchor).pow(2).sum() / anchor.pow(2).sum().clamp_min(1e-12)
 
-    def _joint_conflict_regularization(self, unit, isolated: bool) -> torch.Tensor:
-        delta = unit.B_weight @ unit.A_weight # ΔW = 0 × A = 0
-
-        gate_mode = self._effective_gate_mode()
-        if gate_mode == "unmasked":
+    def _joint_conflict_regularization(self, unit, isolated):
+        delta = unit.B_weight @ unit.A_weight
+        if self.cur_task == 0:
             return delta.sum() * 0.0
+        safe = self._safe_delta(delta, isolated)
+        importance = self.w0_importance.to(delta)
+        protection = (importance * safe.pow(2)).mean()
+        score = _normalize_score(importance * _normalize_score(delta.detach().abs()))
+        conflict = (score.detach() * safe.pow(2)).mean()
+        return protection + conflict
 
-        if self._composed_conflict_active() and self._composed_forward_gate is not None:
-            safe_delta = delta * self._composed_base_gate(delta, isolated) * self._composed_forward_gate
-        elif isolated and self._p_direction_active() and self._p_direction_state is not None:
-            plastic = 1.0 - self.general_mask.to(delta)
-            safe_delta = delta * plastic * self._p_direction_state["gate"].reshape_as(delta).to(delta)
-        else:
-            safe_delta = self._safe_delta(delta, isolated=isolated)
-        w0_importance = self.w0_importance.to(device=delta.device, dtype=delta.dtype)
-        # 如果某个位置 W0 很重要，那么 safe_delta 在这个位置越大，惩罚越大
-        protection = (w0_importance * safe_delta.pow(2)).mean()
-        if gate_mode == "protect_only":
-            return protection
+    def _masked_unit_forward(self, x, unit, isolated):
+        delta = unit.B_weight @ unit.A_weight
+        return F.linear(x, self._safe_delta(delta, isolated))
 
-        if isolated and self.dual_mask_private_conflict_mode == "none":
-            return protection
-
-        if self.args.get("dual_mask_conflict_reg_original_score", False):
-            conflict_score = _normalize_score(w0_importance * _normalize_score(delta.detach().abs()))
-        else:
-            conflict_score, _ = self._joint_conflict(
-                delta,
-                valid_mask=(self.isolated_mask if isolated and self.dual_mask_private_conflict_mode == "plastic" else None),)
-
-        # 如果某个位置 conflict_score 高，那么 safe_delta 在这个位置越大，惩罚越大
-        conflict = (conflict_score.detach() * safe_delta.pow(2)).mean()
-        if self.dual_mask_conflict_reg_enabled:
-            return protection + conflict
-        return protection
-    # 如果只施加冲突门，LoRA 增量的整体范数被削弱了多少
-    @staticmethod
-    def _delta_stats(raw_delta: torch.Tensor, safe_delta: torch.Tensor):
-        raw = raw_delta.detach().float()
-        safe = safe_delta.detach().float()
-        raw_norm = raw.norm().item()
-        safe_norm = safe.norm().item()
-        if raw_norm <= 1e-12:
-            suppressed_ratio = 0.0
-        else:
-            suppressed_ratio = 1.0 - safe_norm / raw_norm
-        q_safe, k_safe, v_safe = safe.chunk(3, dim=0)
-        return {
-            "raw_norm": raw_norm,
-            "safe_norm": safe_norm,
-            "suppressed_ratio": suppressed_ratio,
-            "raw_abs_mean": raw.abs().mean().item(),
-            "safe_abs_mean": safe.abs().mean().item(),
-            "max_abs": raw.abs().max().item(),
-            "q_safe_norm": q_safe.norm().item(),
-            "k_safe_norm": k_safe.norm().item(),
-            "v_safe_norm": v_safe.norm().item(),
-        }
-
-    @staticmethod
-    def _format_delta_stats(name: str, stats) -> str:
-        return (
-            "{} raw_norm={:.6f}, safe_norm={:.6f}, suppressed={:.2%}, "
-            "raw_abs_mean={:.3e}, safe_abs_mean={:.3e}, max_abs={:.3e}"
-        ).format(
-            name,
-            stats["raw_norm"],
-            stats["safe_norm"],
-            stats["suppressed_ratio"],
-            stats["raw_abs_mean"],
-            stats["safe_abs_mean"],
-            stats["max_abs"],
-        )
-
-    @staticmethod
-    def _conflict_distribution_stats(
-            conflict_score: torch.Tensor,
-            conflict_mask: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return normalized conflict entropy and the selected-score energy."""
-        flat_score = conflict_score.detach().float().flatten().clamp_min(0.0)
-        total = flat_score.sum()
-        if total <= 0.0:
-            zero = flat_score.new_zeros(())
-            return zero, zero
-        # 把冲突分数变成概率分布
-        probability = flat_score / total
-        positive = probability > 0.0
-        entropy = -(probability[positive] * probability[positive].log()).sum()
-        if flat_score.numel() > 1:
-            entropy = entropy / torch.log(flat_score.new_tensor(float(flat_score.numel())))
-        else:
-            entropy = flat_score.new_zeros(())
-        top_energy = (flat_score[conflict_mask.detach().bool().flatten()].sum() / total)
-        return entropy, top_energy # entropy = 0.35,top10_energy = 0.72 --> 表示冲突比较集中，Top-10% 坐标已经覆盖 72% 的冲突分数
-
-    @staticmethod
-    def _conflict_gate_suppression(
-            raw_delta: torch.Tensor,
-            conflict_mask: torch.Tensor,
-            conflict_strength: float,
-    ) -> float:
-        """Measure suppression caused by the current conflict gate alone."""
-        conflict_gate = 1.0 - conflict_strength * conflict_mask.to(raw_delta.dtype)
-        return Attention_LoRA._delta_stats(
-            raw_delta,
-            raw_delta * conflict_gate,
-        )["suppressed_ratio"]
-
-    @staticmethod
-    def _conflict_energy50_ratio(conflict_score: torch.Tensor) -> torch.Tensor:
-        """Return the smallest coordinate ratio covering 50% conflict energy."""
-        flat_score = conflict_score.detach().float().flatten().clamp_min(0.0)
-        total = flat_score.sum()
-        if total <= 0.0:
-            return flat_score.new_zeros(())
-
-        values, _ = torch.sort(flat_score, descending=True)
-        cumulative = torch.cumsum(values, dim=0)
-        k = int(torch.searchsorted(cumulative, 0.5 * total).item()) + 1
-        return flat_score.new_tensor(k / flat_score.numel())
-
-    @torch.no_grad()
-    def _private_merge_diagnostic(
-            self,
-            raw_delta: torch.Tensor,
-            safe_delta: torch.Tensor,
-            conflict_ratio: float,
-            conflict_strength: float,
-    ):
-        """Measure the P mask actually used by merge, without changing it."""
-        plastic = (1.0 - self.general_mask.to(raw_delta)).bool()
-        before_conflict = raw_delta * plastic.to(raw_delta)
-        reference_removed_norm = None
-        if (
-                self.dual_mask_conflict_merge_mode == "suppress"
-                and self._effective_gate_mode() == "full"
-                and self.dual_mask_private_conflict_mode != "none"
-                and self.dual_mask_p_conflict_enabled
-        ):
-            if self.cur_task > 0 and self.args.get("p_hard_zero_mode", "off") != "off":
-                applied_mask = self._p_hard_zero_mask(raw_delta)
-                conflict_strength = 1.0
-            elif self.dual_mask_private_conflict_mode == "plastic_norm_matched":
-                _, baseline_mask = self._branch_conflict(
-                    raw_delta, isolated=True, conflict_ratio=conflict_ratio,
-                )
-                reference_removed_norm = float(
-                    (before_conflict * baseline_mask * conflict_strength).norm().item()
-                )
-                applied_mask, conflict_strength = self._private_plastic_norm_matched_conflict(
-                    raw_delta, plastic, conflict_ratio, conflict_strength,
-                )
-            else:
-                _, applied_mask = self._branch_conflict(
-                    raw_delta,
-                    isolated=True,
-                    conflict_ratio=conflict_ratio,
-                    valid_mask=(plastic if self.dual_mask_private_conflict_mode == "plastic" else None),
-                )
-        else:
-            applied_mask = torch.zeros_like(raw_delta)
-        if self.dual_mask_uniform_norm_matched and applied_mask.any():
-            reference_removed_norm = float((before_conflict * applied_mask * conflict_strength).norm())
-            conflict_strength = float(self._uniform_conflict_strength(before_conflict, applied_mask, conflict_strength))
-            applied_mask = torch.ones_like(applied_mask)
-        applied_mask = applied_mask.bool()
-        selected_plastic = applied_mask & plastic
-        removed = before_conflict - safe_delta
-        expected_safe = before_conflict * (
-            1.0 - conflict_strength * applied_mask.to(raw_delta)
-        )
-
-        def ratio(part, whole):
-            return float(part / whole) if whole else 0.0
-
-        selected = int(applied_mask.sum().item())
-        plastic_count = int(selected_plastic.sum().item())
-        before_norm = float(before_conflict.norm().item())
-        removed_norm = float(removed.norm().item())
-        qkv_selected = []
-        qkv_overlap = []
-        qkv_removed_ratio = []
-        for mask_part, plastic_part, before_part, removed_part in zip(
-                applied_mask.chunk(3, dim=0),
-                plastic.chunk(3, dim=0),
-                before_conflict.chunk(3, dim=0),
-                removed.chunk(3, dim=0),
-        ):
-            count = int(mask_part.sum().item())
-            qkv_selected.append(count)
-            qkv_overlap.append(ratio(int((mask_part & plastic_part).sum().item()), count))
-            qkv_removed_ratio.append(
-                ratio(float(removed_part.norm().item()), float(before_part.norm().item()))
-            )
-        return {
-            "selected": selected,
-            "selected_plastic": plastic_count,
-            "selected_active": int((selected_plastic & (raw_delta != 0)).sum().item()),
-            "plastic_overlap": ratio(plastic_count, selected),
-            "removed_norm": removed_norm,
-            "removed_ratio": ratio(removed_norm, before_norm),
-            "reference_removed_norm": reference_removed_norm,
-            "applied_strength": float(conflict_strength),
-            "qkv_selected": tuple(qkv_selected),
-            "qkv_plastic_overlap": tuple(qkv_overlap),
-            "qkv_removed_ratio": tuple(qkv_removed_ratio),
-            "merge_error": float((expected_safe - safe_delta).abs().max().item()),
-        }
-
-    # 合并阶段的诊断与日志函数
-    def _log_merge_stats(
-            self,
-            task: int,
-            branch_deltas,
-            conflict_ratio: Optional[float] = None,
-            conflict_strength: Optional[float] = None,
-    ):
-        raw_total = torch.stack([item["raw_delta"] for item in branch_deltas]).sum(dim=0)
-        safe_total = torch.stack([item["safe_delta"] for item in branch_deltas]).sum(dim=0)
-        total_stats = self._delta_stats(raw_total, safe_total)
-        # _, conflict_mask = self._joint_conflict(raw_total)
-        # conflict_score, conflict_mask = self._joint_conflict(raw_total)
-        conflict_score, conflict_mask = self._joint_conflict(
-            raw_total,
-            conflict_ratio=conflict_ratio,
-        )
-
-        effective_conflict_ratio = conflict_mask.detach().float().mean().item()
-
-        protect_mask = self.general_mask.detach().float()
-
-        fixed_conflict_mask = _top_ratio_mask(conflict_score,self.dual_mask_conflict_ratio if conflict_ratio is None else conflict_ratio,)
-        # entropy = 0.91,top10_energy = 0.24 表示冲突非常分散，固定 Top-10% 只能覆盖 24%，这时 Energy-50% 自适应范围就会扩大
-        conflict_entropy, conflict_top10_energy = self._conflict_distribution_stats(conflict_score,fixed_conflict_mask,)
-        # 0.0536  -- 只需要冲突分数最高的 5.36% 参数，就可以覆盖全部冲突分数的 50%
-        conflict_energy50_ratio = self._conflict_energy50_ratio(conflict_score)
-
-        if conflict_ratio is None:
-            conflict_ratio = self.dual_mask_conflict_ratio
-        if conflict_strength is None:
-            conflict_strength = self.dual_mask_conflict_strength
-        conflict_strength = min(max(conflict_strength, 0.0), 1.0)
-        # 总分支的冲突门削弱程度  把raw_total = S_raw + P_raw作为整体，估算只施加冲突门后，整体增量范数下降多少
-        conflict_gate_suppression = self._conflict_gate_suppression(raw_total,conflict_mask,conflict_strength,)
-        if self._p_direction_active() or self.dual_mask_uniform_norm_matched or not (self.dual_mask_s_conflict_enabled and self.dual_mask_p_conflict_enabled):
-            base_total = torch.stack([
-                self._merge_base_and_conflict(item["raw_delta"], item["isolated"], conflict_ratio)[0]
-                for item in branch_deltas
-            ]).sum(dim=0)
-            conflict_gate_suppression = self._delta_stats(base_total, safe_total)["suppressed_ratio"]
-        # 初始化 P 分支统计量
-        private_mask_overlap = raw_total.new_zeros(())
-        private_energy_overlap = raw_total.new_zeros(())
-        private_gate_suppression = 0.0
-        private_item = next((item for item in branch_deltas if item["isolated"]),None,)
-        if private_item is not None and not self._p_direction_active():
-            private_raw = private_item["raw_delta"]
-            applied = self._private_merge_diagnostic(
-                private_raw,
-                private_item["safe_delta"],
-                conflict_ratio,
-                conflict_strength,
-            )
-            logging.info(
-                "Task %s layer %s P applied merge diagnostic: "
-                "selected=%s, selected_plastic=%s, selected_active=%s, "
-                "plastic_overlap=%.4f, removed_norm=%.6f, removed_ratio=%.4f, applied_strength=%.4f, "
-                "reference_removed_norm=%s, qkv_selected=%s, qkv_plastic_overlap=%s, "
-                "qkv_removed_ratio=%s, merge_error=%.3e",
-                int(task),
-                int(self.layer_idx),
-                applied["selected"],
-                applied["selected_plastic"],
-                applied["selected_active"],
-                applied["plastic_overlap"],
-                applied["removed_norm"],
-                applied["removed_ratio"],
-                applied["applied_strength"],
-                applied["reference_removed_norm"],
-                applied["qkv_selected"],
-                applied["qkv_plastic_overlap"],
-                applied["qkv_removed_ratio"],
-                applied["merge_error"],
-            )
-            plastic_mask = (1.0 - protect_mask).to(device=private_raw.device,dtype=private_raw.dtype,)
-            private_score, global_private_mask = self._joint_conflict(private_raw,conflict_ratio=conflict_ratio,)
-            if self.frozen_p_conflict_mask is not None:
-                global_private_mask = self.frozen_p_conflict_mask.to(private_raw)
-            if self.cur_task > 0 and self.args.get("p_hard_zero_mode", "off") != "off":
-                global_private_mask = self._p_hard_zero_mask(private_raw)
-            selected_count = global_private_mask.detach().float().sum()
-            if selected_count > 0.0:
-                private_mask_overlap = (global_private_mask.detach().float() * plastic_mask.float()).sum() / selected_count
-            selected_energy = (
-                private_score.detach().float()
-                * global_private_mask.detach().float()
-            )
-            if selected_energy.sum() > 0.0:
-                private_energy_overlap = (selected_energy * plastic_mask.float()).sum() / selected_energy.sum()
-
-            if self.dual_mask_private_conflict_mode == "none" or not self.dual_mask_p_conflict_enabled:
-                actual_private_mask = torch.zeros_like(global_private_mask)
-            elif self.dual_mask_private_conflict_mode == "plastic_norm_matched":
-                actual_private_mask, actual_private_strength = self._private_plastic_norm_matched_conflict(
-                    private_raw, plastic_mask, conflict_ratio, conflict_strength,
-                )
-            elif self.dual_mask_private_conflict_mode == "plastic":
-                _, actual_private_mask = self._joint_conflict(
-                    private_raw,
-                    conflict_ratio=conflict_ratio,
-                    valid_mask=plastic_mask,
-                )
-            else:
-                actual_private_mask = global_private_mask
-            if self.dual_mask_private_conflict_mode != "plastic_norm_matched":
-                actual_private_strength = conflict_strength
-            if self.cur_task > 0 and self.args.get("p_hard_zero_mode", "off") != "off":
-                actual_private_strength = 1.0
-            private_plastic_delta = private_raw * plastic_mask
-            if self.dual_mask_uniform_norm_matched and actual_private_mask.any():
-                actual_private_strength = self._uniform_conflict_strength(private_plastic_delta, actual_private_mask, actual_private_strength)
-                actual_private_mask = torch.ones_like(actual_private_mask)
-                private_mask_overlap = plastic_mask.float().mean()
-                private_energy_overlap = (private_score * plastic_mask).sum() / private_score.sum().clamp_min(1e-12)
-            private_gate_suppression = self._conflict_gate_suppression(private_plastic_delta,actual_private_mask,actual_private_strength,)
-
-        if private_item is not None and self._p_direction_active():
-            state = self._p_direction_state
-            selected = state["selected"].reshape_as(protect_mask).float()
-            private_mask_overlap = raw_total.new_tensor(1.0 if selected.any() else 0.0)
-            private_energy_overlap = private_mask_overlap
-            private_base = private_item["raw_delta"] * (1.0 - protect_mask.to(raw_total))
-            private_gate_suppression = float((private_base - private_item["safe_delta"]).norm()
-                                            / private_base.norm().clamp_min(1e-12))
-
-
-        with torch.no_grad():
-            self.last_conflict_entropy.copy_(conflict_entropy)
-            self.last_conflict_top10_energy.copy_(conflict_top10_energy)
-            self.last_conflict_energy50_ratio.copy_(conflict_energy50_ratio)
-            self.last_conflict_gate_suppression.fill_(conflict_gate_suppression)
-            self.last_safe_suppression.fill_(total_stats["suppressed_ratio"])
-
-            self.last_effective_conflict_ratio.fill_(effective_conflict_ratio)
-            self.last_effective_conflict_strength.fill_(conflict_strength)
-
-            self.last_private_conflict_mask_overlap.copy_(private_mask_overlap)
-            self.last_private_conflict_energy_overlap.copy_(private_energy_overlap)
-            self.last_private_conflict_gate_suppression.fill_(private_gate_suppression)
-
-        branch_stats = []
-        for item in branch_deltas:
-            stats = self._delta_stats(item["raw_delta"], item["safe_delta"])
-            branch_stats.append(self._format_delta_stats(item["name"], stats))
-
-        logging.info(
-            "Task %s layer %s LoRA branch stats: %s",
-            int(task),
-            int(self.layer_idx),
-            " | ".join(branch_stats),
-        )
-        logging.info(
-            "Task %s layer %s dual-mask merge: total_raw_norm=%.6f, "
-            "total_safe_norm=%.6f, suppressed=%.2f%%, raw_abs_mean=%.3e, " # suppressed 所有门控共同作用后，总增量范数下降多少
-            "safe_abs_mean=%.3e, max_abs=%.3e, protect_density=%.4f, " # protect_mask=1 的坐标比例
-            "plastic_density=%.4f, conflict_density=%.4f, " # plastic_mask=1 的坐标比例
-            "conflict_entropy=%.4f, conflict_top10_energy=%.4f, " # 冲突分数的整体分散程度  固定 Top-ratio 区域覆盖的冲突分数比例
-            "conflict_energy50_ratio=%.4f, " # 覆盖 50% 冲突分数最少需要的坐标比例
-            "conflict_gate_suppressed=%.2f%%, " #  # 只模拟冲突门时，总增量范数下降多少
-            "effective_conflict_ratio=%.4f, " # 当前实际冲突 mask 的坐标比例
-            "effective_conflict_strength=%.4f, " # 本次 merge 实际使用的冲突抑制强度 β
-            "conflict_granularity=%s, global_S_density=%.4f, global_P_density=%.4f, "
-            "private_conflict_mode=%s, "
-            "private_conflict_mask_overlap=%.4f, " # 全局 P 冲突坐标中有多少位于 plastic 区
-            "private_conflict_energy_overlap=%.4f, " # 全局 P 冲突分数中有多少位于 plastic 区
-            "private_conflict_gate_suppressed=%.2f%%, " # 冲突门对 P-plastic 增量造成的额外范数下降
-            "Q_safe_norm=%.6f, K_safe_norm=%.6f, V_safe_norm=%.6f",
-            int(task),
-            int(self.layer_idx),
-            total_stats["raw_norm"], # S、P 原始增量相加后的整体范数
-            total_stats["safe_norm"], # S、P 分别经过门控，再相加后的整体范数
-            total_stats["suppressed_ratio"] * 100.0, # 所有门控合起来造成的整体范数下降比例
-            total_stats["raw_abs_mean"], # 原始总增量每个坐标绝对值的平均值
-            total_stats["safe_abs_mean"], # 安全总增量每个坐标绝对值的平均值
-            total_stats["max_abs"], # 原始总增量中最大的坐标绝对值
-            protect_mask.mean().item(),
-            (1.0 - protect_mask).mean().item(),
-            conflict_mask.float().mean().item(),
-            conflict_entropy.item(),
-            conflict_top10_energy.item(),
-            conflict_energy50_ratio.item(),
-            conflict_gate_suppression * 100.0,
-            # float(conflict_ratio),
-            effective_conflict_ratio,
-            conflict_strength,
-            self.dual_mask_conflict_granularity,
-            self.global_s_conflict_mask.detach().float().mean().item()
-            if self.global_conflict_masks_active else 0.0,
-            self.global_p_conflict_mask.detach().float().mean().item()
-            if self.global_conflict_masks_active else 0.0,
-            self.dual_mask_private_conflict_mode,
-            private_mask_overlap.item(),
-            private_energy_overlap.item(),
-            private_gate_suppression * 100.0,
-            total_stats["q_safe_norm"],
-            total_stats["k_safe_norm"],
-            total_stats["v_safe_norm"],
-        )
-
-    def _contrib_from_units(self, x: torch.Tensor, t_idx: int) -> torch.Tensor:
-
-        self._pending_safe_residual_deltas = []
-        self._last_safe_residual_loss = None
-        self._composed_forward_gate = None
-
-        zero_output = x.new_zeros((*x.shape[:-1], self.dim * 3))
-        self._p_direction_state = None
-
+    def _contrib_from_units(self, x, t_idx):
+        output = x.new_zeros((*x.shape[:-1], self.dim * 3))
         if self.pretrained_anchor_mode:
-            return zero_output
+            return output
+        s, p = self.S_lora[t_idx], self.P_lora[t_idx]
+        if s is not None:
+            output = output + self.slora_gamma * self._masked_unit_forward(x, s, False)
+        if t_idx > 0 and p is not None:
+            output = output + self.plora_gamma * self._masked_unit_forward(x, p, True)
+        return output
 
-        unit_s = self.S_lora[t_idx]  # S_lora[t_idx] = 当前 task 的共享 LoRA
-        unit_p = self.P_lora[t_idx]  # P_lora[t_idx] = 当前 task 的私有/隔离 LoRA
-
-        # 当前任务已经 merge，后续只使用写入 qkv.weight 的增量。
-        if unit_s is None and unit_p is None:
-            return zero_output
-
-        if self._composed_conflict_active():
-            state = self._composed_conflict_state()
-            self._composed_forward_gate = state["gate"]
-            return F.linear(x, state["net"] * state["gate"])
-
-        if not self.use_slora and not self.use_plora:
-            if unit_s is None:
-                return zero_output
-            out = self._masked_unit_forward(x, unit_s, isolated=False)
-            self._finalize_safe_residual(x)
-            return out
-
-        slora_gamma = float(self.slora_gamma)
-        plora_gamma = float(self.plora_gamma)
-        out = zero_output
-
-        if unit_s is not None and (self.use_slora or t_idx == 0):
-            out = out + slora_gamma * self._masked_unit_forward(x, unit_s, isolated=False, residual_scale=slora_gamma)
-
-        if t_idx > 0 and self.use_plora and unit_p is not None:
-            ## P_lora 只能在 W0 非重要区域更新
-            if self._p_direction_active():
-                raw_p = plora_gamma * (unit_p.B_weight @ unit_p.A_weight)
-                out = out + F.linear(x, self._safe_delta(raw_p, isolated=True))
-            else:
-                out = out + plora_gamma * self._masked_unit_forward(x, unit_p, isolated=True, residual_scale=plora_gamma)
-
-        self._finalize_safe_residual(x)
-        return out
-
-    def forward(self, x: torch.Tensor, task: int, register_hook: bool = False, get_feat: bool = False, get_cur_feat: bool = False):
+    def forward(self, x: torch.Tensor, task: int):
 
         Bsz, N, C = x.shape
-        qkv:torch.Tensor = self.qkv(x) + self._contrib_from_units(x, task) # y=W0x+ΔWx
+        qkv:torch.Tensor = self.qkv(x) + self._contrib_from_units(x, task)
         qkv:torch.Tensor = qkv.reshape(Bsz, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
 
         q, k, v = qkv.unbind(0)
@@ -2054,271 +384,17 @@ class Attention_LoRA(nn.Module):
 
         return x
 
-    def after_task(self, task: int):
-        t = int(task)
-        device = next(self.parameters()).device
-        dtype = self.qkv.weight.dtype
-        # s=0.5 p=0.75
-        def raw_delta(name: str, unit, gamma: float, isolated: bool):
-            factor = unit.B_weight.detach() @ unit.A_weight.detach()
-            delta = gamma * factor
-            return {
-                "name": name,
-                "isolated": isolated,
-                "gamma": gamma,
-                "raw_delta": delta,
-                "factor_delta": factor,
-            }
-
-        def mask_delta(item, conflict_ratio: float, conflict_strength: float):
-            unscaled = self._core_policy_active() or (item['isolated'] and t > 0 and (
-                self.args.get('p_permission_release', 'off') != 'off'
-                or self.args.get('p_permission_position', 'wpre') == 'permuted'))
-            value = item['factor_delta'] if unscaled else item['raw_delta']
-            if self.dual_mask_conflict_merge_mode == 'suppress' or self._core_policy_active():
-                actual, gate, applied = self._safe_delta(value, item['isolated'],
-                    conflict_ratio, conflict_strength, return_details=True)
-                multiplier = item['gamma'] if unscaled else 1.0
-                safe_delta = multiplier * actual
-                item['gate_value'], item['gate_multiplier'] = value, multiplier
-                item['actual_gate'], item['actual_mask'] = gate, applied
-            else:
-                safe_delta = self._compose_merge_delta(item["raw_delta"], isolated=item["isolated"], conflict_ratio=conflict_ratio, conflict_strength=conflict_strength)
-            item["safe_delta"] = safe_delta
-
-        branch_deltas = []
-        if not self.use_slora and not self.use_plora: # isolated=False：走共享分支的保护路径
-            branch_deltas.append(raw_delta("S", self.S_lora[t], 1.0, isolated=False))
-        else:
-            if self.use_slora or t == 0:
-                branch_deltas.append(raw_delta("S",self.S_lora[t],float(self.slora_gamma),isolated=False,))
-            if t > 0 and self.use_plora and self.P_lora[t] is not None:
-                branch_deltas.append(raw_delta("P",self.P_lora[t],float(self.plora_gamma),isolated=True,))
-
-        if branch_deltas: # 如果lora产生了更新
-            conflict_ratio, conflict_strength = self._conflict_parameters() # 0.1 0.5(task0)
-
-            self.last_functional_merge_strength = float(conflict_strength)
-
-            composed = None
-            if self._composed_conflict_active():
-                with torch.no_grad():
-                    composed = self._composed_conflict_state()
-                    for item in branch_deltas:
-                        base = composed["p_base" if item["isolated"] else "s_base"]
-                        item["safe_delta"] = base * composed["gate"]
-                    self._log_composed_merge(t, composed, conflict_strength)
-            else:
-                for item in branch_deltas:
-                    mask_delta(item, conflict_ratio, conflict_strength)
-                    if item["isolated"] and self._p_direction_active():
-                        self._log_p_direction_merge(t, item["raw_delta"], item["safe_delta"])
-
-            basis_mode = self.args.get("plora_a_init_mode", "off")
-            if t > 0 and basis_mode != "off":
-                from utils.plora_gradient_init import GRADIENT_A_MODES, log_basis_update
-                for item in branch_deltas:
-                    if item["isolated"] and basis_mode in GRADIENT_A_MODES:
-                        log_basis_update(self, item["raw_delta"], item["safe_delta"], t, basis_mode)
-
-            if self.dual_mask_applied_budget_log and composed is None:
-                for item in branch_deltas:
-                    if item["isolated"] and self._p_direction_active():
-                        continue  # PDirectionScore below uses the actual norm-matched gate.
-                    raw, safe = item["raw_delta"], item["safe_delta"]
-                    if 'actual_gate' in item:
-                        base, _ = self._merge_base_and_conflict(item['gate_value'], item['isolated'],
-                            conflict_ratio, compute_conflict=False)
-                        base = item['gate_multiplier'] * base
-                        applied = item['actual_mask']
-                        error = (safe - item['gate_multiplier'] * (item['gate_value'] * item['actual_gate'])).abs().max()
-                    else:
-                        base, applied = self._merge_base_and_conflict(raw, item["isolated"], conflict_ratio)
-                        error = (safe - base * (1 - conflict_strength * applied)).abs().max()
-                    _, reference = self._joint_conflict(raw, conflict_ratio=conflict_ratio)
-                    if self._effective_gate_mode() == "unmasked":
-                        reference = torch.zeros_like(reference)
-                    if item["isolated"] and self.cur_task > 0 and self._effective_gate_mode() == "full" and self.args.get("p_hard_zero_mode", "off") != "off":
-                        error = (safe - base * (1 - applied)).abs().max()
-                        plastic_count = int((1.0 - self.general_mask).bool().sum())
-                        logging.info("PHardZero %s", json.dumps({
-                            "task": t, "layer": self.layer_idx, "mode": self.args["p_hard_zero_mode"],
-                            "target_fraction": self.args.get("p_hard_zero_ratio", .4),
-                            "plastic_coordinates": plastic_count, "zeroed_coordinates": int(applied.sum()),
-                            "zeroed_fraction_of_plastic": float(applied.sum()) / plastic_count if plastic_count else 0.0,
-                            "retained_nonzero_coordinates": int((safe != 0).sum()),
-                            "removed_norm": float((base - safe).norm()), "plastic_update_norm": float(base.norm()),
-                            "merge_error": float(error),
-                        }))
-                    if self.dual_mask_uniform_norm_matched:
-                        _, actual_gate, actual_mask = self._safe_delta(raw, item["isolated"], conflict_ratio, conflict_strength, return_details=True)
-                        error = (safe - raw * actual_gate).abs().max()
-                        logging.info("MatchedConflictNorm %s", json.dumps({
-                            "task": t, "layer": self.layer_idx, "branch": item["name"],
-                            "reference_removed_norm": float((base * applied * conflict_strength).norm()),
-                            "actual_removed_norm": float((base - safe).norm()),
-                            "base_norm": float(base.norm()),
-                        }))
-                        applied = actual_mask
-                    logging.info("AppliedConflictBudget %s", json.dumps({
-                        "task": t, "layer": self.layer_idx, "branch": item["name"],
-                        "granularity": self.dual_mask_conflict_granularity,
-                        "local_fraction": self.args.get("dual_mask_conflict_local_fraction", None),
-                        "gate_enabled": self._conflict_gate_enabled(item["isolated"]),
-                        "reference_k": int(reference.sum()), "applied_k": int(applied.sum()),
-                        "qkv_density": [float(p.float().mean()) for p in applied.chunk(3, dim=0)],
-                        "removed_norm": float((base - safe).norm()),
-                        "removed_norm_definition": ("post_permission_conflict_and_norm_control"
-                            if t > 0 and (self.args.get('dual_mask_position_norm_match', 'off') == 'paired_min'
-                                or (item['isolated'] and self.p_permission_release_mask is not None
-                                    and self.args.get('p_permission_norm_match', True)))
-                            else "conflict_only"),
-                        "merge_error": float(error),
-                        "merge_error_definition": ("same_factor_cached_gate_arithmetic" if 'actual_gate' in item
-                            else "recomputed_gate"),
-                    }))
-
-            if self.args.get("dual_mask_position_audit", False):
-                from utils.protect_position import update_rows
-                for item in branch_deltas:
-                    raw, safe = item["raw_delta"], item["safe_delta"]
-                    if 'actual_gate' in item:
-                        base, _ = self._merge_base_and_conflict(item['gate_value'], item['isolated'],
-                            conflict_ratio, compute_conflict=False)
-                        base = item['gate_multiplier'] * base
-                        reconstructed = item['gate_multiplier'] * (item['gate_value'] * item['actual_gate'])
-                        applied = item['actual_mask']
-                    else:
-                        base, _ = self._merge_base_and_conflict(raw, item['isolated'],
-                            conflict_ratio, compute_conflict=False)
-                        reconstructed, _, applied = self._safe_delta(raw, item['isolated'],
-                            conflict_ratio, conflict_strength, return_details=True)
-                    protect = self._p_protect_mask() if item['isolated'] else self.general_mask
-                    release = self.p_permission_release_mask if item['isolated'] and t > 0 else None
-                    allowed = None if release is None else ((1 - protect).bool() | release.bool())
-                    for row in update_rows(raw, base, safe, applied, protect, allowed_mask=allowed,
-                            task=t, layer=self.layer_idx, branch=item["name"],
-                            position=(self.args.get('p_permission_position', 'wpre') if item['isolated']
-                                and self.p_permission_protect is not None else self.args.get("dual_mask_protect_position", "wpre")) if t > 0 else "wpre",
-                            score_mode=self.dual_mask_conflict_score_mode,
-                            permission_mode=self.args.get('dual_mask_permission_mode', 'asymmetric'),
-                            position_norm_match=self.args.get('dual_mask_position_norm_match', 'off') if t > 0 else 'off',
-                            p_permission_norm_match=self.args.get('p_permission_norm_match', True) if release is not None else False,
-                            merge_error_definition='same_factor_cached_gate_arithmetic' if 'actual_gate' in item else 'recomputed_gate',
-                            merge_error=float((safe - reconstructed).abs().max())):
-                        logging.info("ProtectionPositionUpdate %s", json.dumps(row))
-
-            if self.dual_mask_update_overlap:
-                from utils.update_overlap import UpdateOverlapRecorder
-                if self._update_overlap_recorder is None:
-                    self._update_overlap_recorder = UpdateOverlapRecorder(
-                        self._update_overlap_dir, self.layer_idx,
-                    )
-                for item in branch_deltas:
-                    self._update_overlap_recorder.record(
-                        t, item["name"], item["raw_delta"], item["safe_delta"],
-                    )
-                if t == len(self.S_lora) - 1:
-                    self._update_overlap_recorder.close()
-                    self._update_overlap_recorder = None
-
-            self._save_dual_mask_snapshot(t, branch_deltas, conflict_ratio=conflict_ratio, conflict_strength=conflict_strength)
-
-            #########################
-            if composed is None:
-                self._log_merge_stats(t, branch_deltas, conflict_ratio=conflict_ratio, conflict_strength=conflict_strength)
+    def after_task(self, task):
+        deltas = []
+        for unit, gamma, isolated in (
+                (self.S_lora[task], self.slora_gamma, False),
+                (self.P_lora[task], self.plora_gamma, True)):
+            if unit is not None and (not isolated or task > 0):
+                raw = gamma * (unit.B_weight.detach() @ unit.A_weight.detach())
+                deltas.append(self._safe_delta(raw, isolated))
+        if deltas:
             with torch.no_grad():
-                delta = (composed["net"] * composed["gate"] if composed is not None else
-                         torch.stack([item["safe_delta"] for item in branch_deltas]).sum(dim=0))
-                self.qkv.weight.add_(delta.to(device, dtype))
-
-            # safe_delta 已经永久写入 qkv.weight；旧 A/B 后续不再参与前向。
-            self.S_lora[t] = None
-            self.P_lora[t] = None
-            self._functional_merge_strength_override = None
-
-        self.clear_global_conflict_masks()
-
-        self.frozen_p_conflict_mask = None
-        self.previous_p_conflict_mask = None
-        self.p_hard_zero_random_mask = None
-        self.composed_random_score = None
-        self._composed_forward_gate = None
-        self._p_direction_state = None
-        self.p_permission_release_mask = None
-        self.p_permission_protect = None
-        return None
-
-    @torch.no_grad()
-    def _log_p_direction_merge(self, task, raw, safe):
-        state = self._p_direction_state
-        base = state["base"]
-        actual = base - safe.reshape_as(base)
-        reference = base * state["reference"] * state["reference_strength"]
-        jaccard = None
-        if self.args["p_direction_score"] in ("spectral", "signed"):
-            from utils.p_direction_score import norm_matched_gate, spectral_score
-            alternative, _, _ = spectral_score(base, self.p_direction_left,
-                self.p_direction_singular, self.p_direction_right,
-                signed=self.args["p_direction_score"] == "spectral")
-            _, alternative_mask, _ = norm_matched_gate(base, alternative, state["reference"],
-                state["reference_strength"], (1.0 - self.general_mask).reshape_as(base))
-            intersection = (alternative_mask & state["selected"]).sum((-2, -1))
-            union = (alternative_mask | state["selected"]).sum((-2, -1)).clamp_min(1)
-            jaccard = (intersection / union).tolist()
-        logging.info("PDirectionScore %s", json.dumps(dict(
-            task=int(task), layer=int(self.layer_idx), mode=self.args["p_direction_score"],
-            selected_k=state["selected"].sum((-2, -1)).tolist(),
-            reference_k=state["reference"].sum((-2, -1)).tolist(),
-            strength=state["strengths"].tolist(),
-            reference_removed_norm=reference.norm(dim=(-2, -1)).tolist(),
-            actual_removed_norm=actual.norm(dim=(-2, -1)).tolist(),
-            base_norm=base.norm(dim=(-2, -1)).tolist(),
-            spectral_fractions=None if state["fractions"] is None else state["fractions"].tolist(),
-            signed_absolute_jaccard=jaccard,
-            functional_risk=None if state.get("functional") is None else state["functional"]["risk"].tolist(),
-            positive_contribution_fraction=None if state.get("functional") is None else state["functional"]["positive_fraction"].tolist(),
-            merge_error=float((safe - raw * (1.0 - self.general_mask.to(raw)) *
-                               state["gate"].reshape_as(raw).to(raw)).abs().max()))))
-
-    @torch.no_grad()
-    def _log_composed_merge(self, task, state, strength):
-        """Actual gate telemetry and independent-gate counterfactual at the SAME weights."""
-        net, gate = state["net"], state["gate"]
-        s, p = state["s_base"], state["p_base"]
-        original = s * (1 - strength * state["s_reference"]) + p * (1 - strength * state["p_reference"])
-        safe = net * gate
-        tolerance = 1e-8
-        active = net.abs() > tolerance
-        amplification = original.abs() > net.abs() + tolerance
-        reversal = (original * net < 0) & active
-        removed_ratio = float((net - safe).norm() / net.norm().clamp_min(1e-12))
-        selected = state["selected"]
-        entropy, top10 = self._conflict_distribution_stats(state["score"],
-            _top_ratio_mask(state["score"], self.dual_mask_conflict_ratio))
-        self.last_conflict_entropy.copy_(entropy)
-        self.last_conflict_top10_energy.copy_(top10)
-        self.last_conflict_energy50_ratio.copy_(self._conflict_energy50_ratio(state["score"]))
-        self.last_effective_conflict_ratio.copy_(selected.mean())
-        self.last_effective_conflict_strength.fill_(float((1 - gate).max()))
-        self.last_conflict_gate_suppression.fill_(self._delta_stats(net, safe)["suppressed_ratio"])
-        self.last_safe_suppression.fill_(self._delta_stats(state["raw_s"] + state["raw_p"], safe)["suppressed_ratio"])
-        applied = torch.ones_like(selected) if self.dual_mask_composed_conflict == "uniform" else selected
-        plastic = 1.0 - self.general_mask.to(net)
-        self.last_private_conflict_mask_overlap.copy_((applied * plastic).sum() / applied.sum().clamp_min(1))
-        selected_score = state["score"] * applied
-        self.last_private_conflict_energy_overlap.copy_((selected_score * plastic).sum() /
-                                                       selected_score.sum().clamp_min(1e-12))
-        self.last_private_conflict_gate_suppression.fill_(self._delta_stats(p, p * gate)["suppressed_ratio"])
-        logging.info("ComposedConflict %s", json.dumps(dict(
-            task=int(task), layer=int(self.layer_idx), mode=self.dual_mask_composed_conflict,
-            reference_k=state["reference_k"], selected_k=int(selected.sum()),
-            density=float(selected.mean()), qkv_density=[float(part.mean()) for part in selected.chunk(3)],
-            net_norm=float(net.norm()), gross_norm=float((s.abs() + p.abs()).norm()),
-            net_to_gross_norm=float(net.norm() / (s.abs() + p.abs()).norm().clamp_min(1e-12)),
-            removed_ratio=removed_ratio, independent_removed_ratio=float((net - original).norm() / net.norm().clamp_min(1e-12)),
-            independent_amplified_coordinates=int(amplification.sum()), independent_reversed_coordinates=int(reversal.sum()),
-            active_coordinates=int(active.sum()), shared_amplified_coordinates=int((safe.abs() > net.abs() + tolerance).sum()),
-            shared_reversed_coordinates=int(((safe * net < 0) & active).sum()),
-            branch_sum_error=float((s * gate + p * gate - safe).abs().max()),
-        )))
+                delta = torch.stack(deltas).sum(dim=0)
+                self.qkv.weight.add_(delta.to(self.qkv.weight))
+        self.S_lora[task] = None
+        self.P_lora[task] = None

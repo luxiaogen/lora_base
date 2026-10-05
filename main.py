@@ -1,73 +1,30 @@
-import json
 import argparse
+import json
 from trainer import train
+
 
 def apply_overrides(config, overrides):
     for item in overrides or []:
-        if "=" not in item:
-            raise ValueError("Override must use KEY=VALUE: {}".format(item))
         key, value = item.split("=", 1)
-        key = key.strip()
-        if not key:
-            raise ValueError("Override key cannot be empty")
+        if key not in config:
+            raise ValueError(f"Unknown baseline setting: {key}")
         try:
             value = json.loads(value)
         except json.JSONDecodeError:
             pass
         config[key] = value
-    return config
+
 
 def main():
-    # args = setup_parser().parse_args()
-
-    parser = setup_parser()
-    cli_args = parser.parse_args()
-
-    config = load_json(cli_args.config)
-    apply_overrides(config, cli_args.overrides)
-
-    args = vars(cli_args)
-    args.update(config)
+    parser = argparse.ArgumentParser(description="Pure DualMask baseline")
+    parser.add_argument("--config", default="exps/dlora/imgr10.json")
+    parser.add_argument("--set", dest="overrides", action="append", metavar="KEY=VALUE")
+    cli = parser.parse_args()
+    with open(cli.config, encoding="utf-8") as handle:
+        config = json.load(handle)
+    apply_overrides(config, cli.overrides)
+    train(config)
 
 
-    # args = vars(args)  # Converting argparse Namespace to a dict.
-    # args.update(param)  # Add parameters from json
-    train(args)
-
-
-def load_json(settings_path):
-    with open(settings_path) as data_file:
-        param = json.load(data_file)
-
-    return param
-
-
-def setup_parser():
-    parser = argparse.ArgumentParser(description='Reproduce of multiple continual learning algorthms.')
-    parser.add_argument('--config', type=str, default='exps/dlora/cub10.json',
-                       help='Json file of settings.')
-    # parser.add_argument('--config', type=str, default='exps/dlora/imga10.json',
-    #                     help='Json file of settings.')
-    # parser.add_argument('--config', type=str, default='exps/dlora/cub10.json',
-    #                     help='Json file of settings.')
-    # parser.add_argument('--config', type=str, default='exps/dlora/cifar10.json',
-    #                     help='Json file of settings.')
-    # parser.add_argument('--config', type=str, default='exps/dlora/domainnet.json',
-    #                     help='Json file of settings.')
-
-    # parser.add_argument('--device', type=str, default='2')
-
-    parser.add_argument(
-        "--set",
-        dest="overrides",
-        action="append",
-        default=[],
-        metavar="KEY=VALUE",
-        help="Override a JSON setting; may be repeated.",
-    )
-
-    return parser
-
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

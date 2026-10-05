@@ -1,659 +1,71 @@
+"""DualMask learner: current-task training, gated merge, Gaussian classifier alignment."""
+import logging
+from contextlib import ExitStack
+
+import numpy as np
 import torch
 from torch import optim
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
-
-import copy
-import logging
-import random
-import numpy as np
+from torch.distributions.multivariate_normal import MultivariateNormal
 from tqdm import tqdm
 
 from methods.base import BaseLearner
-from utils.toolkit import tensor2numpy
 from models.network import MANet
 from models.attention import Attention_LoRA
-
-from utils.schedulers import CosineSchedule
-from torch.distributions.multivariate_normal import MultivariateNormal
-from utils.toolkit import count_parameters
-from models.losses import AngularPenaltySMLoss, representation_steering_loss
-from contextlib import ExitStack
-from utils.task0_repro import tensor_hash, model_fingerprint, log_record, log_environment
-from utils.task0_validation import evaluate_task0_holdout
-from utils.dualmask_core_audit import stage_cost
-from utils.dual_mask_budget import (
-    select_global_budget_masks,
-    select_projection_budget_masks,
-    select_mixed_budget_masks,
-)
-
-
-@torch.no_grad()
-def _apply_epoch_average(params, running_sums, count):
-    raw_sq = sum(param.detach().float().square().sum().item() for param in params)
-    shift_sq = sum((param.detach().float() - running_sum.float() / count).square().sum().item()
-                   for param, running_sum in zip(params, running_sums))
-    for param, running_sum in zip(params, running_sums):
-        param.copy_(running_sum / count)
-    return (shift_sq / max(raw_sq, 1e-12)) ** 0.5
+from models.losses import AngularPenaltySMLoss
+from utils.toolkit import tensor2numpy
+from utils.dual_mask_metrics import split_prototype_competence, split_prototype_ncm_diagnostics
+from utils.reproducibility import advance_loader_rng
 
 
 class Learner(BaseLearner):
-    @staticmethod
-    def _selective_functional_anchor_loss(current_features,w0_features,targets,prototypes,min_margin,tolerance,):
-        current_features = F.normalize(current_features, dim=1)
-        w0_features = F.normalize(w0_features.detach(), dim=1)
-        prototypes = F.normalize(prototypes.detach(), dim=1)
-
-        current_scores = current_features @ prototypes.t()
-        w0_scores = w0_features @ prototypes.t()
-        class_mask = F.one_hot(targets,num_classes=prototypes.shape[0],).bool()
-
-        current_positive = current_scores.gather(1, targets[:, None]).squeeze(1)
-        current_negative = current_scores.masked_fill(class_mask,float("-inf"),).max(dim=1).values
-
-        w0_positive = w0_scores.gather(1, targets[:, None]).squeeze(1)
-        w0_negative = w0_scores.masked_fill(class_mask,float("-inf"),).max(dim=1).values
-
-        current_margin = current_positive - current_negative
-        w0_margin = w0_positive - w0_negative
-        selected = (w0_scores.argmax(dim=1) == targets) & (w0_margin >= float(min_margin))
-
-        violation = F.relu(w0_margin.detach() - float(tolerance) - current_margin)
-
-        selected_ratio = selected.float().mean()
-        if selected.any():
-            selected_violation = violation[selected]
-            weights = w0_margin[selected].detach().clamp_min(0.0)
-            loss = (weights * selected_violation.square()).sum() / weights.sum().clamp_min(torch.finfo(weights.dtype).eps)
-            violation_ratio = (selected_violation > 0).float().mean()
-        else:
-            loss = current_features.sum() * 0.0
-            violation_ratio = selected_ratio
-
-        return loss, {
-            "selected_ratio": selected_ratio.detach(),
-            "violation_ratio": violation_ratio.detach(),
-        }
-
-    def _training_margin(self):
-        if self._cur_task == 0:
-            return float(self.args.get('task0_margin', self.margin))
-        return self.margin
-
     def __init__(self, args):
         super().__init__(args)
-
-        self._network = MANet(args)
-        for module in self._network.modules():
-            if isinstance(module, Attention_LoRA):
-                module._init_params(args)
-
-
         self.args = args
-        self.optim = args["optim"]  # sgd
-        self.init_epoch = args["init_epoch"]  # 20
+        self._network = MANet(args)
+        for layer_idx, module in enumerate(self._iter_lora_modules()):
+            module._init_params(args)
+            module.layer_idx = layer_idx
+        self.init_epoch = args["init_epoch"]
         self.init_lr = args["init_lr"]
         self.init_weight_decay = args["init_weight_decay"]
-        self.epochs = args["epochs"]  # 20
+        self.epochs = args["epochs"]
         self.lrate = args["lrate"]
         self.batch_size = args["batch_size"]
         self.weight_decay = args["weight_decay"]
         self.num_workers = args["num_workers"]
         self.scale = args["scale"]
-        self.margin = args["margin"]  # 分类损失函数 CosFace（Large Margin Cosine Loss）中的“角度边距 / 余弦裕度”（Cosine Margin）超参数
-
-        self.total_sessions = args["total_sessions"]  # 任务数
-        self.total_classnum = self.args["init_cls"] + self.args["increment"] * (self.total_sessions - 1)
-        self.dataset = args["dataset"]
-        self.logit_norm = args["logit_norm"]  # 用于CA
-        if self.logit_norm == "none":
-            self.logit_norm = None
-        self.topk = 1  # origin is 5
+        self.margin = args["margin"]
+        self.total_sessions = args["total_sessions"]
+        self.logit_norm = args["logit_norm"]
         self.class_num = self._network.class_num
         self.task_sizes = []
-
-        # class prototypes
         self._class_means = None
         self._class_covs = None
-
-        self.acc_matrix = np.zeros((self.total_sessions, self.total_sessions))
-
         self._w0_class_means = {}
-        self._ridge_fusion = None
-        self._ridge_fusion_ready = False
-        self._wpre_readout = None
-        self._w0_competence = 0.0
-
-        self._w0_competence_new = None
-        self._w0_competence_all_seen = None
-        self._w0_old_overlap_risk = None
-
-        self._w0_ncm_loss_new = None
-        self._w0_plasticity_demand = None
-
-        self._w0_control_competence = None
-
-        self._w0_accuracy_curve = []
-        self._feature_drift_curve = []
-        self._weight_drift_curve = []
-
-        self._functional_merge_calibration = None
-
-        self._task0_holdout_loss_curve = []
-        self._task0_holdout_accuracy_curve = []
-        self._task0_holdout_class_margin_curve = []
-
-        for layer_idx, module in enumerate(self._iter_lora_modules()):
-            module.layer_idx = layer_idx
+        self.acc_matrix = np.zeros((self.total_sessions, self.total_sessions))
 
     def _iter_lora_modules(self):
         for module in self._network.modules():
             if isinstance(module, Attention_LoRA):
                 yield module
 
-    def _global_conflict_enabled(self):
-        return str(self.args.get("dual_mask_conflict_granularity", "layer")).lower() in {
-            "model",
-            "projection",
-            "mixed",
-        }
-
-    @torch.no_grad()
-    def _refresh_global_conflict_masks(self, log_summary=False):
+    def _extra_training_loss(self):
         modules = list(self._iter_lora_modules())
-        if not modules or self._cur_task <= 0:
-            return
+        losses = []
+        for module in modules:
+            losses.append(module._joint_conflict_regularization(
+                module.S_lora[self._cur_task], isolated=False))
+            if self._cur_task > 0:
+                losses.append(module._joint_conflict_regularization(
+                    module.P_lora[self._cur_task], isolated=True))
+        weighted = [float(self.args["dual_mask_reg_weight"]) * torch.stack(losses).mean()]
+        if self._cur_task == 0:
+            anchor = torch.stack([module.anchor_regularization() for module in modules]).mean()
+            weighted.append(float(self.args["dual_mask_anchor_reg_weight"]) * anchor)
+        return torch.stack(weighted).sum()
 
-        granularity = str(
-            self.args.get("dual_mask_conflict_granularity", "layer")
-        ).lower()
-
-        branch_masks = {}
-        branch_stats = {}
-        for branch, isolated in (("S", False), ("P", True)):
-            candidates = [module.global_conflict_candidate(self._cur_task, isolated) for module in modules]
-            if any(candidate is None for candidate in candidates):
-                branch_masks[branch] = [torch.zeros_like(module.qkv.weight) for module in modules]
-                branch_stats[branch] = {
-                    "local_budget": 0,
-                    "global_budget": 0,
-                    "layer_densities": [0.0 for _ in modules],
-                    "projection_reference_budgets": [0, 0, 0],
-                    "projection_budgets": [0, 0, 0],
-                    "projection_densities": [0.0, 0.0, 0.0],
-                    "layer_projection_densities": [
-                        [0.0, 0.0, 0.0] for _ in modules
-                    ],
-                    "mask_jaccard": 0.0,
-                }
-                continue
-            scores = [candidate[0] for candidate in candidates]
-            local_masks = [candidate[1] for candidate in candidates]
-            valid_masks = [candidate[2] for candidate in candidates]
-            if granularity == "mixed":
-                global_masks = select_mixed_budget_masks(
-                    scores, local_masks, valid_masks,
-                    float(self.args.get("dual_mask_conflict_local_fraction", 0.5)),
-                )
-            elif granularity == "projection":
-                global_masks = select_projection_budget_masks(
-                    scores,
-                    local_masks,
-                    valid_masks,
-                )
-            else:
-                global_masks = select_global_budget_masks(
-                    scores,
-                    local_masks,
-                    valid_masks,
-                )
-            local_budget = sum(int(mask.bool().sum().item()) for mask in local_masks)
-            global_budget = sum(int(mask.bool().sum().item()) for mask in global_masks)
-            if global_budget != local_budget:
-                raise RuntimeError(
-                    f"Global conflict budget mismatch for {branch}: "
-                    f"expected {local_budget}, selected {global_budget}"
-                )
-            branch_masks[branch] = global_masks
-            intersection = sum(
-                int((local.bool() & selected.bool()).sum().item())
-                for local, selected in zip(local_masks, global_masks)
-            )
-            union = sum(
-                int((local.bool() | selected.bool()).sum().item())
-                for local, selected in zip(local_masks, global_masks)
-            )
-            projection_reference_budgets = []
-            projection_budgets = []
-            projection_densities = []
-            for projection in range(3):
-                reference = sum(
-                    int(mask.chunk(3, dim=0)[projection].bool().sum().item())
-                    for mask in local_masks
-                )
-                selected = sum(
-                    int(mask.chunk(3, dim=0)[projection].bool().sum().item())
-                    for mask in global_masks
-                )
-                if granularity == "projection" and selected != reference:
-                    raise RuntimeError(
-                        f"Projection conflict budget mismatch for {branch}/{projection}: "
-                        f"expected {reference}, selected {selected}"
-                    )
-                coordinates = sum(
-                    mask.chunk(3, dim=0)[projection].numel()
-                    for mask in global_masks
-                )
-                projection_reference_budgets.append(reference)
-                projection_budgets.append(selected)
-                projection_densities.append(selected / max(coordinates, 1))
-            branch_stats[branch] = {
-                "local_budget": local_budget,
-                "global_budget": global_budget,
-                "layer_densities": [
-                    float(mask.float().mean().item()) for mask in global_masks
-                ],
-                "projection_reference_budgets": projection_reference_budgets,
-                "projection_budgets": projection_budgets,
-                "projection_densities": projection_densities,
-                "layer_projection_densities": [
-                    [
-                        float(part.float().mean().item())
-                        for part in mask.chunk(3, dim=0)
-                    ]
-                    for mask in global_masks
-                ],
-                "mask_jaccard": intersection / max(union, 1),
-            }
-
-        for index, module in enumerate(modules):
-            module.set_global_conflict_masks(
-                branch_masks["S"][index],
-                branch_masks["P"][index],
-            )
-
-        if log_summary:
-            for branch in ("S", "P"):
-                stats = branch_stats[branch]
-                logging.info(
-                    "Task %s global conflict budget granularity=%s branch=%s "
-                    "local_reference_budget=%s global_budget=%s "
-                    "layer_densities=%s projection_reference_budgets=%s "
-                    "projection_budgets=%s projection_densities=%s "
-                    "layer_projection_densities=%s mask_jaccard=%.6f",
-                    self._cur_task,
-                    granularity,
-                    branch,
-                    stats["local_budget"],
-                    stats["global_budget"],
-                    [round(value, 6) for value in stats["layer_densities"]],
-                    stats["projection_reference_budgets"],
-                    stats["projection_budgets"],
-                    [round(value, 6) for value in stats["projection_densities"]],
-                    [
-                        [round(value, 6) for value in row]
-                        for row in stats["layer_projection_densities"]
-                    ],
-                    stats["mask_jaccard"],
-                )
-
-    def _extra_training_context(self, inputs, targets, epoch):
-        if self._cur_task > 0 and float(self.args.get('wpre_distill_weight', 0.0)) > 0:
-            from utils.wpre_distill import teacher_features
-            return {'wpre_teacher_features': teacher_features(
-                self._network, inputs, self._pretrained_anchor_context())}
-        enabled = bool(self.args.get("dual_mask_selective_anchor_enabled", False))
-        weight = float(self.args.get("dual_mask_selective_anchor_weight", 0.0))
-        start_epoch = int(self.args.get("dual_mask_selective_anchor_start_epoch", 0))
-        if (not enabled or weight <= 0.0 or self._cur_task != 0 or int(epoch) < start_epoch):
-            return {}
-
-        was_training = self._network.training
-        self._network.eval()
-        try:
-            with self._pretrained_anchor_context(), torch.no_grad():
-                w0_features = self._network(inputs)["features"].detach()
-        finally:
-            self._network.train(was_training)
-        return {"selective_anchor_w0_features": w0_features}
-
-    def _extra_training_loss(self,output=None,inputs=None,targets=None,epoch=None,batch_context=None,):
-        reg_weight = float(self.args.get("dual_mask_reg_weight", 0.1)) # 0.01
-
-        anchor_enabled = bool(self.args.get("dual_mask_anchor_reg_enabled", True))
-        anchor_weight = float(self.args.get("dual_mask_anchor_reg_weight", 0.0))
-
-        anchor_task0_only = bool(self.args.get("dual_mask_anchor_reg_task0_only", False))
-        anchor_applies = (anchor_enabled and anchor_weight > 0.0 and (not anchor_task0_only or self._cur_task == 0))
-        rs_weight = float(self.args.get('task0_rs_weight', 0.0))
-        rs_applies = self._cur_task == 0 and rs_weight > 0.0
-
-        safe_residual_enabled = bool(self.args.get("dual_mask_safe_residual_enabled", False))
-        safe_residual_weight = float(self.args.get("dual_mask_safe_residual_weight", 0.0))
-        safe_residual_applies = (safe_residual_enabled and safe_residual_weight > 0.0)
-
-        selective_anchor_enabled = bool(self.args.get("dual_mask_selective_anchor_enabled", False))
-        selective_anchor_weight = float(self.args.get("dual_mask_selective_anchor_weight", 0.0))
-        selective_anchor_start_epoch = int(self.args.get("dual_mask_selective_anchor_start_epoch", 0))
-        selective_anchor_ramp_epochs = max(1,int(self.args.get("dual_mask_selective_anchor_ramp_epochs", 1)),)
-
-        current_epoch = 0 if epoch is None else int(epoch)
-        if current_epoch < selective_anchor_start_epoch:
-            selective_anchor_ramp = 0.0
-        else:
-            selective_anchor_ramp = min(1.0,(current_epoch - selective_anchor_start_epoch + 1) / selective_anchor_ramp_epochs,)
-        selective_anchor_applies = (
-            selective_anchor_enabled
-            and selective_anchor_weight > 0.0
-            and self._cur_task == 0
-            and selective_anchor_ramp > 0.0
-        )
-
-        self._last_training_loss_metrics = {}
-        self._sampled_weighted_mask_reg = None
-        if (reg_weight <= 0.0
-                and not anchor_applies and not rs_applies
-                and not safe_residual_applies and not selective_anchor_applies):
-            return None
-
-        modules = [
-            module
-            for module in self._iter_lora_modules()
-            if self._cur_task >= 0 and module.S_lora[self._cur_task] is not None
-        ]
-        weighted_losses = []
-
-        if reg_weight > 0.0:
-            conflict_losses = []
-            for module in modules:
-                task = self._cur_task
-                if self.args.get("use_slora", True):
-                    branch_loss = module._joint_conflict_regularization(module.S_lora[task],isolated=False,)
-                    if not self.args.get('dual_mask_s_reg_enabled', True):
-                        branch_loss = branch_loss * 0.0
-                    conflict_losses.append(branch_loss)
-                if (task > 0 and self.args.get("use_plora", True) and hasattr(module, "P_lora") and module.P_lora[task] is not None):
-                    branch_loss = module._joint_conflict_regularization(module.P_lora[task],isolated=True,)
-                    if not self.args.get('dual_mask_p_reg_enabled', True):
-                        branch_loss = branch_loss * 0.0
-                    conflict_losses.append(branch_loss)
-            if conflict_losses:
-                weighted_mask_reg = reg_weight * torch.stack(conflict_losses).mean()
-                weighted_losses.append(weighted_mask_reg)
-                if getattr(self, '_sample_mask_reg_grad', False):
-                    self._sampled_weighted_mask_reg = weighted_mask_reg
-
-        if anchor_applies and modules:
-            anchor_regularization = torch.stack([module.anchor_regularization() for module in modules]).mean()
-            weighted_anchor = anchor_weight * anchor_regularization
-            weighted_losses.append(weighted_anchor)
-            self._last_training_loss_metrics.update({"anchor_reg": anchor_regularization.detach(),"anchor_reg_weighted": weighted_anchor.detach(),})
-        if rs_applies:
-            rs_loss = representation_steering_loss(output['features'], targets)
-            ramp = min(1.0, current_epoch / 4.0)
-            weighted_rs = rs_weight * ramp * rs_loss
-            weighted_losses.append(weighted_rs)
-            self._last_training_loss_metrics.update({
-                'task0_rs': rs_loss.detach(),
-                'task0_rs_weighted': weighted_rs.detach(),
-            })
-        if safe_residual_applies and modules:
-          safe_residual_losses = [
-              module.safe_residual_regularization()
-              for module in modules
-          ]
-          safe_residual_losses = [loss for loss in safe_residual_losses if loss is not None]
-          if safe_residual_losses:
-              safe_residual = torch.stack(safe_residual_losses).mean()
-              weighted_safe_residual = (safe_residual_weight * safe_residual)
-              weighted_losses.append(weighted_safe_residual)
-              self._last_training_loss_metrics.update({
-                  "safe_residual": safe_residual.detach(),
-                  "safe_residual_weighted": weighted_safe_residual.detach(),
-              })
-        if selective_anchor_applies:
-            w0_features = batch_context.get("selective_anchor_w0_features")
-            prototype_ids = sorted(self._w0_class_means)
-            current_features = output["features"]
-            prototypes = torch.stack([self._w0_class_means[class_id] for class_id in prototype_ids]).to(device=current_features.device, dtype=current_features.dtype)
-            selective_anchor, selective_metrics = (
-                self._selective_functional_anchor_loss(current_features,w0_features,targets,prototypes,
-                    min_margin=float(self.args.get("dual_mask_selective_anchor_min_margin",0.05,)),
-                    tolerance=float(self.args.get("dual_mask_selective_anchor_tolerance",0.05,)),
-                )
-            )
-            weighted_selective_anchor = (selective_anchor_weight * selective_anchor_ramp * selective_anchor)
-            weighted_losses.append(weighted_selective_anchor)
-            self._last_training_loss_metrics.update({
-                "selective_anchor": selective_anchor.detach(),
-                "selective_anchor_weighted": (weighted_selective_anchor.detach()),
-                "selective_anchor_selected_ratio": (selective_metrics["selected_ratio"]),
-                "selective_anchor_violation_ratio": (selective_metrics["violation_ratio"]),
-                "selective_anchor_ramp": current_features.new_tensor(selective_anchor_ramp),
-            })
-
-
-
-        if not weighted_losses:
-            return None
-        return torch.stack(weighted_losses).sum()
-
-    def _log_mask_reg_gradients(self, task_loss, epoch, batch):
-        """Read-only gradients of classification and the applied mask penalty on B."""
-        weighted_reg = self._sampled_weighted_mask_reg
-        for branch, attribute in (('S', 'S_lora'), ('P', 'P_lora')):
-            params = []
-            for module in self._iter_lora_modules():
-                unit = getattr(module, attribute)[self._cur_task]
-                if unit is not None and unit.B_weight.requires_grad:
-                    params.append(unit.B_weight)
-            if not params:
-                continue
-            task_grads = torch.autograd.grad(task_loss, params, retain_graph=True, allow_unused=True)
-            reg_grads = (torch.autograd.grad(weighted_reg, params, retain_graph=True, allow_unused=True)
-                         if weighted_reg is not None else (None,) * len(params))
-            task_sq, reg_sq, dot = task_loss.new_zeros(()), task_loss.new_zeros(()), task_loss.new_zeros(())
-            for task_grad, reg_grad in zip(task_grads, reg_grads):
-                if task_grad is not None:
-                    task_sq = task_sq + task_grad.detach().float().square().sum()
-                if reg_grad is not None:
-                    reg_sq = reg_sq + reg_grad.detach().float().square().sum()
-                if task_grad is not None and reg_grad is not None:
-                    dot = dot + (task_grad.detach().float() * reg_grad.detach().float()).sum()
-            task_norm, reg_norm = float(task_sq.sqrt()), float(reg_sq.sqrt())
-            logging.info('MaskRegGrad %s', {
-                'task': self._cur_task, 'epoch': epoch + 1, 'batch': batch + 1, 'branch': branch,
-                'reg_weight': float(self.args.get('dual_mask_reg_weight', 0.1)),
-                'task_grad_norm': task_norm, 'weighted_reg_grad_norm': reg_norm,
-                'reg_to_task_ratio': reg_norm / task_norm if task_norm > 0 else None,
-                'cosine': float(dot) / (task_norm * reg_norm) if task_norm > 0 and reg_norm > 0 else None,
-                'weighted_reg_loss': float(weighted_reg.detach()) if weighted_reg is not None else 0.0,
-            })
-        self._sampled_weighted_mask_reg = None
-
-    def _old_competition_term(self, output, targets):
-        weight = float(self.args.get('old_competition_weight', 0.0))
-        if self._cur_task == 0 or weight == 0:
-            return None, {}
-        from utils.old_competition import old_competition_loss
-        network = self._network.module if isinstance(self._network, torch.nn.DataParallel) else self._network
-        old_weights = torch.cat([head.weight.detach() for head in network.classifier_pool[:self._cur_task]])
-        raw, active = old_competition_loss(output['features'], output['logits'], targets,
-                                          old_weights, float(self.args['scale']),
-                                          detach_old=self.args.get('old_competition_detach_old', False))
-        weighted = weight * raw
-        return weighted, {'old_competition_scaled_hinge': raw.detach(),
-                          'old_competition_weighted': weighted.detach(),
-                          'old_competition_active': active}
-
-    def _old_model_distillation_term(self, output, inputs):
-        teacher = getattr(self, '_old_teacher', None)
-        if teacher is None:
-            return None, {}
-        from utils.old_model_distillation import old_output_loss
-        network = self._network.module if isinstance(self._network, torch.nn.DataParallel) else self._network
-        with torch.no_grad():
-            teacher_cosines = teacher.interface(inputs)
-        weights = torch.cat([head.weight.detach() for head in network.classifier_pool[:self._cur_task]])
-        raw = old_output_loss(output['features'], weights, teacher_cosines, self.scale,
-                              float(self.args.get('old_model_distill_temperature', 2.0)))
-        weighted = float(self.args.get('old_model_distill_weight', 0.0)) * raw
-        return weighted, {'old_model_distill': raw.detach(),
-                          'old_model_distill_weighted': weighted.detach()}
-
-    def _prepare_head_balance(self):
-        self._head_balance_pool = None
-        if self._cur_task == 0 or float(self.args.get('head_balance_weight', 0.0)) == 0:
-            return
-        from utils.head_balance import sample_old_feature_pool
-        self._head_balance_generator = torch.Generator().manual_seed(
-            torch.initial_seed() + 10007 * self._cur_task)
-        self._head_balance_pool = sample_old_feature_pool(
-            self._class_means[:self._known_classes], self._class_covs[:self._known_classes],
-            self.task_sizes, self._cur_task, self._device, self._head_balance_generator)
-        logging.info('HeadBalance task=%s weight=%s old_classes=%s pool_per_class=256 '
-                     'auxiliary_target=current_head_only; backbone/old_heads detached',
-                     self._cur_task, self.args['head_balance_weight'], self._known_classes)
-
-    def _head_balance_term(self, output, targets):
-        weight = float(self.args.get('head_balance_weight', 0.0))
-        if self._cur_task == 0 or weight == 0:
-            return None, {}
-        from utils.head_balance import head_balance_loss
-        network = self._network.module if isinstance(self._network, torch.nn.DataParallel) else self._network
-        indices = torch.randint(256, (self._known_classes,), generator=self._head_balance_generator)
-        old_features = self._head_balance_pool[torch.arange(self._known_classes), indices].to(output['features'].device)
-        old_weights = torch.cat([head.weight.detach() for head in network.classifier_pool[:self._cur_task]])
-        loss, metrics = head_balance_loss(output['features'], targets, old_features, old_weights,
-                                          network.classifier_pool[self._cur_task].weight, float(self.args['scale']))
-        weighted = weight * loss
-        metrics['head_balance_weighted'] = weighted.detach()
-        return weighted, metrics
-
-    def _backward_and_step(self, task_loss, extra_loss, optimizer, output, targets):
-        """Optimization extension point used by experimental learners."""
-        branch_context = getattr(self, '_branch_choice_context', None)
-        if branch_context is not None:
-            branch_snapshots = []
-            for module in self._iter_lora_modules():
-                for branch, units in (('S', module.S_lora), ('P', module.P_lora)):
-                    unit = units[self._cur_task]
-                    if unit is not None and unit.B_weight.requires_grad:
-                        branch_snapshots.append((branch, unit.B_weight, unit.B_weight.detach().clone()))
-        oracle_context = getattr(self, '_p_old_gradient_context', None)
-        if oracle_context is not None:
-            oracle_snapshots = [(module.P_lora[self._cur_task].B_weight,
-                                 module.P_lora[self._cur_task].B_weight.detach().clone())
-                                for module in self._iter_lora_modules()
-                                if module.P_lora[self._cur_task] is not None]
-        direction_context = getattr(self, '_p_step_context', None)
-        if direction_context is not None:
-            from utils.p_step_direction import prepare_step, finish_step
-            snapshots = prepare_step(self._iter_lora_modules(), task_loss)
-        loss = task_loss if extra_loss is None else task_loss + extra_loss
-        self._last_wpre_distill_metrics = {}
-        wpre_grads, wpre_params, weighted_wpre = (), [], None
-        wpre_weight = float(getattr(self, 'args', {}).get('wpre_distill_weight', 0.0))
-        if wpre_weight > 0 and self._cur_task > 0:
-            from utils.wpre_distill import selective_feature_loss, log_s_gradients, all_seen_logits
-            scope = self.args.get('wpre_distill_scope', 's')
-            branches = ('S_lora', 'P_lora') if scope == 'sp' else (scope.upper() + '_lora',)
-            for module in self._iter_lora_modules():
-                for attribute in branches:
-                    unit = getattr(module, attribute)[self._cur_task]
-                    if unit is not None and unit.B_weight.requires_grad:
-                        wpre_params.append(unit.B_weight)
-            selection = self.args.get('wpre_distill_selection', 'teacher_correct')
-            normalization = self.args.get('wpre_distill_normalization', 'selected')
-            student_logits, generator = None, None
-            if selection != 'teacher_correct' or normalization == 'batch':
-                network = self._network.module if isinstance(self._network, torch.nn.DataParallel) else self._network
-                student_logits = all_seen_logits(output['features'], network.classifier_pool[:network.numtask])
-            if selection == 'random_matched':
-                if getattr(self, '_wpre_random_task', None) != self._cur_task:
-                    self._wpre_random_task = self._cur_task
-                    self._wpre_selection_generator = torch.Generator().manual_seed(
-                        int(self.args['seed']) + 10007 * self._cur_task)
-                generator = self._wpre_selection_generator
-            raw_wpre, metrics = selective_feature_loss(
-                output['features'], output['wpre_teacher_features'], self._wpre_ridge_weight,
-                targets + self._known_classes, selection=selection, student_logits=student_logits,
-                normalization=normalization, generator=generator)
-            weighted_wpre = wpre_weight * raw_wpre
-            self._last_wpre_distill_metrics = dict(metrics, wpre_weighted=weighted_wpre.detach())
-            wpre_grads = torch.autograd.grad(weighted_wpre, wpre_params,
-                                              retain_graph=True, allow_unused=True)
-            diagnostic = getattr(self, '_wpre_distill_diagnostic', None)
-            if diagnostic is not None:
-                log_s_gradients(task_loss, wpre_params, wpre_grads,
-                                self._cur_task, *diagnostic, scope=scope)
-        self._last_pair_separation_metrics = {}
-        pair_weight = float(getattr(self, 'args', {}).get('pair_separation_weight', 0.0))
-        pair_grads, named_params = (), []
-        weighted_pair = None
-        if pair_weight > 0 and self._cur_task > 0:
-            from utils.pair_separation import pair_separation_loss, log_pair_gradients
-            scope = self.args.get('pair_separation_scope', 'p')
-            for module in self._iter_lora_modules():
-                branches = (('P', 'P_lora'),) if scope == 'p' else (('S', 'S_lora'), ('P', 'P_lora'))
-                for branch, attribute in branches:
-                    unit = getattr(module, attribute)[self._cur_task]
-                    if unit is not None and unit.B_weight.requires_grad:
-                        named_params.append((branch, unit.B_weight))
-            raw_pair, metrics = pair_separation_loss(
-                output['features'], targets, float(self.args.get('pair_separation_margin', .1)))
-            weighted_pair = pair_weight * raw_pair
-            self._last_pair_separation_metrics = dict(metrics, pair_weighted=weighted_pair.detach())
-            pair_grads = torch.autograd.grad(weighted_pair, [p for _, p in named_params],
-                                             retain_graph=True, allow_unused=True)
-            diagnostic = getattr(self, '_pair_separation_diagnostic', None)
-            if diagnostic is not None:
-                epoch, batch = diagnostic
-                log_pair_gradients(task_loss, named_params, pair_grads,
-                                   self._cur_task, epoch, batch, scope)
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        # The ordinary loss still updates all original trainable parameters.
-        # Add only the auxiliary gradients requested by the experimental scope.
-        with torch.no_grad():
-            for param, grad in zip(wpre_params, wpre_grads):
-                if grad is not None:
-                    if param.grad is None:
-                        param.grad = grad.detach().clone()
-                    else:
-                        param.grad.add_(grad)
-            for (_, param), grad in zip(named_params, pair_grads):
-                if grad is not None:
-                    if param.grad is None:
-                        param.grad = grad.detach().clone()
-                    else:
-                        param.grad.add_(grad)
-        optimizer.step()
-        if branch_context is not None:
-            epoch, batch, inputs = branch_context
-            self._branch_choice.step(self._network, branch_snapshots, inputs, targets,
-                                     self.scale, self._cur_task, epoch, batch)
-        if oracle_context is not None:
-            epoch, batch, inputs, loss_function = oracle_context
-            self._p_old_gradient_oracle.step(self._network, oracle_snapshots, inputs, targets,
-                                             loss_function, self.scale, self._cur_task, epoch, batch)
-        if direction_context is not None:
-            mode, epoch, batch, detailed = direction_context
-            probe_records = [] if detailed else None
-            counts = finish_step(snapshots, mode, epoch, batch, detailed, probe_records)
-            if detailed:
-                from utils.p_step_direction import probe_directions
-                inputs, loss_function = self._p_step_probe
-                metrics = probe_directions(self._network, probe_records, inputs, targets, loss_function)
-                logging.info('PStepProbe %s', dict(task=self._cur_task, epoch=epoch + 1,
-                             batch=batch + 1, mode=mode, training_batch=True, metrics=metrics))
-            for key, value in counts.items():
-                self._p_step_counts[key] = self._p_step_counts.get(key, 0) + value
-        reported_loss = loss if weighted_pair is None else loss.detach() + weighted_pair.detach()
-        return reported_loss if weighted_wpre is None else reported_loss.detach() + weighted_wpre.detach()
-    # 临时把所有 LoRA Attention 层切回原始预训练权重 W_pre，提取一份不受增量学习影响的参考特征，使用完后再恢复当前模型
     def _pretrained_anchor_context(self):
         """Temporarily switch every LoRA attention layer to immutable W_pre."""
         stack = ExitStack()
@@ -669,10 +81,10 @@ class Learner(BaseLearner):
         context = (self._pretrained_anchor_context() if use_pretrained_anchor else ExitStack())
         with context, torch.no_grad():
             for batch_indices, inputs, batch_targets in loader:
-                vectors = self._network.extract_vector(inputs.to(self._device))  # 图片 → ViT / W_pre → 768 维 feature
-                indices.append(batch_indices.detach().cpu())  # 样本编号
-                features.append(vectors.detach().cpu())  # W_pre 特征
-                targets.append(batch_targets.detach().cpu())  # 真实标签
+                vectors = self._network.extract_vector(inputs.to(self._device))
+                indices.append(batch_indices.detach().cpu())
+                features.append(vectors.detach().cpu())
+                targets.append(batch_targets.detach().cpu())
         if was_training:
             self._network.train()
         return torch.cat(indices), torch.cat(features), torch.cat(targets)
@@ -680,1032 +92,125 @@ class Learner(BaseLearner):
     def _collect_anchor_features(self, loader):
         return self._collect_features(loader, use_pretrained_anchor=True)
 
-    def _calibrate_functional_merge(self, loader):
-        from utils.dual_mask_metrics import functional_merge_diagnostics, select_functional_merge_candidate
-
-        modules = list(self._iter_lora_modules())
-        if not modules:
-            return
-
-        tolerance = max(0.0,float(self.args.get("dual_mask_functional_merge_tolerance", 0.05)),)
-
-
-        base_beta = min(max(float(self.args.get("dual_mask_conflict_strength", 0.5)), 0.0),1.0,)
-        candidate_betas = sorted({0.0, base_beta})
-        _, anchor_features, _ = self._collect_anchor_features(loader)
-        old_prototypes = None
-        old_class_ids = None
-        if self._known_classes > 0:
-            old_class_ids = torch.arange(self._known_classes, dtype=torch.long)
-            old_prototypes = torch.stack([self._w0_class_means[int(class_id)] for class_id in old_class_ids])
-
-        candidates = []
-        for beta in candidate_betas:
-            for module in modules:
-                module.set_functional_merge_strength(beta)
-            indices, features, targets = self._collect_features(loader)
-            metrics = functional_merge_diagnostics(
-                anchor_features,
-                features,
-                targets,
-                indices,
-                holdout_mod=int(self.args.get("dual_mask_competence_holdout_mod", 5)),
-                scale=self.scale,
-                old_prototypes=old_prototypes,
-                old_class_ids=old_class_ids,
-            )
-            metrics["beta"] = beta
-            candidates.append(metrics)
-            logging.info(
-                "Task %s functional merge candidate: beta=%.3f, "
-                "current_acc=%.2f%%, current_loss=%.6f, "
-                "anchor_reference_loss=%.6f, anchor_candidate_loss=%.6f, "
-                "anchor_damage=%.6f, eligible=%s (tolerance=%.6f)",
-                self._cur_task,
-                beta,
-                metrics["current_accuracy"] * 100.0,
-                metrics["current_loss"],
-                metrics["anchor_reference_loss"],
-                metrics["anchor_candidate_loss"],
-                metrics["anchor_damage"],
-                metrics["anchor_damage"] <= tolerance,
-                tolerance,
-            )
-
-        selected = select_functional_merge_candidate(candidates, tolerance)
-        for module in modules:
-            module.set_functional_merge_strength(selected["beta"])
-        self._functional_merge_calibration = {
-            "selected_beta": selected["beta"],
-            "selected_current_accuracy": selected["current_accuracy"],
-            "selected_current_loss": selected["current_loss"],
-            "selected_anchor_damage": selected["anchor_damage"],
-        }
-        for candidate in candidates:
-            candidate_name = "beta_{:03d}".format(int(round(candidate["beta"] * 100.0)))
-            self._functional_merge_calibration.update({
-                f"{candidate_name}_current_accuracy": candidate["current_accuracy"],
-                f"{candidate_name}_current_loss": candidate["current_loss"],
-                f"{candidate_name}_anchor_damage": candidate["anchor_damage"],
-            })
-        logging.info(
-            "Task %s functional merge selected beta=%.3f: "
-            "current_acc=%.2f%%, current_loss=%.6f, anchor_damage=%.6f",
-            self._cur_task,
-            selected["beta"],
-            selected["current_accuracy"] * 100.0,
-            selected["current_loss"],
-            selected["anchor_damage"],
-        )
-
-    # 测量 W_pre competence
     def _prepare_w0_prototypes(self, loader):
-        # from utils.dual_mask_metrics import split_prototype_competence
-        from utils.dual_mask_metrics import (split_prototype_competence,split_prototype_ncm_diagnostics,)
-
-        # 训练集中的特征
         indices, features, targets = self._collect_anchor_features(loader)
-
-        if float(self.args.get('wpre_distill_weight', 0.0)) > 0:
-            from utils.frozen_readout import FrozenReadout
-            if self._wpre_readout is None:
-                self._wpre_readout = FrozenReadout(features.shape[1], self.total_classnum)
-            self._wpre_readout.update(features, targets)
-            if self._cur_task > 0:
-                weight, regularizer = self._wpre_readout.ridge_weight(1., self._total_classes)
-                self._wpre_ridge_weight = weight.to(self._device)
-                logging.info('WpreDistillTeacher %s', dict(task=self._cur_task,
-                    source='current_train_only_additive_stats', current_samples=len(targets),
-                    accumulated_samples=self._wpre_readout.samples, seen_classes=self._total_classes,
-                    alpha=1., regularizer=regularizer, storage_bytes=self._wpre_readout.storage_bytes))
-
-        if self.args.get('ridge_fusion_enabled', False):
-            from utils.ridge_fusion import RidgeFusion
-            if self._ridge_fusion is None:
-                self._ridge_fusion = RidgeFusion(features.shape[1], self.total_classnum,
-                                                 self.class_num, self.total_sessions)
-            self._ridge_fusion.update(features, targets)
-
-        ## Kt 是否使用的是所有已见类的原型，还是仅使用当前任务的原型 --> 保护控制器选择  C_control = C_new × (1 - D_t)
-        use_all_seen_prototypes = bool(self.args.get("dual_mask_competence_all_seen", False))
-        ## accuracy : C = 正确分类的 holdout 样本数 / 总 holdout 样本数
-        competence_metric = str(self.args.get("dual_mask_competence_metric", "accuracy")).lower()
-        ## 是否启动 R_old来计算最终的冲突抑制强度
-        use_old_overlap_conflict = bool(self.args.get("dual_mask_conflict_old_overlap_adaptive", True))
-
-        
-
-        need_all_seen_competence = (use_all_seen_prototypes or use_old_overlap_conflict)
-
-        old_prototypes = None
-        old_class_ids = None
-        if need_all_seen_competence and self._known_classes > 0:
-            old_class_ids = torch.arange(self._known_classes,dtype=torch.long,)
-            old_prototypes = torch.stack([self._w0_class_means[int(class_id)] for class_id in old_class_ids])
-
-
-
-        # 使用当前任务训练样本构建类别原型，并做确定性 holdout  w0_competence_new--K_new
-        w0_competence_new, prototypes, class_ids = split_prototype_competence(
-            features, # 80% → 建立类别原型
-            targets, # 20% → 测试 W0 NCM 准确率
-            indices,
-            holdout_mod=int(self.args.get("dual_mask_competence_holdout_mod", 5)), # holdout_mod=5  → 约 20% 测试，80% 建原型
-            metric=competence_metric,
-        )
-
-        # 用于根据当前任务的学习难度 D_t，动态降低保护强度、扩大可塑空间
-        plasticity_adaptive = bool(self.args.get("dual_mask_plasticity_adaptive", True))
-        self._w0_ncm_loss_new = None
-        self._w0_plasticity_demand = None
-        if plasticity_adaptive:
-            (self._w0_ncm_loss_new,self._w0_plasticity_demand,) = split_prototype_ncm_diagnostics(
-                features,targets,indices,
-                holdout_mod=int(self.args.get("dual_mask_competence_holdout_mod", 5)),
-                scale=self.scale, # D_t: 当前 W_pre 的 NCM 损失，相对于随机分类损失有多大 | D_t = W_pre 当前任务损失 / 随机猜测损失
-            ) # D_t 小 → 保留较高 C_control → 保护更多 | D_t 大 → 降低 C_control     → 释放更多可塑空间
-
-        ## 责把任务级别的 C_new、C_all、D_t、R_old 转换成真正传给 12 层 Attention 的控制参数
-        w0_competence_all_seen = None
-        old_overlap_risk = None
-        if need_all_seen_competence:
-            w0_competence_all_seen, _, _ = split_prototype_competence(
-                features,targets,indices,
-                holdout_mod=int(self.args.get("dual_mask_competence_holdout_mod", 5)),
-                old_prototypes=old_prototypes,
-                old_class_ids=old_class_ids,
-                metric=competence_metric,
-            ) # 计算 C_new、C_all、D_t
-            old_overlap_risk = max(0.0, w0_competence_new - w0_competence_all_seen,) # 衡量当前新类加入旧类候选后，分类能力下降多少
-        w0_competence = (
-            w0_competence_new
-            if use_old_overlap_conflict
-            else (w0_competence_all_seen if use_all_seen_prototypes else w0_competence_new))
-
-
-        self._w0_competence = w0_competence
-
-        self._w0_competence_new = w0_competence_new # K_new
-        self._w0_competence_all_seen = w0_competence_all_seen # K_all
-        self._w0_old_overlap_risk = old_overlap_risk # R_old
-
+        holdout_mod = int(self.args["dual_mask_competence_holdout_mod"])
+        competence, prototypes, class_ids = split_prototype_competence(
+            features, targets, indices, holdout_mod=holdout_mod)
+        ncm_loss, demand = split_prototype_ncm_diagnostics(
+            features, targets, indices, holdout_mod=holdout_mod, scale=self.scale)
+        old_ids, old_prototypes = None, None
+        if self._known_classes > 0:
+            old_ids = torch.arange(self._known_classes, dtype=torch.long)
+            old_prototypes = torch.stack([self._w0_class_means[int(c)] for c in old_ids])
+        all_seen, _, _ = split_prototype_competence(
+            features, targets, indices, holdout_mod=holdout_mod,
+            old_prototypes=old_prototypes, old_class_ids=old_ids)
+        overlap = max(0.0, competence - all_seen)
         for prototype, class_id in zip(prototypes, class_ids):
             self._w0_class_means[int(class_id.item())] = prototype.cpu()
         for module in self._iter_lora_modules():
-            # 同一个任务中，12 层 Attention 使用的是完全相同的 task-level competence
-            module.set_pretrained_competence(w0_competence,self._w0_plasticity_demand or 0.0,)
-            module.set_pretrained_old_overlap_risk(old_overlap_risk or 0.0)
-
-        first_module = next(self._iter_lora_modules())
-        self._w0_control_competence = (first_module.pretrained_control_competence)
-
+            module.set_pretrained_competence(competence, demand)
+            module.set_pretrained_old_overlap_risk(overlap)
+        first = next(self._iter_lora_modules())
         logging.info(
-            # "Task %s W_pre train-only competence: %.2f%%, "
-            # "Task %s W_pre train-only competence: %.2f%%, candidate_scope=%s, "
-            "Task %s W_pre train-only competence: %.2f%%, metric=%s, candidate_scope=%s, "
-            "C_new=%.2f%%, C_all=%s, R_old=%s, "
-            "C_control=%.2f%%, D_t=%s, "
-            "importance_coverage=%.3f, "
-            "protect_strength=%.3f, private_rank=%s",
-            self._cur_task,
-            w0_competence * 100.0,
-            competence_metric,
-            # "all_seen" if use_all_seen_prototypes else "new_only",
-            "all_seen" if use_all_seen_prototypes and not use_old_overlap_conflict else "new_only",
-            w0_competence_new * 100.0,
-            "n/a" if w0_competence_all_seen is None else "{:.2f}%".format(w0_competence_all_seen * 100.0),
-            "n/a" if old_overlap_risk is None else "{:.2f}%".format(old_overlap_risk * 100.0),
-            self._w0_control_competence * 100.0,
-            "n/a" if self._w0_plasticity_demand is None else "{:.4f}".format(self._w0_plasticity_demand),
-            first_module.effective_energy_coverage,
-            first_module.effective_protect_strength,
-            first_module.current_private_rank,
-        )
-
-        if plasticity_adaptive:
-            logging.info(
-                "Task %s W_pre new-only NCM diagnostics: "
-                # "L_NCM=%.6f, D_t=%.4f, scale=%.3f (logging only).",
-                "L_NCM=%.6f, D_t=%.4f, scale=%.3f (controls competence).",
-                self._cur_task,
-                self._w0_ncm_loss_new,
-                self._w0_plasticity_demand,
-                self.scale
-            )
-
-
-
-    def eval_w0_task(self):
-        if not self._w0_class_means:
-            return None
-
-        class_ids = torch.tensor(
-            sorted(self._w0_class_means),
-            device=self._device,
-            dtype=torch.long,
-        )
-        prototypes = torch.stack([self._w0_class_means[int(class_id)] for class_id in class_ids.cpu()]).to(self._device)  # [C*t,768]
-        correct, total = 0, 0
-        was_training = self._network.training
-        self._network.eval()
-        with self._pretrained_anchor_context(), torch.no_grad():
-            for _, inputs, targets in self.test_loader:
-                features = self._network.extract_vector(inputs.to(self._device))
-                logits = F.normalize(features, dim=1) @ F.normalize(prototypes, dim=1).T
-                predictions = class_ids[logits.argmax(dim=1)]
-                targets = targets.to(self._device)
-                correct += int((predictions == targets).sum().item())
-                total += targets.numel()
-        if was_training:
-            self._network.train()
-        accuracy = 100.0 * correct / max(total, 1)
-        self._w0_accuracy_curve.append(accuracy)
-        if self.args.get('two_expert_oracle_diagnostic', False):
-            from utils.two_expert_oracle import collect_experts, save_report
-            datasets = [
-                ('current_train_seen_probe', self.w0_loader.dataset),
-                ('test_report_only', self.test_loader.dataset),
-            ]
-            calibration = getattr(self, '_two_expert_calibration_dataset', None)
-            if calibration is not None:
-                datasets.insert(0, ('current_train_holdout', calibration))
-            for source, dataset in datasets:
-                loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=False,
-                                    num_workers=0, generator=torch.Generator().manual_seed(0))
-                rows = collect_experts(self._network, loader, self._device,
-                                       self._pretrained_anchor_context, prototypes,
-                                       class_ids, self.class_num)
-                save_report(self.args['two_expert_oracle_dir'], self._cur_task,
-                            source, rows, self._known_classes)
-        return accuracy
-    def _measure_pretrained_drift(self, loader):
-        """Log feature cosine drift and relative QKV weight drift from W_pre."""
-        max_batches = max(1, int(self.args.get("dual_mask_metric_batches", 4)))
-        batches = []
-        for batch_id, (_, inputs, _) in enumerate(loader):
-            if batch_id >= max_batches:
-                break
-            batches.append(inputs)
-
-        was_training = self._network.training
-        self._network.eval()
-        current_features = []
-        with torch.no_grad():
-            for inputs in batches:
-                current_features.append(self._network.extract_vector(inputs.to(self._device)).detach())
-
-        anchor_features = []
-        with self._pretrained_anchor_context(), torch.no_grad():
-            for inputs in batches:
-                anchor_features.append(self._network.extract_vector(inputs.to(self._device)).detach())
-        if was_training:
-            self._network.train()
-
-        current_features = torch.cat(current_features)
-        anchor_features = torch.cat(anchor_features)
-        feature_drift = float((1.0 - F.cosine_similarity(current_features, anchor_features, dim=1)).mean().item())
-        weight_drifts = [module.relative_weight_drift() for module in self._iter_lora_modules()]
-        mean_weight_drift = float(np.mean(weight_drifts))
-        max_weight_drift = float(np.max(weight_drifts))
-        self._feature_drift_curve.append(feature_drift)
-        self._weight_drift_curve.append(mean_weight_drift)
-        logging.info(
-            "Task %s W_pre drift: feature_cosine=%.6f, weight_relative_mean=%.6f, "
-            "weight_relative_max=%.6f",
-            self._cur_task,
-            feature_drift, # 特征提取器提取特征偏移
-            mean_weight_drift, # 权重偏移
-            max_weight_drift, #
-        )
-
-    def after_task(self):
-        self._known_classes = self._total_classes
-        logging.info('Exemplar size: {}'.format(self.exemplar_size))
+            "Task %s W_pre control: C_new=%.4f, C_all=%.4f, D=%.4f, R_old=%.4f, "
+            "coverage=%.4f, alpha=%.4f, P_rank=%s",
+            self._cur_task, competence, all_seen, demand, overlap,
+            first.effective_energy_coverage, first.effective_protect_strength,
+            first.current_private_rank)
 
     def incremental_train(self, data_manager):
-
         self._cur_task += 1
-        self._ridge_fusion_ready = False
-        self._old_teacher = None
-        if self._cur_task > 0 and float(self.args.get('old_model_distill_weight', 0.0)) > 0:
-            from utils.old_model_distillation import frozen_teacher
-            self._old_teacher = frozen_teacher(self._network).to(self._device)
-            logging.info('Old-model teacher: task=%s old_classes=%s source=previous_post_ca weight=%s temperature=%s',
-                         self._cur_task, self._known_classes, self.args['old_model_distill_weight'],
-                         self.args.get('old_model_distill_temperature', 2.0))
-
         self._total_classes = self._known_classes + data_manager.get_task_size(self._cur_task)
-        self.task_sizes.append(data_manager.get_task_size(self._cur_task))  # 当前这个 Task 新增的类别数量
+        self.task_sizes.append(data_manager.get_task_size(self._cur_task))
         self._network.update_fc(self._total_classes)
-
-        logging.info('Learning on {}-{}'.format(self._known_classes, self._total_classes))
-
-        task_classes = np.arange(self._known_classes, self._total_classes)
-        self._two_expert_calibration_dataset = None
-        if self._cur_task > 0 and self.args.get('two_expert_calibration_holdout_mod', 0):
-            self._two_expert_calibration_dataset = data_manager.get_incremental_holdout(task_classes)
-        self.task0_validation_loader = None
-        if self._cur_task == 0 and bool(self.args.get('task0_validation_enabled', False)):
-            train_dataset, validation_dataset = data_manager.get_train_dataset_with_deterministic_holdout(
-                task_classes,
-                holdout_mod=int(self.args.get('task0_validation_holdout_mod', 5)),
-            )
-            self.task0_validation_loader = DataLoader(
-                validation_dataset,
-                batch_size=self.batch_size,
-                shuffle=False,
-                num_workers=self.num_workers,
-                pin_memory=True,
-            )
-            logging.info(
-                'Task0 deterministic train holdout: train=%s, holdout=%s, holdout_mod=%s',
-                len(train_dataset),
-                len(validation_dataset),
-                int(self.args.get('task0_validation_holdout_mod', 5)),
-            )
-        else:
-            train_dataset = data_manager.get_dataset(task_classes, source='train', mode='train')
-        self.train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True,
-                                       num_workers=self.num_workers, pin_memory=True)  # 随机增强视图：用于优化 LoRA
-        self._branch_choice = None
-        if self._cur_task > 0 and self.args.get('branch_choice_mode', 'off') != 'off':
-            from utils.branch_step_choice import BranchStepChoice
-            self._branch_choice = BranchStepChoice(
-                data_manager, self._known_classes, self._total_classes,
-                int(self.args['seed']) + 10007 * self._cur_task, self.batch_size,
-                self.args['branch_choice_mode'], self.args.get('branch_choice_scope', 'p'))
-        self._p_old_gradient_oracle = None
-        if self._cur_task > 0 and self.args.get('p_old_gradient_oracle', False):
-            from utils.p_old_gradient_oracle import OldGradientOracle
-            self._p_old_gradient_oracle = OldGradientOracle(
-                data_manager, self._known_classes, self._total_classes,
-                int(self.args['seed']) + 10007 * self._cur_task, self.batch_size)
-        # 拿到所有已见类的 test set
-        test_dataset = data_manager.get_dataset(np.arange(0, self._total_classes), source='test', mode='test')
-        self.test_loader = DataLoader(test_dataset, batch_size=self.batch_size, shuffle=False,
+        logging.info("Learning on %s-%s", self._known_classes, self._total_classes)
+        classes = np.arange(self._known_classes, self._total_classes)
+        train = data_manager.get_dataset(classes, source="train", mode="train")
+        self.train_loader = DataLoader(train, batch_size=self.batch_size, shuffle=True,
+                                       num_workers=self.num_workers, pin_memory=True)
+        test = data_manager.get_dataset(np.arange(self._total_classes), source="test", mode="test")
+        self.test_loader = DataLoader(test, batch_size=self.batch_size, shuffle=False,
                                       num_workers=self.num_workers, pin_memory=True)
-        self._stage_audit = None
-        if self.args.get('stage_audit', False) or self.args.get('history_audit', False):
-            from utils.stage_audit import StageAudit
-            if self.args.get('history_audit', False) and self._cur_task == 0:
-                from utils.history_audit import HistoryAudit
-                self._history_audit = HistoryAudit(self.args['history_audit_dir'])
-            history = getattr(self, '_history_audit', None) if self.args.get('history_audit', False) else None
-            self._stage_audit = StageAudit(self._cur_task, self._known_classes, history)
-
-        if self._cur_task == 0 and self.args.get('task0_repro_diagnostic', False):
-            log_environment(self.args, train_dataset, test_dataset)
-            log_record('class_order', classes=list(map(int, data_manager._class_order)))
-
-        track_w0 = bool(self.args.get("dual_mask_track_w0_metrics", False))
-        # 开启参数自适应 --- 也就是使用训练集测试W0原型的能力
-        competence_adaptive = bool(self.args.get("dual_mask_competence_adaptive", False))
-
-        plasticity_adaptive = bool(self.args.get("dual_mask_plasticity_adaptive", False))
-
-        all_seen_competence = bool(self.args.get("dual_mask_competence_all_seen", False))
-        old_overlap_conflict = bool(self.args.get("dual_mask_conflict_old_overlap_adaptive", False))
-
-        functional_merge_calibration = bool(self.args.get("dual_mask_functional_merge_calibration", False))
-
-        selective_anchor_enabled = bool(self.args.get("dual_mask_selective_anchor_enabled", False))
-
-        if (track_w0 or competence_adaptive or plasticity_adaptive or all_seen_competence
-                or old_overlap_conflict or functional_merge_calibration or selective_anchor_enabled
-                or self.args.get('ridge_fusion_enabled', False)
-                or float(self.args.get('wpre_distill_weight', 0.0)) > 0
-        ):
-            w0_dataset = data_manager.get_dataset(  # 所有训练样本，顺序固定  | 确定性测试视图：用于判断冻结 W0 的原始能力
-                np.arange(self._known_classes, self._total_classes),
-                source='train',  # 用训练集样本，但模拟最终测试时的输入方式，评估 W0 的原始能力
-                mode='test',  # 同一批训练图，但用测试预处理 | e.g. 固定 resize / center crop
-            )  # 946
-            self.w0_loader = DataLoader(
-                w0_dataset,
-                batch_size=self.batch_size,
-                shuffle=False,
-                num_workers=self.num_workers,
-                pin_memory=True,
-            )
-            self._network.to(self._device)
-            fixed_controller = self._cur_task > 0 and all(self.args.get(key) is not None for key in
-                ('dual_mask_fixed_coverage', 'dual_mask_fixed_protect_strength', 'dual_mask_fixed_conflict_strength')) and self.args.get('dual_mask_private_rank', 0) > 0
-            with stage_cost(self, 'wpre_diagnostic' if fixed_controller else 'competence'):
-                self._prepare_w0_prototypes(self.w0_loader)
-
-        ca_transport_before = None
-        if self._cur_task > 0 and self.args['ca'] and self.args.get('ca_stats_transport', False):
-            ca_transport_before = self._ca_transport_features(data_manager, self._cur_task - 1)
-
-        if self._cur_task > 0 and self.args.get('plora_a_init_mode', 'off') != 'off':
-            self._plora_a_init_dataset = data_manager.get_dataset(
-                np.arange(self._known_classes, self._total_classes), source='train', mode='test')
-        if self._cur_task > 0 and self.args.get('p_permission_release', 'off') != 'off':
-            self._p_release_dataset = data_manager.get_dataset(
-                np.arange(self._known_classes, self._total_classes), source='train', mode='test')
-        self._prepare_incremental_head(data_manager, 'pre')
+        anchor = data_manager.get_dataset(classes, source="train", mode="test")
+        self.w0_loader = DataLoader(anchor, batch_size=self.batch_size, shuffle=False,
+                                    num_workers=self.num_workers, pin_memory=True)
+        self._network.to(self._device)
+        self._prepare_w0_prototypes(self.w0_loader)
         self._train(self.train_loader, self.test_loader)
-        self._p_release_dataset = None
-        self._branch_choice = None
-        self._p_old_gradient_oracle = None
-        self._old_teacher = None
-        self._prepare_incremental_head(data_manager, 'post')
-
-        if track_w0:
-            self._measure_pretrained_drift(self.w0_loader)
-
-        if ca_transport_before is not None:
-            self._transport_ca_statistics(data_manager, ca_transport_before)
-            del ca_transport_before
-
-        # update mean and cov and classifier alignment
-        with stage_cost(self, 'ca_statistics'):
-            self._compute_class_mean(data_manager, check_diff=False, oracle=False)
-        if self._cur_task > 0 and self.args['ca'] is True:
-            if self.args.get('ca_boundary_shadow', False):
-                from utils.ca_boundary import temporary_classifier
-                from utils.stage_audit import StageAudit
-                with temporary_classifier(self._network):
-                    self._stage2_compact_classifier(self.task_sizes[-1], boundary=True)
-                    shadow = StageAudit(self._cur_task, self._known_classes)
-                    shadow.record('boundary_shadow_post_ca', self._network, self.test_loader, self._device)
-            with stage_cost(self, 'ca'):
-                self._stage2_compact_classifier( # CA 分类器对齐
-                    self.task_sizes[-1],ca_epochs=int(self.args.get("ca_epochs", 5)),)
-        if self._stage_audit is not None:
-            self._stage_audit.record('post_ca', self._network, self.test_loader, self._device)
-            self._stage_audit = None
-        if self.args.get('incremental_holdout', False):
-            from utils.incremental_holdout import record_holdout
-            validation = data_manager.get_incremental_holdout(np.arange(self._total_classes))
-            loader = DataLoader(validation, batch_size=self.batch_size, shuffle=False,
-                                num_workers=0, generator=torch.Generator().manual_seed(1993))
-            record_holdout(self._network, loader, self._device, self._cur_task, self._known_classes)
-
-        if self.args.get('ridge_fusion_enabled', False):
-            self._prepare_ridge_fusion()
-
-    def _prepare_ridge_fusion(self):
-        from utils.ridge_fusion import collect_calibration, select_coefficient
-        weight, regularizer = self._ridge_fusion.ridge_weight(1., self._total_classes)
-        self._ridge_fusion_weight = weight.to(self._device)
-        self._ridge_fusion.coefficient = 0.
-        rows, calibration_n = [], 0
+        # The removed feature-drift pass created one sequential loader iterator.
+        advance_loader_rng()
+        self._compute_class_mean(data_manager)
         if self._cur_task > 0:
-            loader = DataLoader(self._two_expert_calibration_dataset, batch_size=self.batch_size,
-                                shuffle=False, num_workers=0,
-                                generator=torch.Generator().manual_seed(1993 + self._cur_task))
-            base, ridge, labels = collect_calibration(self._network, loader, self._device,
-                                                       self._pretrained_anchor_context,
-                                                       self._ridge_fusion_weight)
-            self._ridge_fusion.coefficient, rows = select_coefficient(base, ridge, labels)
-            calibration_n = len(labels)
-        self._ridge_fusion.seal(self._cur_task, self.args['ridge_fusion_dir'], rows,
-                                calibration_n, regularizer)
-        self._ridge_fusion_ready = True
-
-    def _ca_transport_features(self, data_manager, task):
-        from utils.head_start import collect_features
-        dataset = data_manager.get_dataset(np.arange(self._known_classes, self._total_classes),
-                                           source='train', mode='test')
-        loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=False, num_workers=0,
-                            generator=torch.Generator().manual_seed(1993 + self._cur_task))
-        self._network.to(self._device)
-        features, _ = collect_features(self._network, loader, self._device, task, self._known_classes)
-        return features.cpu()
-
-    def _transport_ca_statistics(self, data_manager, before):
-        from utils.ca_stats_transport import fit_diagonal_transport, transport_statistics
-        after = self._ca_transport_features(data_manager, self._cur_task)
-        scale, offset = fit_diagonal_transport(before, after)
-        mean_only = bool(self.args.get('ca_stats_transport_mean_only', False))
-        # At this point the arrays contain old classes only; current class statistics follow.
-        self._class_means, self._class_covs = transport_statistics(
-            self._class_means, self._class_covs, scale, offset, mean_only=mean_only)
-        delta = after.double() - before.double()
-        residual = after.double() - (before.double() * scale + offset)
-        logging.info('CATransport task=%s source=current_train samples=%s old_classes=%s '
-                     'scale_min=%.6f scale_max=%.6f offset_norm=%.6f '
-                     'pair_mse_before=%.8f pair_mse_after=%.8f mode=%s',
-                     self._cur_task, len(before), self._known_classes,
-                     scale.min().item(), scale.max().item(), offset.norm().item(),
-                     delta.square().mean().item(), residual.square().mean().item(),
-                     'mean_only' if mean_only else 'mean_and_covariance')
-
-    def _prepare_incremental_head(self, data_manager, stage):
-        initialize = stage == 'pre' and self.args.get('head_start_init', 'random') == 'prototype'
-        epochs = int(self.args.get('head_start_epochs', 0))
-        fit = epochs > 0 and stage == self.args.get('head_start_stage', 'pre')
-        if self._cur_task == 0 or not (initialize or fit):
-            return
-        import time
-        from utils.head_start import collect_features, prototype_init, fit_head
-        started = time.perf_counter()
-        dataset = data_manager.get_dataset(np.arange(self._known_classes, self._total_classes),
-                                           source='train', mode='test')
-        # Independent deterministic loader: never touches the training RNG stream.
-        loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=False, num_workers=0,
-                            generator=torch.Generator().manual_seed(1993 + self._cur_task))
-        self._network.to(self._device)
-        feature_task = self._cur_task - 1 if stage == 'pre' else self._cur_task
-        features, targets = collect_features(self._network, loader, self._device,
-                                             feature_task, self._known_classes)
-        head = self._network.classifier_pool[self._cur_task]
-        if initialize:
-            prototype_init(head, features, targets)
-        steps = 0
-        if fit:
-            steps = fit_head(head, features, targets, epochs, self.batch_size,
-                             self.lrate, self.weight_decay, self.scale, self.margin,
-                             seed=1993 + self._cur_task)
-        logging.info('HeadStart task=%s stage=%s init=%s source=current_train feature_task=%s '
-                     'samples=%s epochs=%s steps=%s seconds=%.3f',
-                     self._cur_task, stage, initialize, feature_task, len(targets),
-                     epochs if fit else 0, steps, time.perf_counter() - started)
-
-    def _initialize_plora_a(self):
-        mode = self.args.get('plora_a_init_mode', 'off')
-        if self._cur_task == 0 or mode == 'off':
-            return
-        network = self._network.module if isinstance(self._network, torch.nn.DataParallel) else self._network
-        modules = list(self._iter_lora_modules())
-        options = dict(batch_size=self.batch_size, batches=int(self.args.get('plora_a_init_batches', 4)),
-                       seed=int(self.args['seed']) + self._cur_task)
-        from utils.plora_gradient_init import GRADIENT_A_MODES
-        if mode in GRADIENT_A_MODES:
-            from utils.plora_gradient_init import initialize_gradient_a
-            smoothing = (0.0 if self.args.get('label_smoothing_task0_only', False)
-                         else float(self.args.get('label_smoothing', 0.0)))
-            loss_fn = AngularPenaltySMLoss(loss_type='cosface', s=self.scale, m=self.margin,
-                                           label_smoothing=smoothing)
-            initialize_gradient_a(network, modules, self._plora_a_init_dataset, self._device,
-                                  self._cur_task, mode, self._known_classes, loss_fn,
-                                  probe_head=self.args.get('plora_a_probe_head', 'random'), **options)
-        else:
-            from utils.plora_a_init import initialize_plora_a
-            initialize_plora_a(network, modules, self._plora_a_init_dataset,
-                               self._device, self._cur_task, mode, **options)
-        self._plora_a_init_dataset = None
-
-    def _lora_optimizer_groups(self, flora_params, other_params, lr, weight_decay):
-        groups = [
-            {'params': flora_params, 'lr': lr, 'momentum': 0.9, 'weight_decay': weight_decay},
-            {'params': other_params, 'lr': lr, 'momentum': 0.9, 'weight_decay': weight_decay},
-        ]
-        multiplier = float(self.args.get('plora_lr_multiplier', 1.0))
-        # Keep the legacy grouping for Task0 and the default multiplier.
-        if self._cur_task > 0 and multiplier != 1.0:
-            private_params = [p for name, p in self._network.named_parameters()
-                              if p.requires_grad and 'p_lora' in name.lower().split('.')]
-            if private_params:
-                private_ids = {id(p) for p in private_params}
-                groups[0]['params'] = [p for p in flora_params if id(p) not in private_ids]
-                groups.append({'params': private_params, 'lr': lr * multiplier,
-                               'momentum': 0.9, 'weight_decay': weight_decay})
-        shared_multiplier = float(self.args.get('slora_lr_multiplier', 1.0))
-        if self._cur_task > 0 and shared_multiplier != 1.0:
-            shared_params = [p for name, p in self._network.named_parameters()
-                             if p.requires_grad and 's_lora' in name.lower().split('.')]
-            if shared_params:
-                shared_ids = {id(p) for p in shared_params}
-                groups[0]['params'] = [p for p in groups[0]['params'] if id(p) not in shared_ids]
-                groups.append({'params': shared_params, 'lr': lr * shared_multiplier,
-                               'momentum': 0.9, 'weight_decay': weight_decay})
-        return groups
+            self._stage2_compact_classifier(self.task_sizes[-1])
 
     def _train(self, train_loader, test_loader):
-        try:
-            current_task = self._network.module.numtask - 1  # 多卡
-        except AttributeError:
-            current_task = self._network.numtask - 1
-        current_classifier = "classifier_pool" + "." + str(current_task) + "."
-
+        current_classifier = "classifier_pool." + str(self._cur_task) + "."
         self._network.to(self._device)
         for name, param in self._network.named_parameters():
-            param.requires_grad_(False)  # 1. 先把主干 (ViT Backbone) 所有参数全部冻结
-            if name.startswith(current_classifier):
-                param.requires_grad_(True)  # 将 分类头打开可训
-
-        if self.args.get('dual_mask_mechanism_audit', False) and self._device.type == 'cuda':
-            torch.cuda.reset_peak_memory_stats(self._device)
-        with stage_cost(self, 'protection_and_adapter_setup'):
-            for module in self._iter_lora_modules():
-                module.before_task(task=self._cur_task)
-
+            param.requires_grad_(name.startswith(current_classifier))
+        for module in self._iter_lora_modules():
+            module.before_task(self._cur_task)
         if len(self._multiple_gpus) > 1:
             self._network = torch.nn.DataParallel(self._network, self._multiple_gpus)
-
-        kk = 0  # Transformer 层号计数器（0 到 11 层）
-        for module in self._iter_lora_modules():
-            # print(f'********** LoRA weights initialization for layer {kk} **********')
-            module._init_lora_weight(task=self._cur_task, layer_idx=kk)  # 初始化 LoRA 的 A B 矩阵权重
-            module.set_task_and_stage(task=self._cur_task, layer_idx=kk)  # 设置lora可不可训练
-            kk += 1
-
-        self._initialize_plora_a()
-
-        ############################## set learning rates ##################################
-        flora_params, other_params = [], []  # flora_params:收集的是名称带 lora 的参数（即各个 Transformer 层中 LoRA 的 B 矩阵）
-        for name, p in self._network.named_parameters():
-            if p.requires_grad:
-                if 'lora' in name.lower():
-                    flora_params.append(p)
-                else:
-                    other_params.append(p) # 分类头
-        print(f"[Param Group] LoRA params: {len(flora_params)}, Other params: {len(other_params)}")
-        logging.info(
-            "LoRA-stage trainable scalars: LoRA=%s, classifier=%s, total=%s",
-            sum(p.numel() for p in flora_params),
-            sum(p.numel() for p in other_params),
-            sum(p.numel() for p in flora_params + other_params),
-        )
-
-        enabled = {name for name, p in self._network.named_parameters() if p.requires_grad}
-        print(f"[LoRA-Stage] Parameters to be updated: {enabled}")
-        logging.info('P-A training: task=%s enabled=%s trainable_scalars=%s',
-                     self._cur_task, self.args.get('plora_train_a', False),
-                     sum(p.numel() for name, p in self._network.named_parameters()
-                         if p.requires_grad and 'P_lora.' in name and name.endswith('.A.weight')))
-
-        lr = self.init_lr if self._cur_task == 0 else self.lrate
-        weight_decay = self.init_weight_decay if self._cur_task == 0 else self.weight_decay
-        param_groups = self._lora_optimizer_groups(flora_params, other_params, lr, weight_decay)
-        logging.info(
-            'LoRA optimizer groups: task=%s, configured_P_multiplier=%s, configured_S_multiplier=%s, '
-            'order=LoRA/classifier[/P][/S], scalars=%s, initial_lrs=%s',
-            self._cur_task, self.args.get('plora_lr_multiplier', 1.0),
-            self.args.get('slora_lr_multiplier', 1.0),
-            [sum(p.numel() for p in group['params']) for group in param_groups],
-            [group['lr'] for group in param_groups],
-        )
-        ############################## set learning rates ##################################
-
-        if self._cur_task == 0:
-            if self.optim == 'sgd':
-                optimizer = optim.SGD(params=param_groups)
-                scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer=optimizer, T_max=self.init_epoch)
-            elif self.optim == 'adam':
-                optimizer = optim.Adam(params=param_groups, weight_decay=self.init_weight_decay, betas=(0.9, 0.999))
-                scheduler = CosineSchedule(optimizer=optimizer, K=self.init_epoch)
-            else:
-                raise Exception
-            self.run_epoch = self.init_epoch
-            with stage_cost(self, 'training'):
-                self.train_function(train_loader, test_loader, optimizer, scheduler)
-        else:
-            if self.optim == 'sgd':
-                optimizer = optim.SGD(params=param_groups)
-                scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer=optimizer, T_max=self.epochs)
-            elif self.optim == 'adam':
-                optimizer = optim.Adam(params=param_groups, weight_decay=self.weight_decay, betas=(0.9, 0.999))
-                scheduler = CosineSchedule(optimizer=optimizer, K=self.epochs)
-            else:
-                raise Exception
-            self.run_epoch = self.epochs
-            with stage_cost(self, 'training'):
-                self.train_function(train_loader, test_loader, optimizer, scheduler)
-        if len(self._multiple_gpus) > 1:
-            self._network = self._network.module
-
-        lora_modules = list(self._iter_lora_modules())
-        if self._cur_task in (1, 5, 9) and self.args.get('p_score_counterfactual_report', False):
-            from utils.p_score_diagnostic import report_score_counterfactuals
-            report_score_counterfactuals(self._network, test_loader.dataset, self._device,
-                self._cur_task, self._known_classes)
-        if bool(self.args.get("dual_mask_functional_merge_calibration", False)):
-            calibration_loader = getattr(self, "w0_loader", train_loader)
-            self._calibrate_functional_merge(calibration_loader)
-        if self._stage_audit is not None:
-            self._stage_audit.record('pre_merge', self._network, test_loader, self._device)
-            
-        with torch.no_grad():
-            # Task t 的 LoRA刚训练完，但增量还没有融合进主干网络 W0
-            print('*' * 10 + 'Extrace features for merging shared component!' + '*' * 10)
-            for module in lora_modules:
-                module.after_task(task=self._cur_task)
-        if self._stage_audit is not None:
-            self._stage_audit.record('post_merge', self._network, test_loader, self._device)
-
-    def _set_branch_training_phase(self, epoch):
-        s_epochs = int(self.args.get('sp_staged_s_epochs', 0))
-        if self._cur_task == 0 or s_epochs <= 0:
-            return
-        train_s = epoch < s_epochs
-        for module in self._iter_lora_modules():
-            for unit, trainable in ((module.S_lora[self._cur_task], train_s),
-                                    (module.P_lora[self._cur_task], not train_s)):
-                unit.B_weight.requires_grad_(trainable)
-                if not trainable:
-                    unit.B_weight.grad = None
-        if epoch in (0, s_epochs):
-            logging.info('SP staged training: task=%s epoch=%s phase=%s; classifier stays trainable; scheduler unchanged',
-                         self._cur_task, epoch + 1, 'S' if train_s else 'P')
-
-    def _set_p_conflict_strength_epoch(self, epoch):
-        if self._cur_task == 0 or not self.args.get('p_conflict_strength_warmup', False):
-            return
-        scale = .5 + .1 * min(max(epoch - 5, 0), 5)
-        for module in self._iter_lora_modules():
-            module.p_conflict_strength_scale = scale
-            if module.layer_idx == 0:
-                base_strength = module._conflict_parameters()[1]
-                logging.info('PConflictWarmup task=%s epoch=%s multiplier=%.2f '
-                             'base_strength=%.4f train_strength=%.4f eval_merge_strength=%.4f',
-                             self._cur_task, epoch, scale, base_strength,
-                             base_strength * scale, base_strength)
-
-    def train_function(self, train_loader, test_loader, optimizer, scheduler):
-        self._prepare_head_balance()
-        branch_choice = getattr(self, '_branch_choice', None)
-        old_gradient_oracle = getattr(self, '_p_old_gradient_oracle', None)
-        logging.info('Trainable params: {}'.format(count_parameters(self._network, True)))
-        # Double check
-        enabled = set()
+        for layer_idx, module in enumerate(self._iter_lora_modules()):
+            module.set_task_and_stage(self._cur_task, layer_idx)
+        lora_params, classifier_params = [], []
         for name, param in self._network.named_parameters():
             if param.requires_grad:
-                enabled.add(name)
-        # logging.info("Parameters to be updated (%d):\n  %s", len(enabled), "\n  ".join(sorted(enabled)), )
-        prog_bar = tqdm(range(self.run_epoch))
-        # 角度惩罚损失
-        label_smoothing = float(self.args.get('label_smoothing', 0.0))
-        if (bool(self.args.get('label_smoothing_task0_only', False)) and self._cur_task != 0):
-            label_smoothing = 0.0
-        training_margin = self._training_margin()
-        loss_cos:AngularPenaltySMLoss = AngularPenaltySMLoss(
-            loss_type='cosface',s=self.scale,m=training_margin,label_smoothing=label_smoothing,)
-        holdout_loss_cos = AngularPenaltySMLoss(
-            loss_type='cosface',s=self.scale,m=self.margin,label_smoothing=label_smoothing,)
-        logging.info('CosFace margin: task=%s train=%.3f holdout_reference=%.3f',
-                     self._cur_task, training_margin, self.margin)
-
-        average_epochs = int(self.args.get('late_weight_average_epochs', 0)) if self._cur_task > 0 else 0
-        averaged_params = []
-        averaged_sums = []
-        averaged_count = 0
-        if average_epochs:
+                (lora_params if "lora" in name.lower() else classifier_params).append(param)
+        lr = self.init_lr if self._cur_task == 0 else self.lrate
+        decay = self.init_weight_decay if self._cur_task == 0 else self.weight_decay
+        groups = [
+            {"params": lora_params, "lr": lr, "momentum": 0.9, "weight_decay": decay},
+            {"params": classifier_params, "lr": lr, "momentum": 0.9, "weight_decay": decay},
+        ]
+        optimizer = optim.SGD(params=groups)
+        self.run_epoch = self.init_epoch if self._cur_task == 0 else self.epochs
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.run_epoch)
+        self.train_function(train_loader, test_loader, optimizer, scheduler)
+        if len(self._multiple_gpus) > 1:
+            self._network = self._network.module
+        with torch.no_grad():
             for module in self._iter_lora_modules():
-                averaged_params.extend((module.S_lora[self._cur_task].B_weight,
-                                        module.P_lora[self._cur_task].B_weight))
-            network = self._network.module if isinstance(self._network, torch.nn.DataParallel) else self._network
-            averaged_params.extend(network.classifier_pool[self._cur_task].parameters())
-            averaged_sums = [torch.zeros_like(param) for param in averaged_params]
+                module.after_task(self._cur_task)
 
-        repro = self._cur_task == 0 and self.args.get('task0_repro_diagnostic', False)
-        batch_repro = repro and self.args.get('task0_repro_batch_diagnostic', False)
-        if repro:
-            log_record('initial', **model_fingerprint(self._network))
-
-        for _, epoch in enumerate(prog_bar):
+    def train_function(self, train_loader, test_loader, optimizer, scheduler):
+        loss_cos = AngularPenaltySMLoss(s=self.scale, m=self.margin)
+        prog_bar = tqdm(range(self.run_epoch))
+        for epoch in prog_bar:
             self._network.train()
-            self._set_branch_training_phase(epoch)
-            if self.args.get('p_conflict_strength_warmup', False):
-                self._set_p_conflict_strength_epoch(epoch + 1)
-
-            losses = 0.
-            correct, total = 0, 0
-            epoch_lr = float(optimizer.param_groups[0]['lr'])
-            logging.info('LoRA learning rates: task=%s, epoch=%s, order=LoRA/classifier[/P][/S], lrs=%s',
-                         self._cur_task, epoch + 1, [group['lr'] for group in optimizer.param_groups])
-            training_metric_totals = {}
-            training_metric_batches = 0
-
-            for i, (sample_indices, inputs, targets) in enumerate(train_loader):
-                if batch_repro:
-                    batch_input_hash = tensor_hash([('inputs', inputs)])
-                    batch_indices_hash = tensor_hash([('indices', sample_indices)])
-                if repro and i == 0:
-                    log_record('first_batch', epoch=epoch + 1,
-                               indices=sample_indices.tolist(), targets=targets.tolist(),
-                               input_sha256=tensor_hash([('inputs', inputs)]))
+            losses, correct, total = 0.0, 0, 0
+            for _, inputs, targets in train_loader:
                 inputs, targets = inputs.to(self._device), targets.to(self._device)
-                mask = (targets >= self._known_classes).nonzero().view(-1)
-                inputs = torch.index_select(inputs, 0, mask)
-                targets = torch.index_select(targets, 0, mask) - self._known_classes
-
-                if self._global_conflict_enabled():
-                    self._refresh_global_conflict_masks(log_summary=(i == 0))
-
-                batch_context = self._extra_training_context(
-                    inputs,
-                    targets,
-                    epoch,
-                )
-
-                output = self._network(inputs)
-                if batch_context:
-                    output.update(batch_context)
-                logits = output['logits']
+                selected = (targets >= self._known_classes).nonzero().view(-1)
+                inputs = torch.index_select(inputs, 0, selected)
+                targets = torch.index_select(targets, 0, selected) - self._known_classes
+                logits = self._network(inputs)["logits"]
                 task_loss = loss_cos(logits, targets)
-
-                self._sample_mask_reg_grad = (
-                    bool(self.args.get('dual_mask_reg_grad_diagnostic', False))
-                    and self._cur_task > 0 and i == 0 and epoch in (0, 9, 19)
-                )
-                extra_loss = self._extra_training_loss(
-                    output=output,
-                    inputs=inputs,
-                    targets=targets,
-                    epoch=epoch,
-                    batch_context=batch_context,
-                )
-
-                if self._sample_mask_reg_grad:
-                    self._log_mask_reg_gradients(task_loss, epoch, i)
-
-                competition_loss, competition_metrics = self._old_competition_term(output, targets)
-                if competition_loss is not None:
-                    extra_loss = competition_loss if extra_loss is None else extra_loss + competition_loss
-                head_loss, head_metrics = self._head_balance_term(output, targets)
-                if head_loss is not None:
-                    extra_loss = head_loss if extra_loss is None else extra_loss + head_loss
-                distill_loss, distill_metrics = self._old_model_distillation_term(output, inputs)
-                if distill_loss is not None:
-                    extra_loss = distill_loss if extra_loss is None else extra_loss + distill_loss
-                batch_training_metrics = dict(getattr(self,"_last_training_loss_metrics",{},))
-                batch_training_metrics.update(competition_metrics)
-                batch_training_metrics.update(head_metrics)
-                batch_training_metrics.update(distill_metrics)
-                direction_mode = self.args.get('p_step_direction', 'off')
-                self._p_step_context = None
-                if i == 0:
-                    self._p_step_counts = {}
-                if (self._cur_task > 0 and direction_mode != 'off'
-                        and i % int(self.args.get('p_step_interval', 5)) == 0):
-                    self._p_step_context = (direction_mode, epoch, i, i == 0 and epoch in (0, 9, 19))
-                    self._p_step_probe = (inputs, loss_cos)
-                self._pair_separation_diagnostic = (epoch, i) if i == 0 and epoch in (0, 9, 19) else None
-                self._wpre_distill_diagnostic = (epoch, i) if i == 0 and epoch in (0, 9, 19) else None
-                self._p_old_gradient_context = None
-                self._branch_choice_context = None
-                if branch_choice is not None and i % int(self.args.get('branch_choice_interval', 5)) == 0:
-                    self._branch_choice_context = (epoch, i, inputs)
-                if (old_gradient_oracle is not None
-                        and i % int(self.args.get('p_old_gradient_interval', 5)) == 0):
-                    self._p_old_gradient_context = (epoch, i, inputs, loss_cos)
-                loss = self._backward_and_step(
-                    task_loss,
-                    extra_loss,
-                    optimizer,
-                    output,
-                    targets,
-                )
-                batch_training_metrics.update(getattr(self, '_last_pair_separation_metrics', {}))
-                batch_training_metrics.update(getattr(self, '_last_wpre_distill_metrics', {}))
-                if batch_training_metrics: # 只负责汇总、显示额外损失的统计值
-                    for name, value in batch_training_metrics.items():
-                        value = value.detach()
-                        training_metric_totals[name] = (training_metric_totals.get(name, 0.0) + value)
-                    training_metric_batches += 1
-                self._p_step_probe = None
-                if self._p_step_context is not None and i == 0:
-                    logging.info('PStepSchedule task=%s epoch=%s interval=%s mode=%s',
-                                 self._cur_task, epoch + 1, self.args.get('p_step_interval', 5), direction_mode)
-
-                batch_loss = loss.item()
-                losses += batch_loss
-                if batch_repro:
-                    log_record('batch', epoch=epoch + 1, batch=i + 1,
-                               indices_sha256=batch_indices_hash,
-                               input_sha256=batch_input_hash,
-                               loss=batch_loss,
-                               trainable_sha256=tensor_hash(
-                                   (n, p) for n, p in self._network.named_parameters() if p.requires_grad
-                               ))
-
-                _, preds = torch.max(logits, dim=1)
-                correct += preds.eq(targets.expand_as(preds)).cpu().sum()
+                loss = task_loss + self._extra_training_loss()
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                losses += loss.item()
+                _, predictions = torch.max(logits, dim=1)
+                correct += predictions.eq(targets.expand_as(predictions)).cpu().sum()
                 total += len(targets)
-
-            if getattr(self, '_p_step_counts', None):
-                logging.info('PStepSummary %s', dict(task=self._cur_task, epoch=epoch + 1,
-                             mode=self.args.get('p_step_direction'), **self._p_step_counts))
-            if old_gradient_oracle is not None:
-                old_gradient_oracle.summary(self._cur_task, epoch)
-            if branch_choice is not None:
-                branch_choice.summary(self._cur_task, epoch)
-            self._branch_choice_context = None
-            self._p_old_gradient_context = None
-            self._p_step_context = None
             scheduler.step()
-            if self._cur_task > 0 and int(self.args.get('p_conflict_freeze_epoch', 0)) > 0:
-                for module in self._iter_lora_modules():
-                    module.update_p_conflict_freeze(epoch + 1)
-            if average_epochs and epoch >= self.run_epoch - average_epochs:
-                with torch.no_grad():
-                    for running_sum, param in zip(averaged_sums, averaged_params):
-                        running_sum.add_(param.detach())
-                averaged_count += 1
             train_acc = np.around(tensor2numpy(correct) * 100 / total, decimals=2)
-
-            self._last_epoch_training_loss_metrics = {}
-            if training_metric_batches > 0:
-                self._last_epoch_training_loss_metrics = {
-                    name: float((value / training_metric_batches).item())
-                    for name, value in training_metric_totals.items()
-                }
-            metric_info = "".join(
-                ", {} {:.3e}".format(name, value)
-                for name, value in self._last_epoch_training_loss_metrics.items()
-            )
-
-            info = 'Task {}, Epoch {}/{} => Loss {:.3f}, Train_accy {:.2f}'.format(
-                self._cur_task,
-                epoch + 1,
-                self.run_epoch,
-                losses / len(train_loader),
-                train_acc
-            ) + metric_info
+            info = "Task {}, Epoch {}/{} => Loss {:.3f}, Train_accy {:.2f}".format(
+                self._cur_task, epoch + 1, self.run_epoch, losses / len(train_loader), train_acc)
             prog_bar.set_description(info)
-
-            validation_loader = getattr(self, 'task0_validation_loader', None)
-            if self._cur_task == 0 and validation_loader is not None:
-                holdout = evaluate_task0_holdout(
-                    self._network,
-                    validation_loader,
-                    holdout_loss_cos,
-                    device=self._device,
-                    cuda_devices=[
-                        device.index for device in self._multiple_gpus if device.type == 'cuda'
-                    ],
-                    known_classes=self._known_classes,
-                )
-                self._task0_holdout_loss_curve.append(holdout['loss'])
-                self._task0_holdout_accuracy_curve.append(holdout['accuracy'])
-                self._task0_holdout_class_margin_curve.append(holdout['class_margin'])
-                logging.info(
-                    'Task0 Holdout, Epoch %s/%s => Loss %.6f, Accuracy %.2f, Class margin %.6f, '
-                    'Class variance %.6f, Min centroid margin %.6f, LR %.8f',
-                    epoch + 1,
-                    self.run_epoch,
-                    holdout['loss'],
-                    holdout['accuracy'],
-                    holdout['class_margin'],
-                    holdout['class_variance'],
-                    holdout['min_centroid_margin'],
-                    epoch_lr,
-                )
-
-            if repro:
-                log_record('epoch', epoch=epoch + 1, loss=losses / len(train_loader),
-                           train_accuracy=float(train_acc),
-                           trainable_sha256=tensor_hash((n, p) for n, p in self._network.named_parameters() if p.requires_grad))
-
-            if self._cur_task > 0 and self.args.get('p_permission_release', 'off') != 'off':
-                from utils.p_permission_release import refresh_release, report_release
-                if epoch + 1 in (1, 5, 10):
-                    refresh_release(self, self._p_release_dataset, epoch + 1, loss_cos)
-                report_release(self, test_loader.dataset, epoch + 1)
-
-            if self.args.get('dual_mask_mechanism_audit', False):
-                from utils.dualmask_core_audit import epoch_updates, position_diagnostic, storage_bytes
-                with stage_cost(self, 'update_telemetry'):
-                    epoch_updates(self, epoch + 1)
-                if self.args.get('p_permission_position', 'wpre') == 'wpre' and self.args.get('p_permission_release', 'off') == 'off':
-                    position_diagnostic(self, test_loader.dataset, epoch + 1)
-                if epoch == 0:
-                    storage_bytes(self, 'adapters_allocated')
-
-        self._head_balance_pool = None
-        if self._cur_task == 0 and getattr(self, 'task0_validation_loader', None) is not None:
-            logging.info('Task0 Holdout loss curve: %s', self._task0_holdout_loss_curve)
-            logging.info('Task0 Holdout accuracy curve: %s', self._task0_holdout_accuracy_curve)
-            logging.info('Task0 Holdout class margin curve: %s', self._task0_holdout_class_margin_curve)
-
-        if self._global_conflict_enabled():
-            self._refresh_global_conflict_masks(log_summary=True)
-
-        # test train finished  当前任务 LoRA 训练完成→ LoRA 尚未 merge→ CA 分类器校准尚未执行
         test_acc = self._compute_accuracy(self._network, test_loader)
-        if averaged_count:
-            relative_shift = _apply_epoch_average(averaged_params, averaged_sums, averaged_count)
-            if self._global_conflict_enabled():
-                self._refresh_global_conflict_masks(log_summary=True)
-            averaged_test_acc = self._compute_accuracy(self._network, test_loader)
-            logging.info('LateWeightAverage task=%s epochs=%s-%s snapshots=%s relative_shift=%.6f '
-                         'raw_premerge=%.2f averaged_premerge=%.2f',
-                         self._cur_task, self.run_epoch - averaged_count + 1, self.run_epoch,
-                         averaged_count, relative_shift,
-                         test_acc, averaged_test_acc)
-            test_acc = averaged_test_acc
-        # pre-merge / pre-CA Test_accy
-        final_info = 'Task {}, Epoch {}/{} => Loss {:.3f}, Train_accy {:.2f}, Test_accy {:.2f}'.format(
-            self._cur_task,
-            epoch + 1,
-            self.run_epoch,
-            losses / len(train_loader),
-            train_acc,
-            test_acc,
-        ) + metric_info
-        logging.info(final_info)
+        logging.info("%s, Test_accy %.2f", info, test_acc)
 
     def accuracy(self, y_pred, y_true, accuracy_matrix=False):
-        assert len(y_pred) == len(y_true), 'Data length error.'
 
         all_acc = {}
         all_acc['total'] = np.around((y_pred == y_true).sum() * 100 / len(y_true), decimals=2)
 
         i = 0
-        # Grouped accuracy
         for class_id in range(0, np.max(y_true), self.class_num):
             idxes = np.where(np.logical_and(y_true >= class_id, y_true < class_id + self.class_num))[0]
             label = '{}-{}'.format(str(class_id).rjust(2, '0'), str(class_id + self.class_num - 1).rjust(2, '0'))
@@ -1714,12 +219,10 @@ class Learner(BaseLearner):
                 self.acc_matrix[i, self._cur_task] = all_acc[label]
             i += 1
 
-        # Old accuracy
         idxes = np.where(y_true < self._known_classes)[0]
         all_acc['old'] = 0 if len(idxes) == 0 else np.around((y_pred[idxes] == y_true[idxes]).sum() * 100 / len(idxes),
                                                              decimals=2)
 
-        # New accuracy
         idxes = np.where(y_true >= self._known_classes)[0]
         all_acc['new'] = np.around((y_pred[idxes] == y_true[idxes]).sum() * 100 / len(idxes), decimals=2)
 
@@ -1727,100 +230,29 @@ class Learner(BaseLearner):
 
     def _evaluate(self, y_pred, y_true, accuracy_matrix=False):
         ret = {}
-        # print(len(y_pred), len(y_true))
-        # {'00-19': 93.93, '20-39': 97.1, '40-59': 95.41, 'new': 95.41, 'old': 95.37, 'total': 95.39}
         grouped = self.accuracy(y_pred, y_true, accuracy_matrix=accuracy_matrix)
         ret['grouped'] = grouped
         ret['top1'] = grouped['total']
         return ret
 
     def eval_task(self):
-        with stage_cost(self, 'inference'):
-            result = super().eval_task()
-        if self.args.get('dual_mask_mechanism_audit', False):
-            from utils.dualmask_core_audit import storage_bytes
-            storage_bytes(self, 'post_ca_merged')
-        if self._ridge_fusion_ready:
-            self._ridge_fusion.report(self._cur_task, self._ridge_fusion_eval_base,
-                                      self._ridge_fusion_eval_candidate, self._ridge_fusion_eval_targets,
-                                      self.args['ridge_fusion_dir'])
-        if self._cur_task == 0 and self.args.get('task0_repro_diagnostic', False):
-            log_record('final', accuracy=float(result[0]['top1']),
-                       **model_fingerprint(self._network))
-        before = getattr(self, "_ca_before_metrics", None)
-        if before is not None:
-            after = result[0]['grouped']
-            logging.info(
-                "CA diagnostic Task %s (test-only): before_total=%.2f, before_old=%.2f, before_new=%.2f, "
-                "after_total=%.2f, after_old=%.2f, after_new=%.2f, delta_total=%+.2f, delta_old=%+.2f, delta_new=%+.2f",
-                self._cur_task, before['total'], before['old'], before['new'],
-                after['total'], after['old'], after['new'],
-                after['total'] - before['total'], after['old'] - before['old'], after['new'] - before['new'],
-            )
-            self._ca_before_metrics = None
+        prediction, targets = self._eval_cnn(self.test_loader)
+        result = self._evaluate(prediction, targets, accuracy_matrix=True)
+        # Removed NME and W_pre test reports each created a sequential iterator.
+        advance_loader_rng()
+        advance_loader_rng()
         return result
-
-    def _measure_ca_accuracy(self):
-        # Test-only observation; restore RNG so the extra loader pass cannot alter CA samples.
-        python_state, numpy_state = random.getstate(), np.random.get_state()
-        modes = [(module, module.training) for module in self._network.modules()]
-        devices = [device.index for device in self._multiple_gpus if device.type == 'cuda']
-        try:
-            with torch.random.fork_rng(devices=devices):
-                prediction, _, targets, _, _ = self._eval_cnn(self.test_loader)
-                return self.accuracy(prediction, targets, accuracy_matrix=False)
-        finally:
-            random.setstate(python_state)
-            np.random.set_state(numpy_state)
-            for module, training in modes:
-                module.training = training
 
     def _eval_cnn(self, loader):
         self._network.eval()
-        y_pred, y_true = [], []
-        ridge_base_predictions = []
-        y_pred_with_task = []
-        y_pred_task, y_true_task = [], []
-
-        for _, (_, inputs, targets) in enumerate(loader):
-            inputs = inputs.to(self._device)
-            targets = targets.to(self._device)
-
-            with torch.no_grad():
-                task_id = (targets // self.class_num).cpu()
-                y_true_task.append(task_id)
-                # 前向推理，不给真实 task id  | 全局 logits
-                outputs = self._network.interface(inputs)  # [bs,C*num_task]
-                if self._ridge_fusion_ready:
-                    from utils.ridge_fusion import fuse_scores
-                    ridge_base_predictions.append(torch.topk(outputs, k=self.topk, dim=1,
-                                                             largest=True, sorted=True)[1].view(-1).cpu().numpy())
-                    if self._ridge_fusion.coefficient:
-                        with self._pretrained_anchor_context():
-                            ridge = self._network.extract_vector(inputs) @ self._ridge_fusion_weight
-                        outputs = fuse_scores(outputs, ridge, self._ridge_fusion.coefficient)
-            # topk1 [bs]
-            predicts = torch.topk(outputs, k=self.topk, dim=1, largest=True, sorted=True)[1].view(-1)  # [bs, topk]
-            y_pred_task.append((predicts // self.class_num).cpu())
-            # CNN top1 with task
-            outputs_with_task = torch.zeros_like(outputs)[:, :self.class_num]  # 创建一个只装 20 类 logits 的矩阵
-            for idx, i in enumerate(targets // self.class_num):  # 用真实标签算真实 task id
-                en, be = self.class_num * i, self.class_num * (i + 1)  # task1: en=20, be=40
-                outputs_with_task[idx] = outputs[idx, en:be]  # idx -- 真实task标签 [bs,C]
-            predicts_with_task = outputs_with_task.argmax(dim=1)  # [bs]
-            predicts_with_task = predicts_with_task + (
-                        targets // self.class_num) * self.class_num  # 再加回 task 偏移量，变回全局类别编号
-
-            y_pred.append(predicts.cpu().numpy())
-            y_pred_with_task.append(predicts_with_task.cpu().numpy())
-            y_true.append(targets.cpu().numpy())
-        if self._ridge_fusion_ready:
-            self._ridge_fusion_eval_base = np.concatenate(ridge_base_predictions)
-            self._ridge_fusion_eval_candidate = np.concatenate(y_pred)
-            self._ridge_fusion_eval_targets = np.concatenate(y_true)
-        # 转成 []
-        return np.concatenate(y_pred), np.concatenate(y_pred_with_task), np.concatenate(y_true), torch.cat(
-            y_pred_task), torch.cat(y_true_task)  # [N, topk]
+        prediction, targets = [], []
+        with torch.no_grad():
+            for _, inputs, labels in loader:
+                outputs = self._network.interface(inputs.to(self._device))
+                top1 = torch.topk(outputs, k=1, dim=1, largest=True, sorted=True)[1].view(-1)
+                prediction.append(top1.cpu().numpy())
+                targets.append(labels.numpy())
+        return np.concatenate(prediction), np.concatenate(targets)
 
     def _compute_accuracy(self, model, loader):
         model.eval()
@@ -1835,309 +267,72 @@ class Learner(BaseLearner):
 
         return np.around(tensor2numpy(correct) * 100 / total, decimals=2)
 
-    def _stage2_compact_classifier(self, task_size, ca_epochs=5, boundary=False):
-        """Align classifier heads using Gaussian pseudo-features."""
-        if self.args.get("dual_mask_ca_diagnostics", False):
-            self._ca_before_metrics = self._measure_ca_accuracy()
-        ca_epochs = int(self.args.get("ca_epochs", 5))
-        for p in self._network.classifier_pool[:self._cur_task + 1].parameters():
-            p.requires_grad = True
-
-        run_epochs = ca_epochs
-        crct_num = self._total_classes
-        param_list = [p for p in self._network.classifier_pool.parameters() if p.requires_grad]
-        logging.info("CA-stage optimized classifier scalars: %s", sum(p.numel() for p in param_list))
-        classifier_lr = self.args["ca_lrate"]
-        network_params = [{'params': param_list, 'lr': classifier_lr,'weight_decay': 0.0005}]
-        optimizer = optim.SGD(network_params, lr=classifier_lr, momentum=0.9, weight_decay=0.0005)
-        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer=optimizer, T_max=run_epochs)
-
-        # loss_cos:AngularPenaltySMLoss = AngularPenaltySMLoss(loss_type='cosface',s=1.0, m=self.margin)
-
+    def _stage2_compact_classifier(self, task_size):
+        for param in self._network.classifier_pool[:self._cur_task + 1].parameters():
+            param.requires_grad = True
+        params = [p for p in self._network.classifier_pool.parameters() if p.requires_grad]
+        lr = self.args["ca_lrate"]
+        optimizer = optim.SGD([{"params": params, "lr": lr, "weight_decay": 0.0005}],
+                              lr=lr, momentum=0.9, weight_decay=0.0005)
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.args["ca_epochs"])
         self._network.to(self._device)
-
         self._network.eval()
-        two_centers = bool(self.args.get('ca_two_centers', False))
-        if two_centers:
-            from utils.ca_two_centers import add_center_offsets
-            center_generator = torch.Generator().manual_seed(torch.initial_seed() + self._cur_task)
-        real_new = bool(self.args.get('ca_real_new_features', False))
-        if real_new:
-            # Local CPU stream: sampling real features must not change Gaussian/shuffle RNG.
-            real_generator = torch.Generator().manual_seed(torch.initial_seed() + self._cur_task)
-        logging.info('CA feature source: new=%s old=%s per_class=256',
-                     'real' if real_new else ('two_center' if two_centers else 'gaussian'),
-                     'two_center' if two_centers else 'gaussian')
-        cov_shrinkage = float(self.args.get('ca_cov_shrinkage', 0.0))
-        if cov_shrinkage > 0:
-            logging.info('CACovShrinkage task=%s alpha=%.4f target=diagonal classes=%s',
-                         self._cur_task, cov_shrinkage, crct_num)
-        cross_weight = float(self.args.get('ca_cross_task_margin_weight', 0.0))
-        if cross_weight > 0:
-            from utils.ca_cross_task_margin import cross_task_margin
-            cross_margin = float(self.args.get('ca_cross_task_margin', 0.05))
-            class_tasks = torch.repeat_interleave(
-                torch.arange(len(self.task_sizes), device=self._device),
-                torch.tensor(self.task_sizes, device=self._device))
-        for epoch in range(run_epochs):
-            losses = 0.
-            if cross_weight > 0:
-                ce_sum, cross_sum, active_sum = 0., 0., 0.
-
-            sampled_data = []
-            sampled_label = []
-            num_sampled_pcls = 256
-
-            for c_id in range(crct_num):
-                t_id = c_id // task_size
-                decay = (t_id + 1) / (self._cur_task + 1) * 0.1
-                cls_mean = self._class_means[c_id].to(self._device) * (0.9 + decay)
-                cls_cov = self._class_covs[c_id].to(self._device)
-                if cov_shrinkage > 0:
-                    cls_cov = ((1 - cov_shrinkage) * cls_cov
-                               + cov_shrinkage * torch.diag(cls_cov.diagonal()))
-
-                m = MultivariateNormal(cls_mean.float(), cls_cov.float())
-
-                sampled_data_single = m.sample(sample_shape=(num_sampled_pcls,))
-                if two_centers:
-                    # Decay the overall mean as before, not the offsets: this keeps
-                    # the mixture's total covariance equal to the original CA's.
-                    sampled_data_single = add_center_offsets(
-                        sampled_data_single, self._ca_mixture_offsets[c_id],
-                        self._ca_mixture_probs[c_id], center_generator)
-                if real_new and c_id >= self._known_classes:
-                    # Keep the Gaussian draw above so subsequent old-class draws stay paired.
-                    pool = self._ca_new_features[c_id]
-                    indices = torch.randint(len(pool), (num_sampled_pcls,), generator=real_generator)
-                    sampled_data_single = pool[indices].to(self._device)
-                sampled_data.append(sampled_data_single)
-                sampled_label.extend([c_id] * num_sampled_pcls)
-
-            sampled_data = torch.cat(sampled_data, dim=0).float().to(self._device)
-            sampled_label = torch.tensor(sampled_label).long().to(self._device)
-
-            inputs = sampled_data
-            targets = sampled_label
-
-            if boundary:
-                from utils.ca_boundary import boundary_weights
-                with torch.no_grad():
-                    pool_logits = torch.cat([self._network(chunk, fc_only=True)
-                                             for chunk in inputs.split(256)])
-                    weights = boundary_weights(pool_logits[:, :crct_num], targets)
-                logging.info('CABoundary task=%s epoch=%s weight_min=%.6f weight_max=%.6f weight_std=%.6f',
-                             self._cur_task, epoch, weights.min().item(), weights.max().item(), weights.std().item())
-
-            sf_indexes = torch.randperm(inputs.size(0))
-            inputs = inputs[sf_indexes]
-            targets = targets[sf_indexes]
-            if boundary:
-                weights = weights[sf_indexes]
-
-            for _iter in range(crct_num):
-                inp = inputs[_iter * num_sampled_pcls:(_iter + 1) * num_sampled_pcls]
-                tgt = targets[_iter * num_sampled_pcls:(_iter + 1) * num_sampled_pcls]
-                # -stage two only use classifiers
-                outputs = self._network(inp, fc_only=True)
-                logits = outputs
-
+        per_class = 256
+        for epoch in range(self.args["ca_epochs"]):
+            data, labels = [], []
+            for class_id in range(self._total_classes):
+                task_id = class_id // task_size
+                decay = (task_id + 1) / (self._cur_task + 1) * 0.1
+                mean = self._class_means[class_id].to(self._device) * (0.9 + decay)
+                cov = self._class_covs[class_id].to(self._device)
+                distribution = MultivariateNormal(mean.float(), cov.float())
+                data.append(distribution.sample(sample_shape=(per_class,)))
+                labels.extend([class_id] * per_class)
+            inputs = torch.cat(data, dim=0).float().to(self._device)
+            targets = torch.tensor(labels).long().to(self._device)
+            order = torch.randperm(inputs.size(0))
+            inputs, targets = inputs[order], targets[order]
+            losses = 0.0
+            for batch in range(self._total_classes):
+                inp = inputs[batch * per_class:(batch + 1) * per_class]
+                tgt = targets[batch * per_class:(batch + 1) * per_class]
+                logits = self._network(inp, fc_only=True)
                 if self.logit_norm is not None:
-                    per_task_norm = []
-                    prev_t_size = 0
-                    cur_t_size = 0
-                    for _ti in range(self._cur_task + 1):
-                        cur_t_size += self.task_sizes[_ti]
-                        temp_norm = torch.norm(logits[:, prev_t_size:cur_t_size], p=2, dim=-1, keepdim=True) + 1e-7
-                        per_task_norm.append(temp_norm)
-                        prev_t_size += self.task_sizes[_ti]
-                    per_task_norm = torch.cat(per_task_norm, dim=-1)
-                    norms = per_task_norm.mean(dim=-1, keepdim=True)
-
-                    norms_all = torch.norm(logits[:, :crct_num], p=2, dim=-1, keepdim=True) + 1e-7
-                    decoupled_logits = torch.div(logits[:, :crct_num], norms) / self.logit_norm
-                    loss_logits = decoupled_logits
+                    norms, start, end = [], 0, 0
+                    for task in range(self._cur_task + 1):
+                        end += self.task_sizes[task]
+                        norms.append(torch.norm(logits[:, start:end], p=2, dim=-1, keepdim=True) + 1e-7)
+                        start += self.task_sizes[task]
+                    norm = torch.cat(norms, dim=-1).mean(dim=-1, keepdim=True)
+                    loss_logits = torch.div(logits[:, :self._total_classes], norm) / self.logit_norm
                 else:
-                    loss_logits = logits[:, :crct_num] * self.args["scale"]
-
-                if boundary:
-                    batch_weights = weights[_iter * num_sampled_pcls:(_iter + 1) * num_sampled_pcls]
-                    loss = (F.cross_entropy(loss_logits, tgt, reduction='none') * batch_weights).mean()
-                else:
-                    loss = F.cross_entropy(loss_logits, tgt)
-
-                if cross_weight > 0:
-                    # Raw cosine margin: independent of the CA temperature/normalization.
-                    cross_loss, active = cross_task_margin(logits[:, :crct_num], tgt, class_tasks, cross_margin)
-                    ce_sum += loss.item()
-                    cross_sum += cross_loss.item()
-                    active_sum += active.item()
-                    loss = loss + cross_weight * cross_loss
-
+                    loss_logits = logits[:, :self._total_classes] * self.scale
+                loss = F.cross_entropy(loss_logits, tgt)
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
                 losses += loss.item()
-
             scheduler.step()
-            info = ('CA Task {} => Loss {:.3f} '
-                '(classifier alignment; final accuracy is logged after CA)'
-            ).format(self._cur_task, losses / self._total_classes)
-            logging.info(info)
-            if cross_weight > 0:
-                logging.info('CACrossTaskMargin task=%s epoch=%s margin=%.4f weight=%.4f '
-                             'ce=%.6f hinge=%.6f weighted=%.6f active_fraction=%.6f',
-                             self._cur_task, epoch + 1, cross_margin, cross_weight,
-                             ce_sum / crct_num, cross_sum / crct_num,
-                             cross_weight * cross_sum / crct_num, active_sum / crct_num)
+            logging.info("CA Task %s Epoch %s => Loss %.3f", self._cur_task, epoch + 1,
+                         losses / self._total_classes)
 
-        if real_new:
-            self._ca_new_features.clear()
+    def _compute_class_mean(self, data_manager):
+        means = torch.zeros((self._total_classes, self.feature_dim))
+        covs = torch.zeros((self._total_classes, self.feature_dim, self.feature_dim))
+        if self._class_means is not None:
+            means[:self._known_classes] = self._class_means
+            covs[:self._known_classes] = self._class_covs
+        self._class_means, self._class_covs = means, covs
+        for class_id in range(self._known_classes, self._total_classes):
+            _, _, dataset = data_manager.get_dataset(
+                np.arange(class_id, class_id + 1), source="train", mode="test", ret_data=True)
+            loader = DataLoader(dataset, batch_size=64, shuffle=False, num_workers=4)
+            vectors, _ = self._extract_vectors(loader)
+            mean = torch.mean(torch.tensor(vectors), dim=0)
+            cov = torch.cov(torch.tensor(vectors, dtype=torch.float64).T)
+            cov = cov + torch.eye(mean.shape[-1]) * 1e-3
+            self._class_means[class_id] = mean.detach()
+            self._class_covs[class_id] = cov.detach()
 
-    def _compute_class_mean(self, data_manager, check_diff=False, oracle=False):
-        self._ca_new_features = {}
-        two_centers = bool(self.args.get('ca_two_centers', False))
-        if two_centers:
-            from utils.ca_two_centers import fit_two_centers
-            offsets = torch.zeros(self._total_classes, 2, self.feature_dim)
-            probs = torch.zeros(self._total_classes, 2)
-            if self._known_classes:
-                offsets[:self._known_classes] = self._ca_mixture_offsets[:self._known_classes]
-                probs[:self._known_classes] = self._ca_mixture_probs[:self._known_classes]
-            self._ca_mixture_offsets, self._ca_mixture_probs = offsets, probs
-        cache_real = (self.args.get('ca_real_new_features', False)
-                      and self.args.get('ca', False) and self._cur_task > 0)
-        if hasattr(self,'_class_means') and self._class_means is not None and not check_diff:  # 已经完成过 Task 0，模型中已经存在之前算好的 _class_means（旧类别的均值矩阵）
-            ori_classes = self._class_means.shape[0]
-            assert ori_classes == self._known_classes
-            new_class_means = torch.zeros((self._total_classes, self.feature_dim))
-            new_class_means[:self._known_classes] = self._class_means
-            self._class_means = new_class_means
-            new_class_cov = torch.zeros((self._total_classes, self.feature_dim, self.feature_dim))
-            new_class_cov[:self._known_classes] = self._class_covs
-            self._class_covs = new_class_cov
-        elif not check_diff:  # 首次创建分支 —— 适用于 Task 0
-            self._class_means = torch.zeros((self._total_classes, self.feature_dim))
-            self._class_covs = torch.zeros((self._total_classes, self.feature_dim, self.feature_dim))
-
-        for class_idx in range(self._known_classes, self._total_classes):
-            data, targets, idx_dataset = data_manager.get_dataset(np.arange(class_idx, class_idx + 1), source='train',
-                                                                  mode='test', ret_data=True)
-            idx_loader = DataLoader(idx_dataset, batch_size=64, shuffle=False, num_workers=4)
-            vectors, _ = self._extract_vectors(idx_loader)
-            if cache_real:
-                self._ca_new_features[class_idx] = torch.tensor(vectors, dtype=torch.float32).detach().cpu()
-
-            class_mean = torch.mean(torch.tensor(vectors), dim=0)
-            class_cov = torch.cov(torch.tensor(vectors, dtype=torch.float64).T) + torch.eye(class_mean.shape[-1]) * 1e-3
-
-            if two_centers:
-                offsets, probs, shared_cov = fit_two_centers(vectors)
-                self._ca_mixture_offsets[class_idx] = offsets
-                self._ca_mixture_probs[class_idx] = probs
-                between_trace = (offsets.square().sum(1) * probs).sum()
-                logging.info('CATwoCenters class=%s samples=%s proportions=%s between_trace_fraction=%.6f',
-                             class_idx, len(vectors), probs.tolist(),
-                             float(between_trace / class_cov.trace()))
-                class_cov = shared_cov
-            self._class_means[class_idx, :] = class_mean.detach()
-            self._class_covs[class_idx, ...] = class_cov.detach()
-
-    def displacement(self, Y1, Y2, embedding_old, sigma):
-        DY = Y2 - Y1
-        distance = np.sum((np.tile(Y1[None, :, :], [embedding_old.shape[0], 1, 1]) - np.tile(embedding_old[:, None, :], [1, Y1.shape[0], 1])) ** 2, axis=2)
-        W = np.exp(-distance / (2 * sigma ** 2)) + 1e-5
-        W_norm = W / np.tile(np.sum(W, axis=1)[:, None], [1, W.shape[1]])
-        displacement = np.sum(np.tile(W_norm[:, :, None], [1, 1, DY.shape[1]]) * np.tile(DY[None, :, :], [W.shape[0], 1, 1]), axis=1)
-        return displacement
-
-    def extract_features(self, trainloader, model, task_id=None):
-        model = model.eval()
-        embedding_list = []
-        label_list = []
-        with torch.no_grad():
-            for i, batch in enumerate(trainloader):
-                (_, data, label) = batch
-                data = data.to(self._device)
-                label = label.to(self._device)
-                embedding = model.extract_vector(data, task_id)
-                embedding_list.append(embedding.cpu())
-                label_list.append(label.cpu())
-
-        embedding_list = torch.cat(embedding_list, dim=0)
-        label_list = torch.cat(label_list, dim=0)
-        return embedding_list, label_list
-
-    ###################################################################################################
-    def setup_RP(self):
-        self.initiated_G = False
-        self._network.use_RP = True
-        if self.args['M'] > 0:
-            # RP with M > 0
-            M = self.args['M']
-            self._network.weight = torch.nn.Parameter(
-                torch.Tensor(self._total_classes, M).to(device=self._device))  # num classes in task x M
-            self._network.W_rand = torch.randn(self._network.dim, M).to(device=self._device)
-            self.W_rand = copy.deepcopy(
-                self._network.W_rand)  # make a copy that gets passed each time the head is replaced
-        else:
-            # no RP, only decorrelation
-            M = self._network.dim  # this M is L in the paper
-        self.Q = torch.zeros(M, self.total_classnum)
-        self.G = torch.zeros(M, M)
-
-    def replace_fc(self, trainloader):
-        self._network = self._network.eval()
-
-        if self.args['use_RP']:
-            # these lines are needed because the CosineLinear head gets deleted between streams and replaced by one with more classes (for CIL)
-            self._network.use_RP = True
-            if self.args['M'] > 0:
-                self._network.W_rand = self.W_rand
-            else:
-                self._network.W_rand = None
-
-        Features_f = []
-        label_list = []
-        with torch.no_grad():
-            for i, batch in enumerate(trainloader):
-                (_, data, label) = batch
-                data = data.to(self._device)
-                label = label.to(self._device)
-                embedding = self._network(data)["features"]
-                Features_f.append(embedding.cpu())
-                label_list.append(label.cpu())
-        Features_f = torch.cat(Features_f, dim=0)
-        label_list = torch.cat(label_list, dim=0)
-
-        def target2onehot(targets, n_classes):
-            onehot = torch.zeros(targets.shape[0], n_classes).to(targets.device)
-            onehot.scatter_(dim=1, index=targets.long().view(-1, 1), value=1.0)
-            return onehot
-
-        Y = target2onehot(label_list, self.total_classnum)
-        if self.args['M'] > 0:
-            Features_h = torch.nn.functional.relu(Features_f @ self._network.W_rand.cpu())
-        else:
-            Features_h = Features_f
-        self.Q = self.Q + Features_h.T @ Y
-        self.G = self.G + Features_h.T @ Features_h
-        ridge = self.optimise_ridge_parameter(Features_h, Y)
-        Wo = torch.linalg.solve(self.G + ridge * torch.eye(self.G.size(dim=0)),
-                                self.Q).T  # better nmerical stability than .inv
-        self._network.weight.data = Wo[0:self._total_classes, :].to(device=self._device)
-
-    def optimise_ridge_parameter(self, Features, Y):
-        ridges = 10.0 ** np.arange(3, 9)
-        num_val_samples = int(Features.shape[0] * 0.8)
-        losses = []
-        Q_val = Features[0:num_val_samples, :].T @ Y[0:num_val_samples, :]
-        G_val = Features[0:num_val_samples, :].T @ Features[0:num_val_samples, :]
-        for ridge in ridges:
-            Wo = torch.linalg.solve(G_val + ridge * torch.eye(G_val.size(dim=0)), Q_val).T  # better nmerical stability than .inv
-            Y_train_pred = Features[num_val_samples::, :] @ Wo.T
-            losses.append(F.mse_loss(Y_train_pred, Y[num_val_samples::, :]))
-        ridge = ridges[np.argmin(np.array(losses))]
-        logging.info("Optimal lambda: " + str(ridge))
-        return ridge
-    ###################################################################################################
+    def after_task(self):
+        self._known_classes = self._total_classes

@@ -1,59 +1,23 @@
-# Python
+# Python / environments
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
-
-# Virtual environment
-venv/
 .venv/
+venv/
 env/
 
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# Training logs
+# Local data, logs and weights
+data/
 logs/
 *.log
-
-# Model weights
-*.pth
 *.pt
+*.pth
 *.ckpt
+*.npz
 *.bin
 
-# Datasets (too large for GitHub)
-*.npz
-*.tar
-*.zip
-
-# OS
+# Editor / OS
+.vscode/
+.idea/
 .DS_Store
-Thumbs.db
-
-# Misc
-*.out
-*.err
-run.sh.bak
-
-
-# vis
-visualizations/
-wandb/
-figures/
-
-# Local research outputs
-artifacts/
-manuscript/
-*.xlsx
-.reasonix/
-reasonix.toml
-
-# Raw experiment payloads stay local; source manifests remain versioned.
-docs/experiments/raw/experiments/**/*
-!docs/experiments/raw/experiments/**/
-!docs/experiments/raw/experiments/**/来源.md
+*.swp
+*.swo

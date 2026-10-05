@@ -1,5 +1,0 @@
-{
-  "definition": "SCP copies of stable launch manifests; SHA256 matched authenticated remote sha256sum",
-  "3090-launch-manifest.json": "4002d3c5b1b083fe1a7e816f3e1a22e4d7ab8600f960179884edcaba7564a08a",
-  "5090-launch-manifest.json": "67e4fb6cd363a7a2554fce4a361fa67cbb7bb06b5f9d55c5184d22d9b27dd2f8"
-}
