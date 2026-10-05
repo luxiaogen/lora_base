@@ -41,11 +41,13 @@ def read_run(directory, record):
     for name, marker in (('epochs', 'CoreEpochUpdate'), ('updates', 'ProtectionPositionUpdate'),
                          ('masks', 'ProtectionPositionMask'), ('diagnostics', 'CorePositionDiagnostic'),
                          ('costs', 'CoreCost'), ('storage', 'CoreStorage')):
-        rows[name] = [dict(mode=record['mode'], **row) for row in json_rows(content, marker)]
-    rows['tasks'] = [dict(mode=record['mode'], task=i, **row) for i, row in enumerate(tasks)]
+        rows[name] = [dict(row, mode=record['mode']) for row in json_rows(content, marker)]
+    rows['tasks'] = [dict(row, mode=record['mode'], task=i) for i, row in enumerate(tasks)]
     expected_epochs = {(task, epoch, layer, branch, projection)
         for task in range(10) for epoch in range(1, 21) for layer in range(12)
-        for branch in (('S',) if task == 0 else ('S', 'P')) for projection in ('Q', 'K', 'V')}
+        for branch in (('S',) if task == 0 else
+            ('Single',) if snapshot['effective_config'].get('dual_mask_branch_layout') == 'single' else ('S', 'P'))
+        for projection in ('Q', 'K', 'V')}
     expected_diagnostics = {(task, epoch, partition) for task in (1, 5, 9)
         for epoch in (1, 5, 10, 20) for partition in ('old', 'new')}
     summary['epoch_records_complete'] = (len(rows['epochs']) == len(expected_epochs)

@@ -1,0 +1,50 @@
+{
+  "common_overrides": {
+    "dual_mask_fixed_coverage": 0.825,
+    "dual_mask_fixed_protect_strength": 0.5,
+    "dual_mask_private_rank": 40,
+    "dual_mask_fixed_conflict_strength": 0.5,
+    "dual_mask_reg_weight": 0,
+    "dual_mask_conflict_ratio": 0.1,
+    "dual_mask_branch_layout": "dual",
+    "dual_mask_permission_mode": "asymmetric",
+    "dual_mask_conflict_score_mode": "conflict",
+    "dual_mask_conflict_exact_topk": false,
+    "dual_mask_protect_position": "wpre",
+    "dual_mask_position_norm_match": "off",
+    "dual_mask_uniform_norm_matched": false,
+    "dual_mask_mechanism_audit": true,
+    "dual_mask_position_audit": true,
+    "dual_mask_conflict_reg_original_score": true,
+    "slora_lr_multiplier": 1,
+    "plora_lr_multiplier": 1,
+    "sp_staged_s_epochs": 0,
+    "late_weight_average_epochs": 0,
+    "plora_a_init_mode": "off",
+    "p_conflict_freeze_epoch": 0,
+    "p_permission_release": "off",
+    "p_permission_position": "wpre",
+    "save_task_weights": false,
+    "stage_audit": false
+  },
+  "3090": [
+    {"name": "R0", "label": "M: compact dual asymmetric", "overrides": {"dual_mask_conflict_exact_topk": true, "dual_mask_conflict_score_mode": "magnitude"}},
+    {"name": "R1", "label": "M: both soft permissions", "overrides": {"dual_mask_conflict_exact_topk": true, "dual_mask_conflict_score_mode": "magnitude", "dual_mask_permission_mode": "symmetric_soft"}},
+    {"name": "R2", "label": "M: single rank104, soft permissions", "overrides": {"dual_mask_conflict_exact_topk": true, "dual_mask_conflict_score_mode": "magnitude", "dual_mask_permission_mode": "symmetric_soft", "dual_mask_branch_layout": "single"}},
+    {"name": "R3", "label": "M: dual, no protection permissions", "overrides": {"dual_mask_conflict_exact_topk": true, "dual_mask_conflict_score_mode": "magnitude", "dual_mask_permission_mode": "symmetric_soft", "dual_mask_fixed_protect_strength": 0}},
+    {"name": "R4", "label": "M: Wpre positions, paired norm", "overrides": {"dual_mask_conflict_exact_topk": true, "dual_mask_conflict_score_mode": "magnitude", "dual_mask_position_norm_match": "paired_min"}},
+    {"name": "R5", "label": "M: permuted positions, paired norm", "overrides": {"dual_mask_conflict_exact_topk": true, "dual_mask_conflict_score_mode": "magnitude", "dual_mask_position_norm_match": "paired_min", "dual_mask_protect_position": "permuted"}},
+    {"name": "R6", "label": "M: permuted positions, no norm control", "overrides": {"dual_mask_conflict_exact_topk": true, "dual_mask_conflict_score_mode": "magnitude", "dual_mask_protect_position": "permuted"}},
+    {"name": "R7", "label": "M: single rank104, no protection permissions", "overrides": {"dual_mask_conflict_exact_topk": true, "dual_mask_conflict_score_mode": "magnitude", "dual_mask_permission_mode": "symmetric_soft", "dual_mask_fixed_protect_strength": 0, "dual_mask_branch_layout": "single"}}
+  ],
+  "5090": [
+    {"name": "S0", "label": "F: fresh B3 reference", "overrides": {}},
+    {"name": "S1", "label": "F: fixed10 product selection", "overrides": {"dual_mask_conflict_exact_topk": true}},
+    {"name": "S2", "label": "M: fixed10 magnitude selection", "overrides": {"dual_mask_conflict_exact_topk": true, "dual_mask_conflict_score_mode": "magnitude"}},
+    {"name": "S3", "label": "F: adaptive conflict strength", "overrides": {"dual_mask_fixed_conflict_strength": null}},
+    {"name": "S4", "label": "F: original count, magnitude ranking", "overrides": {"dual_mask_conflict_score_mode": "magnitude"}},
+    {"name": "S5", "label": "F: adaptive strength, magnitude ranking", "overrides": {"dual_mask_fixed_conflict_strength": null, "dual_mask_conflict_score_mode": "magnitude"}},
+    {"name": "S6", "label": "M: uniform removed-norm-matched suppression", "overrides": {"dual_mask_conflict_exact_topk": true, "dual_mask_conflict_score_mode": "magnitude", "dual_mask_uniform_norm_matched": true}},
+    {"name": "S7", "label": "M: adaptive conflict strength", "overrides": {"dual_mask_conflict_exact_topk": true, "dual_mask_conflict_score_mode": "magnitude", "dual_mask_fixed_conflict_strength": null}}
+  ]
+}

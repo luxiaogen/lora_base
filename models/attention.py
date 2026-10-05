@@ -699,6 +699,13 @@ class Attention_LoRA(nn.Module):
             logging.info("Unknown lora_A_init=%s; using orthogonal A init.", self.lora_A_init)
         return _random_fixed_A_init(dim, rank, device, dtype)
 
+    def _single_branch_active(self, task=None):
+        task = self.cur_task if task is None else int(task)
+        return task > 0 and self.args.get('dual_mask_branch_layout', 'dual') == 'single'
+
+    def _shared_gamma(self, task=None):
+        return 1.0 if self._single_branch_active(task) else float(self.slora_gamma)
+
     def before_task(self, task: int):
 
         self.clear_global_conflict_masks()
@@ -742,6 +749,24 @@ class Attention_LoRA(nn.Module):
             device=device,dtype=dtype,
         )
 
+        if self._single_branch_active(t):
+            # Reuse the original draws and modules; replacing parameters draws no RNG.
+            shared, private = self.S_lora[t], self.P_lora[t]
+            shared.A.weight = nn.Parameter(torch.cat((
+                self.slora_gamma * shared.A_weight.detach(),
+                self.plora_gamma * private.A_weight.detach())), requires_grad=False)
+            shared.B.weight = nn.Parameter(torch.cat((shared.B_weight.detach(),
+                                                      private.B_weight.detach()), dim=1))
+            shared.r = rs + p_rank
+            shared.A.out_features = shared.r
+            shared.B.in_features = shared.r
+            self.P_lora[t] = None
+            logging.info('SingleBranchAllocation %s', json.dumps(dict(task=t,
+                layer=self.layer_idx, rank=shared.r, source_ranks=[rs, p_rank],
+                source_gammas=[self.slora_gamma, self.plora_gamma],
+                factor_parameters=sum(p.numel() for p in shared.parameters()),
+                trainable_B_parameters=shared.B_weight.numel())))
+
         self.rebuild_dual_masks()  # Dual masks rebuilt: W0 protect density 0.5000, plastic density 0.5000
         if t > 0 and any(self.args.get(key) is not None for key in
                 ('dual_mask_fixed_coverage', 'dual_mask_fixed_protect_strength', 'dual_mask_fixed_conflict_strength')):
@@ -750,9 +775,11 @@ class Attention_LoRA(nn.Module):
                 private_rank=p_rank, conflict_strength=self._conflict_parameters()[1])))
         logging.info(
             "Task %s LoRA allocation: S_rank=%s, P_rank=%s, controller_P_rank=%s, fixed_P_rank=%s, S_params=%s, P_params=%s, P_active=%s",
-            t, rs, p_rank, controller_rank, self.dual_mask_private_rank,
+            t, self.S_lora[t].r, p_rank if self.P_lora[t] is not None else 0,
+            controller_rank, self.dual_mask_private_rank,
             sum(p.numel() for p in self.S_lora[t].parameters()),
-            sum(p.numel() for p in self.P_lora[t].parameters()), t > 0 and self.use_plora,
+            sum(p.numel() for p in self.P_lora[t].parameters()) if self.P_lora[t] is not None else 0,
+            t > 0 and self.use_plora and self.P_lora[t] is not None,
         )
 
     def _init_lora_weight(self, task, layer_idx:int=0):
@@ -959,6 +986,11 @@ class Attention_LoRA(nn.Module):
         ## abs(delta[i, j]) 越大，说明 LoRA 越想修改这个位置
         ## ba_importance[i, j] 越大，表示 BA 在这个位置的改动越强   _normalize_score 归一化到大概 [0, 1]
         ba_importance = _normalize_score(delta.detach().abs())
+        if (self.cur_task > 0 and self.dual_mask_conflict_exact_topk
+                and self.dual_mask_conflict_score_mode == 'magnitude'
+                and self.dual_mask_conflict_budget_multiplier == 1.0):
+            ratio = self.dual_mask_conflict_ratio if conflict_ratio is None else conflict_ratio
+            return ba_importance, _exact_top_ratio_mask(ba_importance, ratio, valid_mask)
         w0_importance = self.w0_importance.to(device=delta.device, dtype=delta.dtype)
 
         # 如果 W0 在这个位置很重要，并且 LoRA 也想大幅修改这个位置，那么这个位置就是高冲突位置
@@ -1057,7 +1089,7 @@ class Attention_LoRA(nn.Module):
             if self.S_lora[task] is None:
                 return None
             unit = self.S_lora[task]
-            gamma = float(self.slora_gamma)
+            gamma = self._shared_gamma(task)
 
         delta = gamma * (unit.B_weight.detach() @ unit.A_weight.detach())
         valid_mask = torch.ones_like(delta)
@@ -1567,7 +1599,7 @@ class Attention_LoRA(nn.Module):
         else:
             unit_s = self.S_lora[task]
             if unit_s is not None and (self.use_slora or task == 0):
-                raw_delta_s = self.slora_gamma * (unit_s.B_weight @ unit_s.A_weight)
+                raw_delta_s = self._shared_gamma(task) * (unit_s.B_weight @ unit_s.A_weight)
                 current_delta = current_delta + self._safe_delta(raw_delta_s,isolated=False,)
 
             unit_p = self.P_lora[task]
@@ -2021,7 +2053,7 @@ class Attention_LoRA(nn.Module):
             self._finalize_safe_residual(x)
             return out
 
-        slora_gamma = float(self.slora_gamma)
+        slora_gamma = self._shared_gamma(t_idx)
         plora_gamma = float(self.plora_gamma)
         out = zero_output
 
@@ -2056,6 +2088,8 @@ class Attention_LoRA(nn.Module):
 
     def after_task(self, task: int):
         t = int(task)
+        if self.S_lora[t] is None and self.P_lora[t] is None:
+            return None
         device = next(self.parameters()).device
         dtype = self.qkv.weight.dtype
         # s=0.5 p=0.75
@@ -2091,7 +2125,8 @@ class Attention_LoRA(nn.Module):
             branch_deltas.append(raw_delta("S", self.S_lora[t], 1.0, isolated=False))
         else:
             if self.use_slora or t == 0:
-                branch_deltas.append(raw_delta("S",self.S_lora[t],float(self.slora_gamma),isolated=False,))
+                branch_deltas.append(raw_delta("Single" if self._single_branch_active(t) else "S",
+                    self.S_lora[t], self._shared_gamma(t), isolated=False))
             if t > 0 and self.use_plora and self.P_lora[t] is not None:
                 branch_deltas.append(raw_delta("P",self.P_lora[t],float(self.plora_gamma),isolated=True,))
 

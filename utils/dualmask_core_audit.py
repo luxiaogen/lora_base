@@ -130,9 +130,10 @@ def epoch_updates(learner, epoch):
         task = learner._cur_task
         mode = learner.args.get('dual_mask_permission_mode', 'asymmetric')
         for branch, isolated, gamma, unit in (
-                ('S', False, module.slora_gamma, module.S_lora[task]),
+                ('Single' if module._single_branch_active(task) else 'S', False,
+                 module._shared_gamma(task), module.S_lora[task]),
                 ('P', True, module.plora_gamma, module.P_lora[task])):
-            if task == 0 and isolated:
+            if unit is None or (task == 0 and isolated):
                 continue
             delta = unit.B_weight @ unit.A_weight
             effective, _, selected = module._safe_delta(delta, isolated, return_details=True)
@@ -194,6 +195,16 @@ def storage_bytes(learner, stage):
     for group, attr in (('ca_means', '_class_means'), ('ca_covariances', '_class_covs'),
                         ('wpre_class_prototypes', '_w0_class_means')):
         add(group, getattr(learner, attr, None))
+    activity = {}
+    if 'dual_mask_branch_layout' in learner.args:
+        units = [unit for module in learner._iter_lora_modules()
+                 for unit in (module.S_lora[learner._cur_task],
+                              module.P_lora[learner._cur_task] if learner._cur_task else None)
+                 if unit is not None]
+        activity = dict(branch_layout=learner.args['dual_mask_branch_layout'],
+            active_adapter_factor_parameters=sum(p.numel() for unit in units for p in unit.parameters()),
+            trainable_adapter_parameters=sum(p.numel() for unit in units for p in unit.parameters() if p.requires_grad),
+            trainable_network_parameters=sum(p.numel() for p in learner._network.parameters() if p.requires_grad))
     logging.info('CoreStorage %s', json.dumps(dict(task=learner._cur_task, stage=stage,
         groups_bytes=groups, total_tensor_bytes=sum(groups.values()),
-        definition='unique live tensor views; excludes optimizer and transient workspaces')))
+        definition='unique live tensor views; excludes optimizer and transient workspaces', **activity)))
