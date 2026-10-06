@@ -54,11 +54,12 @@ def run(machine, name, directory, revision, smoke=False, dry_run=False):
     if dry_run:
         return dict(mode=name, status='dry_run', exit_code=0, minutes=0)
     directory.mkdir(parents=True)
-    effective = json.loads((ROOT / 'exps/dlora/imgr10.json').read_text())
+    config_path = command[command.index('--config') + 1]
+    effective = json.loads((ROOT / config_path).read_text())
     effective.update(settings)
     paths = ['main.py', 'trainer.py', str(BASE.relative_to(ROOT)), str(SPEC.relative_to(ROOT)),
              'scripts/run_core_evidence_night.py', 'scripts/analyze_core_evidence.py']
-    paths.append('scripts/analyze_protect_position.py')
+    paths += ['scripts/analyze_protect_position.py', config_path]
     paths += EXTRA_SOURCE_PATHS
     paths += sorted(str(path.relative_to(ROOT)) for folder in ('models', 'methods', 'utils')
                     for path in (ROOT / folder).rglob('*.py'))

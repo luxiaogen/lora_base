@@ -1,0 +1,32 @@
+{
+  "name": "baseline_4datasets_3090",
+  "datasets": [
+    {"name": "cifar100", "config": "exps/dlora/cifar10.json", "overrides": {"ca": true, "ca_epochs": 5}},
+    {"name": "imga10", "config": "exps/dlora/imga10.json"},
+    {"name": "cub10", "config": "exps/dlora/cub10.json"},
+    {"name": "imgr10", "config": "exps/dlora/imgr10.json"}
+  ],
+  "seeds": [1993, 1996, 1997],
+  "variants": [{"name": "original", "description": "Original complete DualMask, Task0 anchor2.5"}],
+  "common_overrides": {
+    "dual_mask_anchor_reg_weight": 2.5,
+    "dual_mask_branch_layout": "dual",
+    "dual_mask_permission_mode": "asymmetric",
+    "dual_mask_fixed_coverage": null,
+    "dual_mask_fixed_protect_strength": null,
+    "dual_mask_fixed_conflict_strength": null,
+    "dual_mask_private_rank": 0,
+    "dual_mask_conflict_score_mode": "conflict",
+    "dual_mask_conflict_exact_topk": false,
+    "dual_mask_reg_weight": 0.01,
+    "dual_mask_position_norm_match": "off",
+    "p_permission_release": "off",
+    "p_permission_position": "wpre",
+    "dual_mask_position_audit": false,
+    "dual_mask_mechanism_audit": false,
+    "stage_audit": false,
+    "save_task_weights": false,
+    "disable_fused_sdpa": true,
+    "wandb_group": "baseline_4datasets_3090"
+  }
+}
