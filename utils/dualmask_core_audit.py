@@ -145,6 +145,10 @@ def epoch_updates(learner, epoch):
             protect = module._p_protect_mask() if isolated else module.general_mask
             release = module.p_permission_release_mask if task > 0 and isolated else None
             allowed = None if release is None else ((1 - protect).bool() | release.bool())
+            relative = task > 0 and module.dual_mask_conflict_score_mode in ('wpre_relative', 'task_relative')
+            if relative:
+                from models.attention import _exact_top_ratio_mask
+                magnitude_mask = _exact_top_ratio_mask(delta.detach().abs(), module.dual_mask_conflict_ratio).bool()
             for row in update_rows(gamma * delta, gamma * base, gamma * effective,
                     selected, protect, allowed_mask=allowed, task=task, epoch=epoch,
                     layer=module.layer_idx, branch=branch, permission_mode=mode,
@@ -152,6 +156,14 @@ def epoch_updates(learner, epoch):
                     p_permission_norm_match=learner.args.get('p_permission_norm_match', True) if release is not None else False,
                     position=(learner.args.get('p_permission_position', 'wpre') if isolated
                         and module.p_permission_protect is not None else learner.args.get('dual_mask_protect_position', 'wpre')) if task else 'wpre'):
+                if relative:
+                    index = ('Q', 'K', 'V').index(row['projection'])
+                    first, second = selected.bool().chunk(3)[index], magnitude_mask.chunk(3)[index]
+                    union = int((first | second).sum())
+                    scale = module.relative_conflict_scale.chunk(3)[index]
+                    row.update(score_mode=module.dual_mask_conflict_score_mode,
+                               magnitude_mask_jaccard=int((first & second).sum()) / union if union else 1.0,
+                               reference_row_rms_min=float(scale.min()), reference_row_rms_max=float(scale.max()))
                 logging.info('CoreEpochUpdate %s', json.dumps(row))
             if task > 0 and isolated and learner.args.get('p_permission_release', 'off') != 'off':
                 protect = module._p_protect_mask().to(delta)

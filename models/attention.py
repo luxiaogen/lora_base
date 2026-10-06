@@ -287,6 +287,7 @@ class Attention_LoRA(nn.Module):
         self.register_buffer("p_direction_left", None, persistent=False)
         self.register_buffer("p_direction_singular", None, persistent=False)
         self.register_buffer("p_direction_right", None, persistent=False)
+        self.register_buffer("relative_conflict_scale", None, persistent=False)
         self._p_direction_state = None
 
         self._p_score_diagnostic_gate = None
@@ -716,6 +717,11 @@ class Attention_LoRA(nn.Module):
 
         t = int(task)
         self.cur_task = t
+        self.relative_conflict_scale = None
+        if t > 0 and self.dual_mask_conflict_score_mode in ('wpre_relative', 'task_relative'):
+            reference = (self.pretrained_weight if self.dual_mask_conflict_score_mode == 'wpre_relative'
+                         else self.qkv.weight)
+            self.relative_conflict_scale = reference.detach().float().square().mean(1, keepdim=True).sqrt().clamp_min(1e-12)
         self.p_permission_release_mask = None
         if t > 0 and self.args.get('dual_mask_fixed_protect_strength') is not None:
             self.effective_protect_strength = self.args['dual_mask_fixed_protect_strength']
@@ -983,6 +989,10 @@ class Attention_LoRA(nn.Module):
             conflict_ratio: Optional[float] = None,
             valid_mask: Optional[torch.Tensor] = None,
     ):
+        if self.cur_task > 0 and self.dual_mask_conflict_score_mode in ('wpre_relative', 'task_relative'):
+            score = _normalize_score(delta.detach().float().abs() / self.relative_conflict_scale)
+            ratio = self.dual_mask_conflict_ratio if conflict_ratio is None else conflict_ratio
+            return score, _exact_top_ratio_mask(score, ratio, valid_mask)
         ## abs(delta[i, j]) 越大，说明 LoRA 越想修改这个位置
         ## ba_importance[i, j] 越大，表示 BA 在这个位置的改动越强   _normalize_score 归一化到大概 [0, 1]
         ba_importance = _normalize_score(delta.detach().abs())
@@ -1741,12 +1751,15 @@ class Attention_LoRA(nn.Module):
             safe_delta: torch.Tensor,
             conflict_ratio: float,
             conflict_strength: float,
+            applied_mask: Optional[torch.Tensor] = None,
     ):
         """Measure the P mask actually used by merge, without changing it."""
         plastic = (1.0 - self.general_mask.to(raw_delta)).bool()
         before_conflict = raw_delta * plastic.to(raw_delta)
         reference_removed_norm = None
-        if (
+        if applied_mask is not None:
+            pass  # New relative scores use the mask computed from the unscaled factor.
+        elif (
                 self.dual_mask_conflict_merge_mode == "suppress"
                 and self._effective_gate_mode() == "full"
                 and self.dual_mask_private_conflict_mode != "none"
@@ -1870,11 +1883,13 @@ class Attention_LoRA(nn.Module):
         private_item = next((item for item in branch_deltas if item["isolated"]),None,)
         if private_item is not None and not self._p_direction_active():
             private_raw = private_item["raw_delta"]
+            relative = self.cur_task > 0 and self.dual_mask_conflict_score_mode in ('wpre_relative', 'task_relative')
             applied = self._private_merge_diagnostic(
                 private_raw,
                 private_item["safe_delta"],
                 conflict_ratio,
                 conflict_strength,
+                applied_mask=private_item['actual_mask'] if relative else None,
             )
             logging.info(
                 "Task %s layer %s P applied merge diagnostic: "
@@ -1898,7 +1913,8 @@ class Attention_LoRA(nn.Module):
                 applied["merge_error"],
             )
             plastic_mask = (1.0 - protect_mask).to(device=private_raw.device,dtype=private_raw.dtype,)
-            private_score, global_private_mask = self._joint_conflict(private_raw,conflict_ratio=conflict_ratio,)
+            private_score, global_private_mask = self._joint_conflict(
+                private_item['factor_delta'] if relative else private_raw, conflict_ratio=conflict_ratio)
             if self.frozen_p_conflict_mask is not None:
                 global_private_mask = self.frozen_p_conflict_mask.to(private_raw)
             if self.cur_task > 0 and self.args.get("p_hard_zero_mode", "off") != "off":
@@ -2105,7 +2121,8 @@ class Attention_LoRA(nn.Module):
             }
 
         def mask_delta(item, conflict_ratio: float, conflict_strength: float):
-            unscaled = self._core_policy_active() or (item['isolated'] and t > 0 and (
+            relative = t > 0 and self.dual_mask_conflict_score_mode in ('wpre_relative', 'task_relative')
+            unscaled = relative or self._core_policy_active() or (item['isolated'] and t > 0 and (
                 self.args.get('p_permission_release', 'off') != 'off'
                 or self.args.get('p_permission_position', 'wpre') == 'permuted'))
             value = item['factor_delta'] if unscaled else item['raw_delta']

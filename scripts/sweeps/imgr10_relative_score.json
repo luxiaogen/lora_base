@@ -1,0 +1,11 @@
+{
+  "reference_revision": "f43ccf986a7a1c18316f46132e64f11841ae7123",
+  "reference_queues": {
+    "3090": "logs/shell_logs/imgr10_compact_structure_3090/20261006_004352_120444",
+    "5090": "logs/shell_logs/imgr10_compact_structure_5090/20261006_004223_480161"
+  },
+  "reference_modes": {"3090": "R0", "5090": "S2"},
+  "modes": ["wpre_relative", "task_relative"],
+  "changed_training_files": ["models/attention.py", "utils/dualmask_core_audit.py"],
+  "scope": "Both S/P ranks use raw BA divided by reference output-row RMS; exact full-layer QKV 10%; beta0.5; Task1+ only."
+}
