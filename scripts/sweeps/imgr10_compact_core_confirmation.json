@@ -1,0 +1,34 @@
+{
+  "reference_revision": "f43ccf986a7a1c18316f46132e64f11841ae7123",
+  "reference_queues": {
+    "3090": "logs/shell_logs/imgr10_compact_structure_3090/20261006_004352_120444",
+    "5090": "logs/shell_logs/imgr10_compact_structure_5090/20261006_004223_480161"
+  },
+  "references": {
+    "3090": {"C11": "R0", "C01": "R3"},
+    "5090": {"M": "S2"}
+  },
+  "3090": [
+    {"name": "C10", "label": "M: permissions only", "overrides": {
+      "dual_mask_s_conflict_enabled": false,
+      "dual_mask_p_conflict_enabled": false
+    }},
+    {"name": "C00", "label": "M: neither permissions nor suppression", "overrides": {
+      "dual_mask_permission_mode": "symmetric_soft",
+      "dual_mask_fixed_protect_strength": 0,
+      "dual_mask_s_conflict_enabled": false,
+      "dual_mask_p_conflict_enabled": false
+    }}
+  ],
+  "5090": [
+    {"name": "O", "label": "Original complete DualMask", "overrides": {
+      "dual_mask_fixed_coverage": null,
+      "dual_mask_fixed_protect_strength": null,
+      "dual_mask_fixed_conflict_strength": null,
+      "dual_mask_private_rank": 0,
+      "dual_mask_conflict_score_mode": "conflict",
+      "dual_mask_conflict_exact_topk": false,
+      "dual_mask_reg_weight": 0.01
+    }}
+  ]
+}
