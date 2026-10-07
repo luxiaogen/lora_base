@@ -66,7 +66,7 @@ def validate_settings(machine):
         variant, _ = identity(name)
         config = dict(json.loads((ROOT / data[machine]['config']).read_text()), **settings_for(machine, name))
         expected = dict(init_epoch=20, epochs=40 if variant.endswith('40') else 20,
-            ca=True, ca_epochs=5, rank=64 if machine == '3090' else 32,
+            ca=True, ca_epochs=5, rank={'imgr10':64,'imga10':32}[data[machine]['dataset']],
             dual_mask_anchor_reg_weight=2.5, dual_mask_task0_gate_mode='unmasked',
             dual_mask_permission_mode='asymmetric', dual_mask_branch_layout='dual',
             dual_mask_conflict_granularity='layer', dual_mask_private_conflict_mode='global',
@@ -84,8 +84,9 @@ def validate_settings(machine):
 
 def check_resume(directory, machine, revision):
     manifest = json.loads((directory / 'manifest.json').read_text())
-    if manifest['machine'] != machine or manifest['revision'] != revision:
-        raise ValueError('Resume requires the original machine and revision.')
+    if (manifest['machine'] != machine or manifest['revision'] != revision
+            or manifest.get('sweep_spec','scripts/sweeps/tail_update.json') != str(SPEC.relative_to(ROOT))):
+        raise ValueError('Resume requires the original machine, sweep and revision.')
     active_path = directory / 'active.json'
     if active_path.exists():
         active = json.loads(active_path.read_text())
@@ -123,7 +124,7 @@ def check_resume(directory, machine, revision):
 def summarize_safely(directory, machine, records):
     try:
         import analyze_tail_update
-        analyze_tail_update.summarize(directory, machine, records)
+        analyze_tail_update.summarize_saved(directory)
     except Exception:
         with (directory / 'analysis_errors.jsonl').open('a') as stream:
             stream.write(json.dumps(dict(time=datetime.datetime.now().isoformat(), traceback=traceback.format_exc())) + '\n')
@@ -206,19 +207,23 @@ def execute(machine, selected, directory, revision, mode='run', hours=10):
 
 
 def main():
+    global SPEC
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--machine', choices=('3090', '5090'), required=True)
+    parser.add_argument('--spec', type=Path, default=SPEC)
     parser.add_argument('--mode', choices=('run', 'smoke', 'dry-run'), default='run')
     parser.add_argument('--modes', nargs='+')
     parser.add_argument('--hours', type=float, default=10)
     parser.add_argument('--resume', type=Path)
     args = parser.parse_args()
+    SPEC = args.spec if args.spec.is_absolute() else ROOT / args.spec
     selected = args.modes or modes(args.machine)
     if not math.isfinite(args.hours) or args.hours <= 0 or len(set(selected)) != len(selected) or any(n not in modes(args.machine) for n in selected):
         parser.error('Use positive hours and unique planned modes.')
     validate_settings(args.machine)
     revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
-    directory = args.resume or ROOT / ('logs/shell_logs/tail_update_' + args.machine) / datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+    queue_name = 'tail_update_' + args.machine if SPEC.name == 'tail_update.json' else SPEC.stem
+    directory = args.resume or ROOT / ('logs/shell_logs/' + queue_name) / datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')
     if args.mode != 'dry-run':
         if args.resume:
             check_resume(directory, args.machine, revision)
@@ -226,7 +231,8 @@ def main():
         directory.mkdir(parents=True, exist_ok=True)
         (directory / ('resume_manifest.json' if args.resume else 'manifest.json')).write_text(json.dumps(dict(
             machine=args.machine, revision=revision, queue_pid=os.getpid(), order=selected,
-            hours=args.hours, dataset=data, start=datetime.datetime.now().isoformat()), indent=2) + '\n')
+            hours=args.hours, dataset=data, sweep_spec=str(SPEC.relative_to(ROOT)),
+            start=datetime.datetime.now().isoformat()), indent=2) + '\n')
     print('Code revision:', revision, '\nQueue PID:', os.getpid(), '\nOutputs:', directory, '\nOrder:', selected, flush=True)
     return execute(args.machine, selected, directory, revision, args.mode, args.hours)
 

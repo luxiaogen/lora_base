@@ -18,7 +18,7 @@ M固定质量覆盖0.825、保护强度0.5、抑制强度0.5、幅度Top-10%、�
 
 3090默认9组，顺序为每个seed的M→C→T，seed依次1993/1996/1997。
 5090脚本已准备：ImageNet-A每seed O→M→C→T→U，之后每seed M40→C40，共21组。
-**用户最新指示：5090暂不启动。**
+**用户最新指示：不使用5090，将原5090的ImageNet-A队列迁到3090，用lwait等现有ImageNet-R队列结束后启动。**
 
 ```fish
 bash scripts/10_07_tail_update_3090.sh
@@ -26,7 +26,14 @@ bash scripts/10_07_tail_update_3090.sh
 bash scripts/10_07_tail_update_3090.sh --mode dry-run
 # 用原队列续跑（代码、配置及已完成证据须一致）；保留原10小时截止
 bash scripts/10_07_tail_update_3090.sh --resume /实际队列绝对目录
+# ImageNet-A迁移入口；仅在当前ImageNet-R队列结束后运行
+bash scripts/10_07_tail_update_imga10_3090.sh --hours 10
 ```
+
+迁移配置为`tail_update_imga10_3090.json`，仍是原定21组，机器身份真实记录为3090。
+rank按数据集而非GPU校验；读3090本机`imga10.json`。CA统一5轮，不要求本机JSON的原默认值也是5。
+新队列输出独立放在`logs/shell_logs/tail_update_imga10_3090/`，manifest保存sweep_spec供续跑和离线分析恢复。
+等待期间不更新当前训练目录；代码快进、CPU检查和GPU短测均在lwait结束后执行。
 
 队列先对每种配方做一次Task0–1、各一轮短测；不重复短测三个seed。
 10小时从本次首个GPU短测开始计时，截止后不启动新正式组，已启动T10完整结束。

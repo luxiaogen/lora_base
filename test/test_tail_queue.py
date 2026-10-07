@@ -26,7 +26,7 @@ class TailQueueTests(unittest.TestCase):
             effective = dict(source, **reference)
             for field in runner.baseline.DATASET_FIELDS:
                 if field in source:
-                    self.assertEqual(effective[field], source[field])
+                    self.assertEqual(effective[field], {'ca':True,'ca_epochs':5}.get(field,source[field]))
             for variant, rule in (('C','soft_tail'), ('T','step_tail_matched')):
                 candidate = runner.settings_for(machine, variant + '_seed1993')
                 changed = {k for k in reference.keys() | candidate.keys() if reference.get(k) != candidate.get(k)}
@@ -45,6 +45,34 @@ class TailQueueTests(unittest.TestCase):
             self.assertEqual(original['dual_mask_reg_weight'], .01)
             self.assertIsNone(original['dual_mask_fixed_coverage'])
             self.assertEqual(original['dual_mask_private_rank'], 0)
+
+    def test_imagenet_a_migration_records_real_3090_and_preserves_recipe(self):
+        with patch.object(runner,'SPEC',runner.ROOT / 'scripts/sweeps/tail_update_imga10_3090.json'):
+            self.assertEqual(len(runner.modes('3090')),21)
+            self.assertEqual(runner.modes('3090')[:5],['O_seed1993','M_seed1993','C_seed1993','T_seed1993','U_seed1993'])
+            runner.validate_settings('3090')
+            source=json.loads((runner.ROOT / 'exps/dlora/imga10.json').read_text())
+            for name in runner.modes('3090'):
+                command,settings=runner.command_for('3090',name,Path('/queue') / name)
+                self.assertEqual(command[command.index('--config')+1],'exps/dlora/imga10.json')
+                config=dict(source,**settings)
+                self.assertEqual(config['rank'],32)
+                for key in ('init_lr','lrate','margin','slora_gamma','plora_gamma','data_path'):
+                    self.assertEqual(config[key],source[key])
+                self.assertEqual(config['ca_epochs'],5)
+                self.assertEqual(config['dual_mask_private_rank'],0 if name.startswith('O_') else 20)
+                self.assertEqual(settings['wandb_group'],'tail_update_3090')
+                self.assertFalse(config['save_task_weights'])
+
+    def test_offline_analysis_restores_recorded_sweep(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory=Path(temp)
+            (directory/'manifest.json').write_text(json.dumps(dict(machine='3090',sweep_spec='scripts/sweeps/tail_update_imga10_3090.json')))
+            (directory/'queue.json').write_text('[]')
+            with patch.object(runner,'SPEC',runner.SPEC),patch.object(analyzer,'summarize') as summarize:
+                analyzer.summarize_saved(directory)
+                self.assertEqual(runner.spec()['3090']['dataset'],'imga10')
+                summarize.assert_called_once_with(directory,'3090',[])
 
     def test_runner_rejects_wrong_score_protocol(self):
         source = runner.settings_for

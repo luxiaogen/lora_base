@@ -93,7 +93,7 @@ def summarize(directory, machine, records):
         write_csv(directory / (name + '.csv'), value)
     write_csv(directory / 'tasks.csv', tasks)
     write_csv(directory / 'tail_updates.csv', telemetry)
-    if machine == '3090':
+    if machine == '3090' and runner.spec()[machine]['dataset'] == 'imgr10':
         historical_original(directory, snapshots)
     draw(directory, complete, pairs, telemetry)
 
@@ -174,9 +174,15 @@ def draw(directory, complete, pairs, telemetry):
     plt.close(fig)
 
 
+def summarize_saved(directory):
+    import run_tail_update as runner
+    manifest = json.loads((directory / 'manifest.json').read_text())
+    runner.SPEC = runner.ROOT / manifest.get('sweep_spec','scripts/sweeps/tail_update.json')
+    summarize(directory, manifest['machine'], json.loads((directory / 'queue.json').read_text()))
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('directory', type=Path)
     args = parser.parse_args()
-    manifest = json.loads((args.directory / 'manifest.json').read_text())
-    summarize(args.directory, manifest['machine'], json.loads((args.directory / 'queue.json').read_text()))
+    summarize_saved(args.directory)
