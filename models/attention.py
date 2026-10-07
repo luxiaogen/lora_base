@@ -1348,6 +1348,9 @@ class Attention_LoRA(nn.Module):
         gate_mode = self._effective_gate_mode()
         if gate_mode == "unmasked":
             return (delta, torch.ones_like(delta), torch.zeros_like(delta)) if return_details else delta
+        if self.cur_task > 0 and self.args.get('dual_mask_update_rule', 'step') != 'step':
+            state = self._tail_update_state(delta, isolated, conflict_ratio, conflict_strength)
+            return (state['safe'], state['gate'], state['applied']) if return_details else state['safe']
         if isolated and self.cur_task > 0 and (self.args.get('p_permission_release', 'off') != 'off'
                 or self.args.get('p_permission_position', 'wpre') == 'permuted'):
             safe, gate, applied = self._p_permission_delta(delta, conflict_ratio, conflict_strength)
@@ -1415,6 +1418,41 @@ class Attention_LoRA(nn.Module):
             gate = protect_gate * conflict_gate  # [2304,768]
         safe = delta * gate
         return (safe, gate, conflict_mask) if return_details else safe
+
+    def _tail_update_state(self, delta, isolated, conflict_ratio=None, conflict_strength=None):
+        """Full-layer threshold on raw BA; permissions and gamma are applied afterwards."""
+        from utils.dualmask_core import permission_gate
+        permission = permission_gate(self.general_mask.to(delta), self.effective_protect_strength,
+            isolated, self.args.get('dual_mask_permission_mode', 'asymmetric'), self.dual_mask_s_protect_enabled)
+        if conflict_strength is None:
+            conflict_strength = self._conflict_parameters()[1]
+        _, selected = self._branch_conflict(delta, isolated, conflict_ratio)
+        absolute = delta.detach().abs()
+        threshold = absolute.masked_fill(~selected.bool(), float('inf')).min()
+        threshold = torch.where(selected.bool().any(), threshold, absolute.max())
+        softened = delta - conflict_strength * delta.sign() * F.relu(delta.abs() - threshold)
+        base = delta * permission
+        target = ((delta.detach() - softened.detach()) * permission).float().norm()
+        rule = self.args.get('dual_mask_update_rule', 'step')
+        coefficient = delta.new_tensor(conflict_strength)
+        if rule in ('step_tail_matched', 'uniform_tail_matched'):
+            denominator = (base.detach() * selected).float().norm() if rule == 'step_tail_matched' else base.detach().float().norm()
+            coefficient = (target / torch.where(denominator > 0, denominator, torch.ones_like(denominator))).to(delta)
+            factor = 1 - coefficient * (selected if rule == 'step_tail_matched' else torch.ones_like(delta))
+            safe = base * factor
+        elif rule == 'soft_tail':
+            safe = softened * permission
+            factor = torch.where(absolute > 0, softened.detach() / torch.where(absolute > 0, delta.detach(), torch.ones_like(delta)), torch.ones_like(delta))
+        else:
+            factor = 1 - coefficient * selected
+            safe = base * factor
+        if not self._conflict_gate_enabled(isolated) or self._effective_gate_mode() == 'protect_only':
+            factor, safe = torch.ones_like(delta), base
+            target = delta.new_zeros(())
+        return dict(safe=safe, base=base, gate=permission * factor,
+                    conflict_gate=factor, applied=(factor.detach() < 1).to(delta),
+                    selected=selected, threshold=threshold, target_removed_norm=target,
+                    coefficient=coefficient)
 
     def _p_protect_mask(self):
         return self.general_mask if self.p_permission_protect is None else self.p_permission_protect
@@ -1797,6 +1835,9 @@ class Attention_LoRA(nn.Module):
         expected_safe = before_conflict * (
             1.0 - conflict_strength * applied_mask.to(raw_delta)
         )
+        if self.cur_task > 0 and self.args.get('dual_mask_update_rule', 'step') != 'step':
+            expected_safe = (self.plora_gamma * self._tail_update_state(raw_delta / self.plora_gamma, True)['safe']
+                             if self.plora_gamma else torch.zeros_like(safe_delta))
 
         def ratio(part, whole):
             return float(part / whole) if whole else 0.0
@@ -2122,7 +2163,7 @@ class Attention_LoRA(nn.Module):
 
         def mask_delta(item, conflict_ratio: float, conflict_strength: float):
             relative = t > 0 and self.dual_mask_conflict_score_mode in ('wpre_relative', 'task_relative')
-            unscaled = relative or self._core_policy_active() or (item['isolated'] and t > 0 and (
+            unscaled = relative or (t > 0 and self.args.get('dual_mask_update_rule', 'step') != 'step') or self._core_policy_active() or (item['isolated'] and t > 0 and (
                 self.args.get('p_permission_release', 'off') != 'off'
                 or self.args.get('p_permission_position', 'wpre') == 'permuted'))
             value = item['factor_delta'] if unscaled else item['raw_delta']

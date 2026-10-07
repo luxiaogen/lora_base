@@ -1549,6 +1549,9 @@ class Learner(BaseLearner):
                     output,
                     targets,
                 )
+                if self.args.get('dual_mask_tail_audit', False) and i < 2 and epoch + 1 in (1, 5, 10, 20, 40):
+                    from utils.tail_update_audit import sample_updates
+                    sample_updates(self, epoch + 1, i)
                 batch_training_metrics.update(getattr(self, '_last_pair_separation_metrics', {}))
                 batch_training_metrics.update(getattr(self, '_last_wpre_distill_metrics', {}))
                 if batch_training_metrics: # 只负责汇总、显示额外损失的统计值
