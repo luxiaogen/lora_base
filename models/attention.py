@@ -930,6 +930,9 @@ class Attention_LoRA(nn.Module):
             if self.cur_task > 0 and position == "permuted":
                 from utils.protect_position import permute_protect_mask
                 protect = permute_protect_mask(protect, self.args.get("seed", 1993), self.layer_idx)
+            elif self.cur_task > 0 and position == "wpre_magnitude":
+                from utils.protect_position import magnitude_protect_mask
+                protect = magnitude_protect_mask(self.pretrained_weight, reference_protect)
             if self.args.get("dual_mask_position_audit", False):
                 union = (protect.bool() | reference_protect.bool()).sum().clamp_min(1)
                 logging.info("ProtectionPositionMask %s", json.dumps({

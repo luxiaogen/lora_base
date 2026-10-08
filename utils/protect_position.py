@@ -2,6 +2,18 @@
 import torch
 
 
+def magnitude_protect_mask(weight, reference_mask):
+    """Place the same per-Q/K/V budget at largest |W_pre|; ties use flat index."""
+    parts = []
+    for source, reference in zip(weight.detach().chunk(3), reference_mask.chunk(3)):
+        count = int(reference.sum().item())
+        indices = source.abs().reshape(-1).argsort(descending=True, stable=True)
+        selected = torch.zeros_like(reference).reshape(-1)
+        selected[indices[:count]] = 1
+        parts.append(selected.reshape_as(reference))
+    return torch.cat(parts, dim=0)
+
+
 def permute_protect_mask(mask, seed, layer):
     parts = []
     for projection, source in enumerate(mask.chunk(3, dim=0)):

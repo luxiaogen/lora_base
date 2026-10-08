@@ -7,10 +7,39 @@ import torch
 from torch.nn import functional as F
 
 from test import test_global_conflict_budget
-from utils.protect_position import permute_protect_mask
+from utils.protect_position import magnitude_protect_mask, permute_protect_mask
 
 
 class ProtectPositionTests(unittest.TestCase):
+    def test_weight_magnitude_uses_per_projection_counts_and_stable_ties(self):
+        weight = torch.tensor([[1., -4., 4., 2.], [9., 8., 7., 6.], [3., 3., 3., 3.]])
+        reference = torch.tensor([[1., 0., 0., 1.], [0., 0., 0., 0.], [0., 1., 0., 1.]])
+        rng = torch.get_rng_state().clone()
+        actual = magnitude_protect_mask(weight, reference)
+        expected = torch.tensor([[0., 1., 1., 0.], [0., 0., 0., 0.], [1., 1., 0., 0.]])
+        torch.testing.assert_close(actual, expected)
+        self.assertTrue(torch.equal(rng, torch.get_rng_state()))
+        torch.testing.assert_close(magnitude_protect_mask(weight, torch.ones_like(reference)),
+                                   torch.ones_like(reference))
+
+    def test_magnitude_changes_only_region_and_reads_fixed_pretrained_weight(self):
+        original, candidate = self.make(), self.make('wpre_magnitude')
+        candidate.pretrained_weight.copy_(torch.arange(48).reshape(12, 4).float().flip(0))
+        original.pretrained_weight.copy_(candidate.pretrained_weight)
+        original.rebuild_dual_masks()
+        candidate.rebuild_dual_masks()
+        expected = magnitude_protect_mask(candidate.pretrained_weight, original.general_mask)
+        torch.testing.assert_close(candidate.general_mask, expected)
+        torch.testing.assert_close(candidate.isolated_mask, 1 - expected)
+        torch.testing.assert_close(candidate.w0_importance, original.w0_importance)
+        for source, actual in zip(original.general_mask.chunk(3), expected.chunk(3)):
+            self.assertEqual(int(source.sum()), int(actual.sum()))
+        with torch.no_grad():
+            candidate.qkv.weight.fill_(100.)
+        candidate.cur_task = 2
+        candidate.rebuild_dual_masks()
+        torch.testing.assert_close(candidate.general_mask, expected)
+
     def test_per_projection_counts_and_degree_distributions(self):
         mask = (torch.arange(192).reshape(24, 8) % 5 < 2).float()
         before = mask.clone()
@@ -54,7 +83,7 @@ class ProtectPositionTests(unittest.TestCase):
         explicit.rebuild_dual_masks()
         default.rebuild_dual_masks()
         self.assertTrue(torch.equal(explicit.general_mask, default.general_mask))
-        for mode in ('wpre', 'permuted'):
+        for mode in ('wpre', 'wpre_magnitude', 'permuted'):
             module = self.make(mode, task=0)
             reference = copy.deepcopy(module)
             reference.args['dual_mask_protect_position'] = 'wpre'
@@ -86,21 +115,22 @@ class ProtectPositionTests(unittest.TestCase):
         self.assertTrue(torch.equal(expected, candidate.general_mask))
 
     def test_initialization_and_freezing_are_identical(self):
-        reference, candidate = self.make(), self.make('permuted')
-        rng = torch.get_rng_state().clone()
-        reference.before_task(1)
-        final_rng = torch.get_rng_state().clone()
-        torch.set_rng_state(rng)
-        candidate.before_task(1)
-        self.assertTrue(torch.equal(final_rng, torch.get_rng_state()))
-        for module in (reference, candidate):
-            module.set_task_and_stage(1, 2)
-        for units in zip((reference.S_lora[1], reference.P_lora[1]),
-                         (candidate.S_lora[1], candidate.P_lora[1])):
-            self.assertTrue(torch.equal(units[0].A_weight, units[1].A_weight))
-            self.assertTrue(torch.equal(units[0].B_weight, units[1].B_weight))
-            self.assertFalse(units[1].A_weight.requires_grad)
-            self.assertTrue(units[1].B_weight.requires_grad)
+        for mode in ('permuted', 'wpre_magnitude'):
+            reference, candidate = self.make(), self.make(mode)
+            rng = torch.get_rng_state().clone()
+            reference.before_task(1)
+            final_rng = torch.get_rng_state().clone()
+            torch.set_rng_state(rng)
+            candidate.before_task(1)
+            self.assertTrue(torch.equal(final_rng, torch.get_rng_state()))
+            for module in (reference, candidate):
+                module.set_task_and_stage(1, 2)
+            for units in zip((reference.S_lora[1], reference.P_lora[1]),
+                             (candidate.S_lora[1], candidate.P_lora[1])):
+                self.assertTrue(torch.equal(units[0].A_weight, units[1].A_weight))
+                self.assertTrue(torch.equal(units[0].B_weight, units[1].B_weight))
+                self.assertFalse(units[1].A_weight.requires_grad)
+                self.assertTrue(units[1].B_weight.requires_grad)
 
     def test_ranking_switch_does_not_change_regularization_weights(self):
         original = self.make()
@@ -123,7 +153,7 @@ class ProtectPositionTests(unittest.TestCase):
             torch.testing.assert_close(first.grad, second.grad, atol=0, rtol=0)
 
     def test_four_cells_forward_merge_and_actual_update_diagnostics(self):
-        for position in ('wpre', 'permuted'):
+        for position in ('wpre', 'wpre_magnitude', 'permuted'):
             for score in ('conflict', 'magnitude'):
                 with self.subTest(position=position, score=score):
                     module = self.make(position, audit=True, score=score)
@@ -156,7 +186,7 @@ class ProtectPositionTests(unittest.TestCase):
     @unittest.skipUnless(torch.cuda.is_available(), 'requires CUDA')
     def test_real_vit_shape_forward_and_merge_on_cuda(self):
         from models.attention import Attention_LoRA
-        for position in ('wpre', 'permuted'):
+        for position in ('wpre', 'wpre_magnitude', 'permuted'):
             for score in ('conflict', 'magnitude'):
                 with self.subTest(position=position, score=score):
                     module = Attention_LoRA(dim=768, num_heads=12, qkv_bias=True, r=64, n_tasks=2).cuda()

@@ -1,0 +1,14 @@
+{
+  "name": "imgr10_region_prior_3090",
+  "seeds": [1993, 1996, 1997],
+  "recipe_source": "scripts/sweeps/baseline_4datasets_3090.json",
+  "variants": [
+    {"name": "A_spectrum", "position": "wpre"},
+    {"name": "B_weight", "position": "wpre_magnitude"},
+    {"name": "C_permuted", "position": "permuted"}
+  ],
+  "common_overrides": {
+    "dual_mask_position_audit": true,
+    "wandb_group": "imgr10_region_prior_3090"
+  }
+}
