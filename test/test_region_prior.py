@@ -181,6 +181,10 @@ class RegionPriorTests(unittest.TestCase):
                 self.assertTrue(present['exists'])
                 self.assertEqual(present['sha256'], hashlib.sha256(b'cached fixture').hexdigest())
 
+    def test_shell_launcher_honors_selected_python(self):
+        source = (suite.ROOT / 'scripts/10_08_imgr10_region_prior_3090.sh').read_text()
+        self.assertIn('exec "${PYTHON:-python}" scripts/run_region_prior.py "$@"', source)
+
 
 if __name__ == '__main__':
     unittest.main()
