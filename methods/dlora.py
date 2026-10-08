@@ -791,7 +791,7 @@ class Learner(BaseLearner):
         ## accuracy : C = 正确分类的 holdout 样本数 / 总 holdout 样本数
         competence_metric = str(self.args.get("dual_mask_competence_metric", "accuracy")).lower()
         ## 是否启动 R_old来计算最终的冲突抑制强度
-        use_old_overlap_conflict = bool(self.args.get("dual_mask_conflict_old_overlap_adaptive", True))
+        use_old_overlap_conflict = bool(self.args.get("dual_mask_conflict_old_overlap_adaptive", False))
 
         
 
@@ -1444,8 +1444,9 @@ class Learner(BaseLearner):
         averaged_count = 0
         if average_epochs:
             for module in self._iter_lora_modules():
-                averaged_params.extend((module.S_lora[self._cur_task].B_weight,
-                                        module.P_lora[self._cur_task].B_weight))
+                for unit in (module.S_lora[self._cur_task], module.P_lora[self._cur_task]):
+                    if unit is not None:
+                        averaged_params.append(unit.B_weight)
             network = self._network.module if isinstance(self._network, torch.nn.DataParallel) else self._network
             averaged_params.extend(network.classifier_pool[self._cur_task].parameters())
             averaged_sums = [torch.zeros_like(param) for param in averaged_params]

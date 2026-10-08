@@ -724,7 +724,7 @@ class Attention_LoRA(nn.Module):
             self.relative_conflict_scale = reference.detach().float().square().mean(1, keepdim=True).sqrt().clamp_min(1e-12)
         self.p_permission_release_mask = None
         if t > 0 and self.args.get('dual_mask_fixed_protect_strength') is not None:
-            self.effective_protect_strength = self.args['dual_mask_fixed_protect_strength']
+            self.effective_protect_strength = min(max(self.args['dual_mask_fixed_protect_strength'], 0.0), 1.0)
         device = next(self.parameters()).device
         dtype = self.qkv.weight.dtype
         rs = self.rank # 64
@@ -952,7 +952,7 @@ class Attention_LoRA(nn.Module):
             self.p_permission_protect = None
             if self.cur_task > 0 and self.args.get('p_permission_position', 'wpre') == 'permuted':
                 from utils.protect_position import permute_protect_mask
-                self.p_permission_protect = permute_protect_mask(protect, self.args.get('seed', 1993), self.layer_idx)
+                self.p_permission_protect = permute_protect_mask(reference_protect, self.args.get('seed', 1993), self.layer_idx)
 
             self.w0_importance.copy_(score.to(device=self.w0_importance.device, dtype=self.w0_importance.dtype))
             self.general_mask.copy_(protect.to(device=self.general_mask.device, dtype=self.general_mask.dtype))  # 50% 位置被保护
