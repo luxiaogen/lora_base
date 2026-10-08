@@ -1,7 +1,10 @@
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
+import shlex
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -12,6 +15,81 @@ import run_baseline_suite as suite
 
 
 class BaselineSuiteTests(unittest.TestCase):
+    def test_regression_wrapper_pins_one_group_and_selected_python(self):
+        env = dict(os.environ, PYTHON=sys.executable, PYTHONDONTWRITEBYTECODE='1')
+        output = subprocess.check_output(['bash', 'scripts/10_08_imgr10_baseline_regression_3090.sh',
+                                          '--mode', 'dry-run'], env=env, text=True)
+        commands = [shlex.split(line.removeprefix('Command: ')) for line in output.splitlines()
+                    if line.startswith('Command: ')]
+        self.assertEqual(len(commands), 2)
+        for command in commands:
+            self.assertEqual(command[0], sys.executable)
+            self.assertEqual(command[1:4], ['main.py','--config','exps/dlora/imgr10.json'])
+            overrides = dict(command[i+1].split('=',1) for i,arg in enumerate(command) if arg == '--set')
+            self.assertEqual(overrides['seed'], '[1993]')
+            self.assertEqual(overrides['dual_mask_conflict_old_overlap_adaptive'], 'true')
+            self.assertEqual(overrides['save_task_weights'], 'false')
+        self.assertIn('1 T10 runs', output)
+
+    def test_single_selected_group_runs_only_its_smoke_and_formal(self):
+        selected = ['imgr10_seed1993']
+        calls = []
+        def run(machine, name, directory, revision, smoke=False, dry_run=False):
+            calls.append((name, smoke))
+            return dict(mode=name, status='completed', exit_code=0, minutes=1)
+        with tempfile.TemporaryDirectory() as temp, patch.object(suite.engine, 'run', side_effect=run), \
+                patch.object(suite, 'summarize'), contextlib.redirect_stdout(io.StringIO()):
+            root = Path(temp)
+            self.assertEqual(suite.execute(root, 'revision', selected=selected), 0)
+            self.assertEqual(calls, [('imgr10_seed1993', True), ('imgr10_seed1993', False)])
+            self.assertEqual([r['mode'] for r in json.loads((root / 'queue.json').read_text())], selected)
+
+    def test_selection_smokes_once_per_dataset_without_stride_assumption(self):
+        selected = ['imgr10_seed1996', 'imgr10_seed1993', 'imga10_seed1997']
+        calls = []
+        def run(machine, name, directory, revision, smoke=False, dry_run=False):
+            calls.append((name, smoke))
+            return dict(mode=name, status='completed', exit_code=0, minutes=1)
+        with tempfile.TemporaryDirectory() as temp, patch.object(suite.engine, 'run', side_effect=run), \
+                patch.object(suite, 'summarize'), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(suite.execute(Path(temp), 'revision', selected=selected), 0)
+        self.assertEqual(calls[:2], [('imgr10_seed1996', True), ('imga10_seed1997', True)])
+        self.assertEqual(calls[2:], [(name, False) for name in selected])
+
+    def test_cli_selection_prechecks_only_selected_dataset_and_records_selection(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(suite, 'ROOT', Path(temp)), \
+                patch.object(suite, 'check_data', side_effect=lambda config: dict(dataset=config['dataset'])), \
+                patch.object(suite, 'execute', return_value=0), \
+                patch.object(suite.subprocess, 'check_output', return_value='revision'), \
+                patch.object(sys, 'argv', ['run_baseline_suite.py', '--modes', 'imgr10_seed1993']), \
+                contextlib.redirect_stdout(io.StringIO()):
+            root = Path(temp)
+            # Fixtures contain only ImageNet-R: reading any unrelated config must fail.
+            config = root / 'exps/dlora/imgr10.json'
+            config.parent.mkdir(parents=True)
+            config.write_text((Path(__file__).resolve().parents[1] / 'exps/dlora/imgr10.json').read_text())
+            self.assertEqual(suite.main(), 0)
+            manifest_path = next(root.glob('logs/shell_logs/baseline_4datasets_3090/*/manifest.json'))
+            manifest = json.loads(manifest_path.read_text())
+            self.assertEqual(manifest['modes'], ['imgr10_seed1993'])
+            self.assertEqual(len(manifest['datasets']), 1)
+            self.assertEqual(manifest['datasets'][0]['dataset'], 'ImageNet_R')
+
+    def test_cli_rejects_unknown_and_repeated_modes_before_running(self):
+        for selected in (['imgr10_seed0'], ['imgr10_seed1993','imgr10_seed1993']):
+            with patch.object(sys, 'argv', ['run_baseline_suite.py','--mode','dry-run','--modes',*selected]), \
+                    contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+                suite.main()
+            self.assertNotEqual(error.exception.code, 0)
+
+    def test_resume_selection_cannot_change_original_queue(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / 'manifest.json').write_text(json.dumps(dict(revision='revision', modes=['imgr10_seed1993'])))
+            suite.check_resume(root, 'revision', selected=['imgr10_seed1993'])
+            with self.assertRaisesRegex(ValueError, 'selection|modes|selected'):
+                suite.check_resume(root, 'revision', selected=['imgr10_seed1996'])
+
     def test_exact_requested_matrix_and_dataset_recipes(self):
         expected = [dataset + '_seed' + str(seed)
                     for dataset in ('cifar100', 'imga10', 'cub10', 'imgr10')

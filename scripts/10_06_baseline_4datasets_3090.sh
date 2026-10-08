@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
-exec python scripts/run_baseline_suite.py "$@"
+exec "${PYTHON:-python}" scripts/run_baseline_suite.py "$@"

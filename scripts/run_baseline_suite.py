@@ -58,13 +58,13 @@ def command_for(machine, name, directory, smoke=False):
     return command, settings
 
 
-def validate_settings():
+def validate_settings(selected=None):
     original = dict(dual_mask_conflict_score_mode='conflict', dual_mask_conflict_exact_topk=False,
         dual_mask_private_rank=0, dual_mask_reg_weight=.01, dual_mask_branch_layout='dual',
         dual_mask_permission_mode='asymmetric', dual_mask_fixed_coverage=None,
         dual_mask_fixed_protect_strength=None, dual_mask_fixed_conflict_strength=None,
         dual_mask_anchor_reg_weight=2.5, save_task_weights=False)
-    for name in modes():
+    for name in modes() if selected is None else selected:
         settings = settings_for('3090', name)
         if any(settings.get(key) != value for key, value in original.items()):
             raise ValueError('This queue requires original DualMask, not M or a scoring candidate.')
@@ -115,8 +115,10 @@ def summarize(directory, records):
     write_csv(directory / 'tasks.csv', tasks)
 
 
-def check_resume(directory, revision):
+def check_resume(directory, revision, selected=None):
     manifest = json.loads((directory / 'manifest.json').read_text())
+    if selected is not None and manifest.get('modes', modes()) != selected:
+        raise ValueError('Resume requires the original modes selection.')
     if manifest['revision'] != revision:
         raise ValueError('Resume needs the original code revision.')
     for filename, smoke in (('queue.json', False), ('smoke_queue.json', True)):
@@ -141,7 +143,8 @@ def check_resume(directory, revision):
                 raise ValueError('Cannot reuse changed or incomplete group: ' + name)
 
 
-def execute(directory, revision, mode='run'):
+def execute(directory, revision, mode='run', selected=None):
+    selected = modes() if selected is None else selected
     previous = engine.command_for, engine.SPEC, engine.EXTRA_SOURCE_PATHS
     engine.command_for, engine.SPEC = command_for, SPEC
     engine.EXTRA_SOURCE_PATHS = ['scripts/run_baseline_suite.py']
@@ -149,12 +152,16 @@ def execute(directory, revision, mode='run'):
         dry = mode == 'dry-run'
         records = {row['mode']:row for row in json.loads((directory / 'queue.json').read_text())} if (directory / 'queue.json').exists() else {}
         smokes = {row['mode']:row for row in json.loads((directory / 'smoke_queue.json').read_text())} if (directory / 'smoke_queue.json').exists() else {}
-        for name in modes():
+        for name in selected:
             records.setdefault(name, dict(mode=name, status='pending'))
         if not dry:
             (directory / 'queue.json').write_text(json.dumps(list(records.values()), indent=2) + '\n')
         # One two-task smoke per dataset; seeds do not need duplicate path smokes.
-        for name in modes()[::3]:
+        smoke_modes = {}
+        for name in selected:
+            item, _ = run_identity(name)
+            smoke_modes.setdefault(item['name'], name)
+        for name in smoke_modes.values():
             if smokes.get(name, {}).get('status') == 'completed':
                 continue
             smokes[name] = engine.run('3090', name, directory / ('smoke_' + name), revision, True, dry)
@@ -164,7 +171,7 @@ def execute(directory, revision, mode='run'):
                 return smokes[name]['exit_code']
         if mode == 'smoke':
             return 0
-        for name in modes():
+        for name in selected:
             if records[name]['status'] == 'completed':
                 continue
             records[name] = engine.run('3090', name, directory / name, revision, dry_run=dry)
@@ -178,7 +185,7 @@ def execute(directory, revision, mode='run'):
                     print('Analysis error saved; scheduled training continues.', flush=True)
             if records[name]['exit_code']:
                 return records[name]['exit_code']
-        print('All 12 formal T10 runs finished:', directory, flush=True)
+        print('All {} formal T10 runs finished:'.format(len(selected)), directory, flush=True)
         return 0
     finally:
         engine.command_for, engine.SPEC, engine.EXTRA_SOURCE_PATHS = previous
@@ -188,20 +195,28 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--mode', choices=('run', 'smoke', 'dry-run'), default='run')
     parser.add_argument('--resume', type=Path)
+    parser.add_argument('--modes', nargs='+', choices=modes(), help='Only run the selected dataset/seed groups.')
     args = parser.parse_args()
-    validate_settings()
+    selected = args.modes
+    if selected is None:
+        selected = (json.loads((args.resume / 'manifest.json').read_text()).get('modes', modes())
+                    if args.resume else modes())
+    if not selected or len(selected) != len(set(selected)) or any(name not in modes() for name in selected):
+        parser.error('modes must be a nonempty selection of unique known groups')
+    validate_settings(selected)
     revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
     directory = args.resume or ROOT / 'logs/shell_logs/baseline_4datasets_3090' / datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')
     if args.mode != 'dry-run':
         if args.resume:
-            check_resume(directory, revision)
-        data = [check_data(json.loads((ROOT / item['config']).read_text())) for item in json.loads(SPEC.read_text())['datasets']]
+            check_resume(directory, revision, selected)
+        datasets = {run_identity(name)[0]['name']:run_identity(name)[0] for name in selected}
+        data = [check_data(json.loads((ROOT / item['config']).read_text())) for item in datasets.values()]
         directory.mkdir(parents=True, exist_ok=True)
         (directory / ('resume_manifest.json' if args.resume else 'manifest.json')).write_text(json.dumps(dict(
-            revision=revision, machine='3090', queue_pid=engine.os.getpid(), modes=modes(), datasets=data), indent=2) + '\n')
+            revision=revision, machine='3090', queue_pid=engine.os.getpid(), modes=selected, datasets=data), indent=2) + '\n')
     print('Code revision:', revision, '\nQueue PID:', engine.os.getpid(), '\nOutputs:', directory, flush=True)
-    print('Original DualMask, anchor2.5, 12 T10 runs; no checkpoints, no time cutoff.', flush=True)
-    return execute(directory, revision, args.mode)
+    print('Original DualMask, anchor2.5, {} T10 runs; no checkpoints, no time cutoff.'.format(len(selected)), flush=True)
+    return execute(directory, revision, args.mode, selected)
 
 
 if __name__ == '__main__':
