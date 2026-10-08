@@ -12,8 +12,10 @@ import shlex
 import subprocess
 import sys
 import time
+import warnings
 
 from analyze_core_evidence import METRICS, read_run, summarize
+from dualmask_config import normalize_dualmask_config
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -57,8 +59,13 @@ def run(machine, name, directory, revision, smoke=False, dry_run=False):
     config_path = command[command.index('--config') + 1]
     effective = json.loads((ROOT / config_path).read_text())
     effective.update(settings)
+    # 子进程入口会提示一次；快照记录相同的实际值，并保留原命令。
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', RuntimeWarning)
+        normalize_dualmask_config(effective)
     paths = ['main.py', 'trainer.py', str(BASE.relative_to(ROOT)), str(SPEC.relative_to(ROOT)),
-             'scripts/run_core_evidence_night.py', 'scripts/analyze_core_evidence.py']
+             'scripts/run_core_evidence_night.py', 'scripts/analyze_core_evidence.py',
+             'scripts/dualmask_config.py']
     paths += ['scripts/analyze_protect_position.py', config_path]
     paths += EXTRA_SOURCE_PATHS
     paths += sorted(str(path.relative_to(ROOT)) for folder in ('models', 'methods', 'utils')

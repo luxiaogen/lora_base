@@ -18,6 +18,7 @@ import torch
 from torch.nn import functional as F
 
 from test import test_protect_position
+from scripts.dualmask_config import normalize_dualmask_config
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -35,7 +36,8 @@ def function_from_source(source, name):
 
 def run_entry(config, overrides=()):
     """只替换昂贵的训练边界，执行真实JSON加载、覆盖和启动逻辑。"""
-    namespace = dict(argparse=argparse, json=json, math=math, warnings=warnings)
+    namespace = dict(argparse=argparse, json=json, math=math, warnings=warnings,
+                     normalize_dualmask_config=normalize_dualmask_config)
     nodes = [n for n in ast.parse((ROOT / 'main.py').read_text()).body
              if isinstance(n, ast.FunctionDef)]
     results = []

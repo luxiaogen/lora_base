@@ -121,6 +121,37 @@ class QueueTests(unittest.TestCase):
                 self.assertEqual(active['exit_code'], expected)
                 self.assertEqual(json.loads((path / 'smoke_R0/run.json').read_text())['phase'], 'smoke')
 
+    def test_snapshot_records_bounded_effective_strength_not_raw_override(self):
+        class Process:
+            pid = 12345
+            stdout = ["[trainer.py] => CNN: {'total': 80., 'old': 79., 'new': 81.}\n"] * 2 + [
+                '[trainer.py] => Average Accuracy: 80.\n[trainer.py] => Forgetting: 5.\n']
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def wait(self):
+                return 0
+        command_for = night.command_for
+        for raw, bounded in ((1.2, 1.), (-.2, 0.)):
+            def command(*args):
+                argv, settings = command_for(*args)
+                settings['dual_mask_fixed_protect_strength'] = raw
+                argv += ['--set', 'dual_mask_fixed_protect_strength=' + str(raw)]
+                return argv, settings
+            with self.subTest(raw=raw), tempfile.TemporaryDirectory() as temp, \
+                    patch.object(night, 'command_for', side_effect=command), \
+                    patch.object(night.subprocess, 'Popen', return_value=Process()), \
+                    patch.object(night.subprocess, 'check_output', return_value='fixture-GPU'), \
+                    patch.object(night.importlib.metadata, 'version', return_value='fixture'), \
+                    patch.object(night.platform, 'platform', return_value='fixture'), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                path = Path(temp) / 'smoke_R0'
+                night.run('3090', 'R0', path, 'fixture', smoke=True)
+                snapshot = json.loads((path / 'run.json').read_text())
+                self.assertEqual(snapshot['effective_config']['dual_mask_fixed_protect_strength'], bounded)
+                self.assertIn('dual_mask_fixed_protect_strength=' + str(raw), snapshot['command'])
+
 
 class AnalysisTests(unittest.TestCase):
     def snapshot(self, mode):

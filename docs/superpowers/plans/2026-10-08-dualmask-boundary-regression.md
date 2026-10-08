@@ -28,20 +28,20 @@
 
 ### Task 1: 四类边界修复
 
-- [ ] 补回归测试并观察RED；仅正常旧行为测试允许先通过。
-- [ ] 入口normalize_dualmask_config在apply_overrides后执行；规范overlap，截断固定保护强度，拒绝增量单分支分阶段。
-- [ ] P置换从reference_protect生成；before_task固定强度赋值截断。
-- [ ] 原型准备overlap缺省false；末期平均收集实际存在的当前任务B及当前头，保留顺序。
-- [ ] 与参照提交逐值比较Task0/1前向、loss、梯度、SGD一步与合并；检查merge-once。
-- [ ] 专项测试：env PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest test.test_dualmask_boundary_fixes test.test_protect_position test.test_p_permission_release test.test_compact_dualmask test.test_sp_staged test.test_late_weight_average。
+- [x] 补回归测试并观察RED；仅正常旧行为测试允许先通过。
+- [x] 入口normalize_dualmask_config在apply_overrides后执行；规范overlap，截断固定保护强度，拒绝增量单分支分阶段。
+- [x] P置换从reference_protect生成；before_task固定强度赋值截断。
+- [x] 原型准备overlap缺省false；末期平均收集实际存在的当前任务B及当前头，保留顺序。
+- [x] 与参照提交逐值比较Task0/1前向、loss、梯度、SGD一步与合并；检查merge-once。
+- [x] 专项测试：env PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest test.test_dualmask_boundary_fixes test.test_protect_position test.test_p_permission_release test.test_compact_dualmask test.test_sp_staged test.test_late_weight_average。
 
 ### Task 2: 基线队列单组选择
 
-- [ ] 补选择一组、跨数据集选择、默认12组、仅选中数据预检、resume子集一致性测试并观察RED。
-- [ ] run_baseline_suite增加--modes；默认不变，按选中数据集去重短测，按选中顺序正式训练，新启动不resume旧目录。
-- [ ] Bash入口遵守已选择PYTHON，服务器使用原conda解释器。
-- [ ] 专项测试：env PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest test.test_baseline_suite。
-- [ ] 全量：env PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest discover -s test。
+- [x] 补选择一组、跨数据集选择、默认12组、仅选中数据预检、resume子集一致性测试并观察RED。
+- [x] run_baseline_suite增加--modes；默认不变，按选中数据集去重短测，按选中顺序正式训练，新启动不resume旧目录。
+- [x] Bash入口遵守已选择PYTHON，服务器使用原conda解释器。
+- [x] 专项测试：env PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest test.test_baseline_suite。
+- [x] 全量：env PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest discover -s test。
 
 ### Task 3: 审查、推送和lwait接续
 
@@ -51,3 +51,7 @@
 - [ ] GitHub服务器认证不可用时，将已推送提交的增量bundle预置到明确临时路径，结束后才fetch/ff；不覆盖本机JSON。
 - [ ] 只启动--modes imgr10_seed1993；独立日志/新目录；一轮两任务短测成功后完整T10。
 - [ ] 交付等待PID/日志；真正启动后返回队列/训练PID和源码/配置指纹，完整训练后报告结果。
+
+审查补充：已复现队列快照仍记录越界原值。将规范逻辑移到
+`scripts/dualmask_config.py` 供入口与快照共用；快照保留原命令但记录实际值，
+不重复提示。相关新测试先失败再通过；当前全量757项，742通过、15跳过。
