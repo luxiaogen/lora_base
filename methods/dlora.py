@@ -300,6 +300,9 @@ class Learner(BaseLearner):
                 )
 
     def _extra_training_context(self, inputs, targets, epoch):
+        if self._cur_task > 0 and self.args.get('dual_mask_gradient_route', 'off') != 'off':
+            from utils.prototype_gradient_route import prepare_batch
+            return prepare_batch(self, inputs, targets)
         if self._cur_task > 0 and float(self.args.get('wpre_distill_weight', 0.0)) > 0:
             from utils.wpre_distill import teacher_features
             return {'wpre_teacher_features': teacher_features(
@@ -553,6 +556,10 @@ class Learner(BaseLearner):
             from utils.p_step_direction import prepare_step, finish_step
             snapshots = prepare_step(self._iter_lora_modules(), task_loss)
         loss = task_loss if extra_loss is None else task_loss + extra_loss
+        route_context = self._cur_task > 0 and getattr(self, 'args', {}).get('dual_mask_gradient_route', 'off') != 'off'
+        if route_context:
+            from utils.prototype_gradient_route import prepare_gradients, apply_gradients
+            route_params, route_grads = prepare_gradients(self, output)
         self._last_wpre_distill_metrics = {}
         wpre_grads, wpre_params, weighted_wpre = (), [], None
         wpre_weight = float(getattr(self, 'args', {}).get('wpre_distill_weight', 0.0))
@@ -630,6 +637,8 @@ class Learner(BaseLearner):
                         param.grad = grad.detach().clone()
                     else:
                         param.grad.add_(grad)
+        if route_context:
+            apply_gradients(self, output, route_params, route_grads)
         optimizer.step()
         if branch_context is not None:
             epoch, batch, inputs = branch_context
@@ -1074,6 +1083,7 @@ class Learner(BaseLearner):
                 or old_overlap_conflict or functional_merge_calibration or selective_anchor_enabled
                 or self.args.get('ridge_fusion_enabled', False)
                 or float(self.args.get('wpre_distill_weight', 0.0)) > 0
+                or self.args.get('dual_mask_gradient_route', 'off') != 'off'
         ):
             w0_dataset = data_manager.get_dataset(  # 所有训练样本，顺序固定  | 确定性测试视图：用于判断冻结 W0 的原始能力
                 np.arange(self._known_classes, self._total_classes),
@@ -1497,6 +1507,10 @@ class Learner(BaseLearner):
                     output.update(batch_context)
                 logits = output['logits']
                 task_loss = loss_cos(logits, targets)
+                if self._cur_task > 0 and self.args.get('dual_mask_gradient_route', 'off') != 'off':
+                    output['gradient_route_location'] = (epoch + 1, i + 1)
+                    if self.args['dual_mask_gradient_route'] != 'all':
+                        output['gradient_route_per_sample'] = loss_cos(logits, targets, return_type='per_sample')
 
                 self._sample_mask_reg_grad = (
                     bool(self.args.get('dual_mask_reg_grad_diagnostic', False))

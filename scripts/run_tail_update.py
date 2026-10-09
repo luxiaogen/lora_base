@@ -44,7 +44,8 @@ def settings_for(machine, name, smoke=False):
         settings.update(data['compact_overrides'])
         settings['dual_mask_private_rank'] = data[machine]['private_rank']
     settings.update(data['variants'][variant])
-    settings['wandb_group'] = 'tail_update_' + machine
+    settings['wandb_group'] = ('prototype_gradient_route_' if data.get('analysis') == 'prototype_gradient_route'
+                               else 'tail_update_') + machine
     if smoke:
         settings.update(max_tasks=2, init_epoch=1, epochs=1, ca_epochs=1,
                         wandb_mode='offline', stage_audit=True)
@@ -80,6 +81,16 @@ def validate_settings(machine):
                 or not config['dual_mask_conflict_exact_topk'] or config['dual_mask_conflict_ratio'] != .1
                 or config['dual_mask_conflict_budget_multiplier'] != 1):
             raise ValueError('Soft-tail experiment needs full-layer exact10 magnitude selection.')
+        if data.get('analysis') == 'prototype_gradient_route':
+            route = {'A': 'all', 'B': 'prototype', 'C': 'random_matched'}[variant]
+            required = dict(dual_mask_gradient_route=route, dual_mask_fixed_coverage=.9,
+                dual_mask_fixed_protect_strength=.5, dual_mask_fixed_conflict_strength=.5,
+                dual_mask_private_rank=64, dual_mask_reg_weight=0, slora_gamma=.5,
+                plora_gamma=.75, dual_mask_update_rule='step', sp_staged_s_epochs=0,
+                pair_separation_weight=0, head_balance_weight=0,
+                dual_mask_anchor_reg_task0_only=True)
+            if any(config.get(key, 0) != value for key, value in required.items()):
+                raise ValueError('Prototype routing requires the fixed M90/rank64 recipe.')
 
 
 def check_resume(directory, machine, revision):
@@ -123,8 +134,11 @@ def check_resume(directory, machine, revision):
 
 def summarize_safely(directory, machine, records):
     try:
-        import analyze_tail_update
-        analyze_tail_update.summarize_saved(directory)
+        if spec().get('analysis') == 'prototype_gradient_route':
+            import analyze_prototype_gradient_route as analyzer
+        else:
+            import analyze_tail_update as analyzer
+        analyzer.summarize_saved(directory)
     except Exception:
         with (directory / 'analysis_errors.jsonl').open('a') as stream:
             stream.write(json.dumps(dict(time=datetime.datetime.now().isoformat(), traceback=traceback.format_exc())) + '\n')
@@ -135,6 +149,9 @@ def execute(machine, selected, directory, revision, mode='run', hours=10):
     old = engine.command_for, engine.SPEC, engine.EXTRA_SOURCE_PATHS
     engine.command_for, engine.SPEC = command_for, SPEC
     engine.EXTRA_SOURCE_PATHS = ['scripts/run_tail_update.py', 'scripts/analyze_tail_update.py', 'scripts/run_baseline_suite.py']
+    if spec().get('analysis') == 'prototype_gradient_route':
+        engine.EXTRA_SOURCE_PATHS += ['scripts/analyze_prototype_gradient_route.py',
+                                     'scripts/10_09_imgr10_prototype_gradient_route_3090.sh']
     dry = mode == 'dry-run'
     started = time.monotonic()
     seconds_left = hours * 3600
