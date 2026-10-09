@@ -25,14 +25,15 @@ def paired_results(complete, seeds):
     for first, second in pairs:
         available = [s for s in seeds if (first, s) in complete and (second, s) in complete]
         row = dict(comparison=first + '_minus_' + second, paired_seeds=available,
-                   complete_three_seeds=available == seeds)
+                   complete_planned_seeds=bool(seeds) and available == seeds,
+                   complete_three_seeds=len(seeds) == 3 and available == seeds)
         row['per_seed'] = [dict(seed=s, **{k: complete[first, s][k] - complete[second, s][k] for k in METRICS}) for s in available]
-        if row['complete_three_seeds']:
+        if row['complete_planned_seeds']:
             for key in METRICS:
                 values = [r[key] for r in row['per_seed']]
-                row[key + '_mean'] = statistics.fmean(values)
-                row[key + '_std'] = statistics.stdev(values)
-            if first == 'C' and second == 'M':
+                row[key + '_mean' if len(values) > 1 else key] = statistics.fmean(values)
+                row[key + '_std'] = statistics.stdev(values) if len(values) > 1 else None
+            if row['complete_three_seeds'] and first == 'C' and second == 'M':
                 changes = row['per_seed']
                 row['practical_followup_threshold_met'] = (
                     row['Average_mean'] >= .2 and row['Last_mean'] >= 0
@@ -81,11 +82,14 @@ def summarize(directory, machine, records):
     aggregates = []
     for variant in sorted({r.get('variant') for r in summaries if r.get('variant')}):
         available = [s for s in seeds if (variant,s) in complete]
-        row = dict(variant=variant, completed_seeds=available, complete_three_seeds=available == seeds)
-        if row['complete_three_seeds']:
+        row = dict(variant=variant, completed_seeds=available,
+                   complete_planned_seeds=bool(seeds) and available == seeds,
+                   complete_three_seeds=len(seeds) == 3 and available == seeds)
+        if row['complete_planned_seeds']:
             for key in METRICS:
                 values = [complete[variant,s][key] for s in seeds]
-                row[key + '_mean'], row[key + '_std'] = statistics.fmean(values), statistics.stdev(values)
+                row[key + '_mean' if len(values) > 1 else key] = statistics.fmean(values)
+                row[key + '_std'] = statistics.stdev(values) if len(values) > 1 else None
         aggregates.append(row)
     pairs = paired_results(complete, seeds)
     for name, value in (('results', summaries), ('aggregate', aggregates), ('pairs', pairs), ('matching_issues', issues)):

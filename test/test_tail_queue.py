@@ -189,6 +189,59 @@ class TailQueueTests(unittest.TestCase):
         self.assertEqual(result['Average_mean'],1)
         self.assertTrue(result['practical_followup_threshold_met'])
 
+    def test_single_seed_pair_has_no_three_seed_claim_or_sample_std(self):
+        complete={('M',1993):{k:1 for k in runner.METRICS},
+                  ('C',1993):{k:2 for k in runner.METRICS}}
+        result=paired_results(complete,[1993])[0]
+        self.assertTrue(result['complete_planned_seeds'])
+        self.assertFalse(result['complete_three_seeds'])
+        self.assertEqual(result['Average'],1)
+        self.assertIsNone(result['Average_std'])
+        self.assertNotIn('Average_mean',result)
+        self.assertNotIn('practical_followup_threshold_met',result)
+
+    def test_single_seed_aggregate_preserves_result_without_sample_std(self):
+        spec=copy.deepcopy(runner.spec())
+        spec['seeds']=[1993]
+        record=dict(mode='M_seed1993',status='completed',exit_code=0)
+        config=dict(json.loads((runner.ROOT / spec['3090']['config']).read_text()),
+                    **runner.settings_for('3090',record['mode']))
+        snapshot=dict(code_revision='r',machine='3090',phase='formal',effective_config=config)
+        row=dict(record,valid_performance=True,**{k:1 for k in runner.METRICS})
+        with tempfile.TemporaryDirectory() as temp:
+            directory=Path(temp)
+            path=directory / record['mode']
+            path.mkdir()
+            (path / 'training.log').write_text('\n'.join(
+                'LoRA learning rates: task=' + str(t) + ', epoch=' + str(e)
+                for t in range(10) for e in range(1,21)))
+            with patch.object(runner,'spec',return_value=spec), \
+                    patch.object(analyzer,'read_run',return_value=(row,snapshot,dict(tasks=[]))), \
+                    patch.object(analyzer,'historical_original'), patch.object(analyzer,'draw'):
+                analyzer.summarize(directory,'3090',[record])
+            result=json.loads((directory / 'aggregate.json').read_text())[0]
+            self.assertTrue(result['complete_planned_seeds'])
+            self.assertFalse(result['complete_three_seeds'])
+            self.assertEqual(result['Average'],1)
+            self.assertIsNone(result['Average_std'])
+            self.assertNotIn('Average_mean',result)
+            self.assertTrue(json.loads((directory / 'results.json').read_text())[0]['valid_performance'])
+
+    def test_cov90_rank64_changes_only_two_recipe_fields_and_runs_once(self):
+        reference=runner.settings_for('3090','M_seed1993')
+        with patch.object(runner,'SPEC',runner.ROOT / 'scripts/sweeps/imgr10_m_cov90_rank64_3090.json'):
+            self.assertEqual(runner.modes('3090'),['M_seed1993'])
+            runner.validate_settings('3090')
+            candidate=runner.settings_for('3090','M_seed1993')
+            changed={k for k in reference.keys() | candidate.keys() if reference.get(k) != candidate.get(k)}
+            self.assertEqual(changed,{'dual_mask_fixed_coverage','dual_mask_private_rank'})
+            self.assertEqual(candidate['dual_mask_fixed_coverage'],.9)
+            self.assertEqual(candidate['dual_mask_private_rank'],64)
+            with tempfile.TemporaryDirectory() as temp:
+                result,calls=self.simulate(Path(temp))
+                self.assertEqual(result,0)
+                self.assertEqual(calls,[('M_seed1993',True),('M_seed1993',False)])
+
     def test_mismatch_clears_previous_comparison_csv_and_plots(self):
         with tempfile.TemporaryDirectory() as temp:
             directory=Path(temp)

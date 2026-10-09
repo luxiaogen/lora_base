@@ -1,0 +1,36 @@
+{
+  "seeds": [1993],
+  "common_overrides": {
+    "init_epoch": 20,
+    "epochs": 20,
+    "ca": true,
+    "ca_epochs": 5,
+    "dual_mask_anchor_reg_weight": 2.5,
+    "dual_mask_update_rule": "step",
+    "dual_mask_tail_audit": true,
+    "dual_mask_position_audit": false,
+    "dual_mask_mechanism_audit": false,
+    "save_task_weights": false,
+    "disable_fused_sdpa": true
+  },
+  "compact_overrides": {
+    "dual_mask_fixed_coverage": 0.90,
+    "dual_mask_fixed_protect_strength": 0.5,
+    "dual_mask_fixed_conflict_strength": 0.5,
+    "dual_mask_permission_mode": "asymmetric",
+    "dual_mask_branch_layout": "dual",
+    "dual_mask_conflict_ratio": 0.1,
+    "dual_mask_conflict_score_mode": "magnitude",
+    "dual_mask_conflict_exact_topk": true,
+    "dual_mask_reg_weight": 0
+  },
+  "variants": {"M": {}},
+  "3090": {
+    "dataset": "imgr10",
+    "config": "exps/dlora/imgr10.json",
+    "private_rank": 64,
+    "primary": ["M"],
+    "extended": []
+  },
+  "historical_original_3090": "logs/shell_logs/baseline_4datasets_3090/20261007_004556_786646"
+}
