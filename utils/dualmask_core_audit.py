@@ -14,7 +14,8 @@ from torch.utils.data import DataLoader, Subset
 
 @contextmanager
 def stage_cost(learner, stage):
-    enabled = learner.args.get('dual_mask_mechanism_audit', False)
+    enabled = (learner.args.get('dual_mask_mechanism_audit', False)
+               or learner.args.get('dual_mask_prototype_position_probe', False))
     if not enabled:
         yield
         return

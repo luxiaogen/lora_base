@@ -292,6 +292,8 @@ class Attention_LoRA(nn.Module):
 
         self._p_score_diagnostic_gate = None
         self._core_audit_position = None
+        self._prototype_audit_position = None
+        self.register_buffer("prototype_position_masks", None, persistent=False)
         self.register_buffer("core_reference_protect", None, persistent=False)
         self.register_buffer("core_permuted_protect", None, persistent=False)
         self.register_buffer("p_permission_protect", None, persistent=False)
@@ -921,7 +923,8 @@ class Attention_LoRA(nn.Module):
                 protect = _top_ratio_mask(score, protect_ratio)  # mask
             reference_protect = protect
             if (self.args.get("dual_mask_mechanism_audit", False)
-                    or self.args.get("dual_mask_position_norm_match", "off") == "paired_min"):
+                    or self.args.get("dual_mask_position_norm_match", "off") == "paired_min"
+                    or self.args.get('dual_mask_prototype_position_probe', False)):
                 from utils.protect_position import permute_protect_mask
                 self.core_reference_protect = reference_protect.detach().clone()
                 self.core_permuted_protect = permute_protect_mask(
@@ -1479,9 +1482,9 @@ class Attention_LoRA(nn.Module):
 
     def _core_policy_active(self):
         return self.cur_task > 0 and (
-            self.args.get('dual_mask_position_norm_match', 'off') == 'paired_min'
+            self.args.get('dual_mask_position_norm_match', 'off') in ('paired_min', 'prototype_min')
             or self.args.get('dual_mask_permission_mode', 'asymmetric') != 'asymmetric'
-            or self._core_audit_position is not None)
+            or self._core_audit_position is not None or self._prototype_audit_position is not None)
 
     def _core_policy_delta(self, delta, isolated, conflict_ratio=None, conflict_strength=None):
         from utils.dualmask_core import paired_min_gates, permission_gate
@@ -1489,6 +1492,10 @@ class Attention_LoRA(nn.Module):
         mode = self.args.get('dual_mask_permission_mode', 'asymmetric')
         if conflict_strength is None:
             conflict_strength = self._conflict_parameters()[1]
+        if (self.args.get('dual_mask_position_norm_match', 'off') == 'prototype_min'
+                or self._prototype_audit_position is not None):
+            from utils.prototype_protection import position_delta
+            return position_delta(self, delta, isolated, conflict_ratio, conflict_strength)
         if self._effective_gate_mode() == 'protect_only' or not self._conflict_gate_enabled(isolated):
             applied = torch.zeros_like(delta)
         else:
@@ -2265,7 +2272,7 @@ class Attention_LoRA(nn.Module):
                         "qkv_density": [float(p.float().mean()) for p in applied.chunk(3, dim=0)],
                         "removed_norm": float((base - safe).norm()),
                         "removed_norm_definition": ("post_permission_conflict_and_norm_control"
-                            if t > 0 and (self.args.get('dual_mask_position_norm_match', 'off') == 'paired_min'
+                            if t > 0 and (self.args.get('dual_mask_position_norm_match', 'off') in ('paired_min', 'prototype_min')
                                 or (item['isolated'] and self.p_permission_release_mask is not None
                                     and self.args.get('p_permission_norm_match', True)))
                             else "conflict_only"),

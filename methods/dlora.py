@@ -1084,6 +1084,7 @@ class Learner(BaseLearner):
                 or self.args.get('ridge_fusion_enabled', False)
                 or float(self.args.get('wpre_distill_weight', 0.0)) > 0
                 or self.args.get('dual_mask_gradient_route', 'off') != 'off'
+                or self.args.get('dual_mask_prototype_position_probe', False)
         ):
             w0_dataset = data_manager.get_dataset(  # 所有训练样本，顺序固定  | 确定性测试视图：用于判断冻结 W0 的原始能力
                 np.arange(self._known_classes, self._total_classes),
@@ -1296,7 +1297,8 @@ class Learner(BaseLearner):
             if name.startswith(current_classifier):
                 param.requires_grad_(True)  # 将 分类头打开可训
 
-        if self.args.get('dual_mask_mechanism_audit', False) and self._device.type == 'cuda':
+        if (self.args.get('dual_mask_mechanism_audit', False)
+                or self.args.get('dual_mask_prototype_position_probe', False)) and self._device.type == 'cuda':
             torch.cuda.reset_peak_memory_stats(self._device)
         with stage_cost(self, 'protection_and_adapter_setup'):
             for module in self._iter_lora_modules():
@@ -1313,6 +1315,11 @@ class Learner(BaseLearner):
             kk += 1
 
         self._initialize_plora_a()
+
+        if self._cur_task > 0 and self.args.get('dual_mask_prototype_position_probe', False):
+            from utils.prototype_protection import prepare_positions
+            with stage_cost(self, 'prototype_position_probe'):
+                prepare_positions(self)
 
         ############################## set learning rates ##################################
         flora_params, other_params = [], []  # flora_params:收集的是名称带 lora 的参数（即各个 Transformer 层中 LoRA 的 B 矩阵）
@@ -1378,6 +1385,10 @@ class Learner(BaseLearner):
             self._network = self._network.module
 
         lora_modules = list(self._iter_lora_modules())
+        if self._cur_task > 0 and self.args.get('dual_mask_prototype_position_probe', False):
+            from utils.prototype_protection import diagnose_positions
+            with stage_cost(self, 'mechanism_diagnostic'):
+                diagnose_positions(self, test_loader.dataset, self.run_epoch)
         if self._cur_task in (1, 5, 9) and self.args.get('p_score_counterfactual_report', False):
             from utils.p_score_diagnostic import report_score_counterfactuals
             report_score_counterfactuals(self._network, test_loader.dataset, self._device,
@@ -1683,6 +1694,14 @@ class Learner(BaseLearner):
                 if epoch == 0:
                     storage_bytes(self, 'adapters_allocated')
 
+            if self.args.get('dual_mask_prototype_position_probe', False):
+                from utils.dualmask_core_audit import epoch_updates, storage_bytes
+                if epoch + 1 in (1, 5, 10, self.run_epoch):
+                    with stage_cost(self, 'update_telemetry'):
+                        epoch_updates(self, epoch + 1)
+                if epoch == 0:
+                    storage_bytes(self, 'adapters_allocated')
+
         self._head_balance_pool = None
         if self._cur_task == 0 and getattr(self, 'task0_validation_loader', None) is not None:
             logging.info('Task0 Holdout loss curve: %s', self._task0_holdout_loss_curve)
@@ -1755,7 +1774,8 @@ class Learner(BaseLearner):
     def eval_task(self):
         with stage_cost(self, 'inference'):
             result = super().eval_task()
-        if self.args.get('dual_mask_mechanism_audit', False):
+        if (self.args.get('dual_mask_mechanism_audit', False)
+                or self.args.get('dual_mask_prototype_position_probe', False)):
             from utils.dualmask_core_audit import storage_bytes
             storage_bytes(self, 'post_ca_merged')
         if self._ridge_fusion_ready:

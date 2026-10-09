@@ -47,7 +47,7 @@ def update_rows(raw, base, safe, conflict_mask, protect_mask, allowed_mask=None,
             selected_coordinates=int(c.sum()), effective_selected_coordinates=int(selected.sum()),
             conflict_density=float(c.float().mean()),
             effective_conflict_density=float(selected.float().mean()))
-        if identity.get('position_norm_match', 'off') == 'paired_min' or identity.get('p_permission_norm_match', False):
+        if identity.get('position_norm_match', 'off') in ('paired_min', 'prototype_min') or identity.get('p_permission_norm_match', False):
             # This residual combines conflict suppression and paired norm control.
             row.update(post_permission_removed_norm=conflict_removed,
                        post_permission_removed_ratio=conflict_removed / max(base_norm, 1e-12),

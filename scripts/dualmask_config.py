@@ -7,6 +7,24 @@ def normalize_dualmask_config(config: dict) -> dict:
     """在启动前规范边界选项，不改变合法配方。"""
     config.setdefault('dual_mask_conflict_old_overlap_adaptive', False)
     route = config.get('dual_mask_gradient_route', 'off')
+    position = config.get('dual_mask_protect_position', 'wpre')
+    prototype_probe = config.get('dual_mask_prototype_position_probe', False)
+    norm_mode = config.get('dual_mask_position_norm_match', 'off')
+    if position in ('prototype_high', 'prototype_shuffled', 'prototype_low') or norm_mode == 'prototype_min':
+        if not prototype_probe:
+            raise ValueError('Prototype positions require the task-start prototype probe')
+    if prototype_probe:
+        required = dict(dual_mask_gradient_route='off', dual_mask_branch_layout='dual',
+            dual_mask_permission_mode='asymmetric', dual_mask_update_rule='step',
+            dual_mask_competence_holdout_mod=5, dual_mask_conflict_score_mode='magnitude',
+            dual_mask_conflict_exact_topk=True, dual_mask_conflict_granularity='layer',
+            dual_mask_private_conflict_mode='global', p_permission_release='off',
+            p_permission_position='wpre', p_direction_score='off')
+        if any(config.get(key, value) != value for key, value in required.items()) or (
+                norm_mode not in ('off', 'prototype_min')
+                or position not in ('wpre', 'permuted', 'prototype_high', 'prototype_shuffled', 'prototype_low')
+                or norm_mode == 'prototype_min' and position == 'prototype_low'):
+            raise ValueError('Prototype protection supports joint S/P M step updates and off/prototype_min only')
     if route not in ('off', 'all', 'prototype', 'random_matched'):
         raise ValueError('Unknown dual_mask_gradient_route: ' + str(route))
     if route != 'off' and config.get('dual_mask_branch_layout', 'dual') != 'dual':

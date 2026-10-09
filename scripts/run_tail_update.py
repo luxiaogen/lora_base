@@ -44,8 +44,9 @@ def settings_for(machine, name, smoke=False):
         settings.update(data['compact_overrides'])
         settings['dual_mask_private_rank'] = data[machine]['private_rank']
     settings.update(data['variants'][variant])
-    settings['wandb_group'] = ('prototype_gradient_route_' if data.get('analysis') == 'prototype_gradient_route'
-                               else 'tail_update_') + machine
+    settings['wandb_group'] = data.get('analysis', 'tail_update') + '_' + machine
+    if data.get('analysis') == 'prototype_position':
+        settings['dual_mask_position_norm_match'] = 'off' if machine == '3090' else 'prototype_min'
     if smoke:
         settings.update(max_tasks=2, init_epoch=1, epochs=1, ca_epochs=1,
                         wandb_mode='offline', stage_audit=True)
@@ -71,7 +72,8 @@ def validate_settings(machine):
             dual_mask_anchor_reg_weight=2.5, dual_mask_task0_gate_mode='unmasked',
             dual_mask_permission_mode='asymmetric', dual_mask_branch_layout='dual',
             dual_mask_conflict_granularity='layer', dual_mask_private_conflict_mode='global',
-            dual_mask_position_norm_match='off', dual_mask_uniform_norm_matched=False,
+            dual_mask_position_norm_match=('prototype_min' if data.get('analysis') == 'prototype_position'
+                and machine == '5090' else 'off'), dual_mask_uniform_norm_matched=False,
             p_permission_release='off', p_direction_score='off', p_hard_zero_mode='off',
             plora_train_a=False, old_competition_weight=0, old_model_distill_weight=0,
             wpre_distill_weight=0, ridge_fusion_enabled=False, save_task_weights=False)
@@ -91,6 +93,17 @@ def validate_settings(machine):
                 dual_mask_anchor_reg_task0_only=True)
             if any(config.get(key, 0) != value for key, value in required.items()):
                 raise ValueError('Prototype routing requires the fixed M90/rank64 recipe.')
+        if data.get('analysis') == 'prototype_position':
+            from dualmask_config import normalize_dualmask_config
+            normalize_dualmask_config(config)
+            required = dict(dual_mask_gradient_route='off', dual_mask_prototype_position_probe=True,
+                dual_mask_fixed_coverage=.9, dual_mask_fixed_protect_strength=.5,
+                dual_mask_fixed_conflict_strength=.5, dual_mask_private_rank=64,
+                dual_mask_reg_weight=0, slora_gamma=.5, plora_gamma=.75,
+                dual_mask_update_rule='step', sp_staged_s_epochs=0,
+                dual_mask_anchor_reg_task0_only=True)
+            if any(config.get(key, 0) != value for key, value in required.items()):
+                raise ValueError('Prototype positions require the fixed M90/rank64 recipe.')
 
 
 def check_resume(directory, machine, revision):
@@ -136,6 +149,8 @@ def summarize_safely(directory, machine, records):
     try:
         if spec().get('analysis') == 'prototype_gradient_route':
             import analyze_prototype_gradient_route as analyzer
+        elif spec().get('analysis') == 'prototype_position':
+            import analyze_prototype_position as analyzer
         else:
             import analyze_tail_update as analyzer
         analyzer.summarize_saved(directory)
@@ -152,6 +167,10 @@ def execute(machine, selected, directory, revision, mode='run', hours=10):
     if spec().get('analysis') == 'prototype_gradient_route':
         engine.EXTRA_SOURCE_PATHS += ['scripts/analyze_prototype_gradient_route.py',
                                      'scripts/10_09_imgr10_prototype_gradient_route_3090.sh']
+    if spec().get('analysis') == 'prototype_position':
+        engine.EXTRA_SOURCE_PATHS += ['scripts/analyze_prototype_position.py', 'scripts/dualmask_config.py',
+            'scripts/10_10_imgr10_prototype_position_3090.sh',
+            'scripts/10_10_imgr10_prototype_position_5090.sh']
     dry = mode == 'dry-run'
     started = time.monotonic()
     seconds_left = hours * 3600
