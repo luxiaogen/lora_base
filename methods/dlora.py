@@ -824,7 +824,8 @@ class Learner(BaseLearner):
         )
 
         # 用于根据当前任务的学习难度 D_t，动态降低保护强度、扩大可塑空间
-        plasticity_adaptive = bool(self.args.get("dual_mask_plasticity_adaptive", True))
+        direct_strengths = self._cur_task > 0 and self.args.get('dual_mask_ncm_direct_strengths', False)
+        plasticity_adaptive = bool(self.args.get("dual_mask_plasticity_adaptive", True)) and not direct_strengths
         self._w0_ncm_loss_new = None
         self._w0_plasticity_demand = None
         if plasticity_adaptive:

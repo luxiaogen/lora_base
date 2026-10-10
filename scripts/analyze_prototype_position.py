@@ -119,6 +119,7 @@ def summarize_saved(directory):
     for name, values in rows.items():
         write_csv(directory / (name + '.csv'), values)
     title = (' NCM 三控制量恢复' if runner.spec().get('analysis') == 'ncm_controller_restore'
+             else ' NCM 直接强度实验' if runner.spec().get('analysis') == 'ncm_direct_strengths'
              else ' 原型保护位置实验')
     lines = ['# ' + machine + title, '',
         '| 组 | 状态 | Average | Last | Old | New | 阶段Old | 阶段New | Forgetting |',

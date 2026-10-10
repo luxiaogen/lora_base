@@ -983,6 +983,8 @@ class Attention_LoRA(nn.Module):
             return base_ratio, self._functional_merge_strength_override
         if self.cur_task > 0 and self.args.get('dual_mask_fixed_conflict_strength') is not None:
             return base_ratio, self.args['dual_mask_fixed_conflict_strength']
+        if self.cur_task > 0 and self.args.get('dual_mask_ncm_direct_strengths', False):
+            return base_ratio, self.pretrained_old_overlap_risk
         # 基础抑制强度
         base_strength = min(max(self.dual_mask_conflict_strength, 0.0), 1.0)
         if self.dual_mask_conflict_old_overlap_adaptive: # 是否使用R_old
