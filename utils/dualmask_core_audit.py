@@ -166,6 +166,18 @@ def epoch_updates(learner, epoch):
                                magnitude_mask_jaccard=int((first & second).sum()) / union if union else 1.0,
                                reference_row_rms_min=float(scale.min()), reference_row_rms_max=float(scale.max()))
                 logging.info('CoreEpochUpdate %s', json.dumps(row))
+            if task > 0 and not isolated and learner.args.get('dual_mask_protection_audit', False):
+                from utils.protection_strength import protection_update
+                state = protection_update(module, delta)
+                mask = module.general_mask.to(delta)
+                logging.info('ProtectionStrengthAudit %s', json.dumps(dict(task=task,
+                    epoch=epoch, layer=module.layer_idx,
+                    rule=learner.args.get('dual_mask_protection_rule', 'static'),
+                    alpha=float(state['alpha']),
+                    raw_protected_norm=float((gamma * delta * mask).norm()),
+                    effective_protected_norm=float((gamma * effective * mask).norm()),
+                    effective_plastic_norm=float((gamma * effective * (1 - mask)).norm()),
+                    pre_conflict_reconstruction_error=float((base - state['base']).abs().max()))))
             if task > 0 and isolated and learner.args.get('p_permission_release', 'off') != 'off':
                 protect = module._p_protect_mask().to(delta)
                 release = module.p_permission_release_mask

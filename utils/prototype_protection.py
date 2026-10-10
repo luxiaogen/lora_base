@@ -171,7 +171,11 @@ def position_delta(module, delta, isolated, conflict_ratio, conflict_strength):
         gates = []
         for index in MATCHED_POSITIONS:
             mask = masks[index].to(delta)
-            permission = 1 - mask if isolated else 1 - module.effective_protect_strength * mask
+            strength = module.effective_protect_strength
+            if not isolated and module.args.get('dual_mask_protection_rule', 'static') != 'static':
+                from utils.protection_strength import protection_alpha
+                strength = protection_alpha(module, delta, mask, 1 - conflict_strength * applied.to(delta))
+            permission = 1 - mask if isolated else 1 - strength * mask
             gates.append(permission * (1 - conflict_strength * applied.to(delta)))
         shape = (3, delta.shape[0] // 3, delta.shape[1])
         norms = torch.stack([(delta.detach().float() * gate.float()).reshape(3, -1).norm(dim=1)

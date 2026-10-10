@@ -1378,6 +1378,11 @@ class Attention_LoRA(nn.Module):
             safe = delta * gate
             return (safe, gate, applied) if return_details else safe
 
+        if self.cur_task > 0 and not isolated and self.args.get('dual_mask_protection_rule', 'static') != 'static':
+            from utils.protection_strength import protection_update
+            state = protection_update(self, delta, conflict_ratio, conflict_strength)
+            return (state['safe'], state['gate'], state['applied']) if return_details else state['safe']
+
         # general_mask/protect_mask: W0 重要区域，应该保护
         protect_mask = self.general_mask.to(device=delta.device, dtype=delta.dtype)
         # isolated_mask/plastic_mask: W0 非重要区域，允许 P_lora 使用
@@ -1504,6 +1509,9 @@ class Attention_LoRA(nn.Module):
         else:
             _, applied = self._branch_conflict(delta, isolated=isolated, conflict_ratio=conflict_ratio)
         def make_gate(mask):
+            if not isolated and self.args.get('dual_mask_protection_rule', 'static') != 'static':
+                from utils.protection_strength import protection_update
+                return protection_update(self, delta, conflict_ratio, conflict_strength, mask)['gate']
             base = permission_gate(mask.to(delta), strength, isolated, mode,
                                    self.dual_mask_s_protect_enabled)
             if self.dual_mask_uniform_norm_matched:
@@ -1560,6 +1568,11 @@ class Attention_LoRA(nn.Module):
             applied = (self._core_policy_delta(delta, isolated, conflict_ratio)[2]
                        if compute_conflict else torch.zeros_like(delta))
             return base, applied
+
+        if self.cur_task > 0 and not isolated and self.args.get('dual_mask_protection_rule', 'static') != 'static':
+            from utils.protection_strength import protection_update
+            state = protection_update(self, delta, conflict_ratio)
+            return state['base'], state['applied'] if compute_conflict else torch.zeros_like(delta)
 
         protect_mask = self.general_mask.to(device=delta.device, dtype=delta.dtype)
         plastic_mask = 1.0 - protect_mask

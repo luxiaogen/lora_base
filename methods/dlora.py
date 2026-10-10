@@ -1483,6 +1483,9 @@ class Learner(BaseLearner):
             self._set_branch_training_phase(epoch)
             if self.args.get('p_conflict_strength_warmup', False):
                 self._set_p_conflict_strength_epoch(epoch + 1)
+            if self._cur_task > 0 and self.args.get('dual_mask_protection_rule', 'static') in ('warmup', 'cooldown'):
+                for module in self._iter_lora_modules():
+                    module.protection_progress = epoch / (self.run_epoch - 1) if self.run_epoch > 1 else 1.
 
             losses = 0.
             correct, total = 0, 0

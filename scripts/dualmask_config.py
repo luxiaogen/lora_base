@@ -6,6 +6,19 @@ import warnings
 def normalize_dualmask_config(config: dict) -> dict:
     """在启动前规范边界选项，不改变合法配方。"""
     config.setdefault('dual_mask_conflict_old_overlap_adaptive', False)
+    protection_rule = config.get('dual_mask_protection_rule', 'static')
+    if protection_rule != 'static':
+        if protection_rule not in ('ncm_all', 'ncm_risk', 'warmup', 'cooldown', 'energy_equal', 'energy_half'):
+            raise ValueError('Unknown dual_mask_protection_rule')
+        required = dict(dual_mask_permission_mode='asymmetric', dual_mask_update_rule='step',
+            dual_mask_position_norm_match='off', dual_mask_uniform_norm_matched=False,
+            dual_mask_composed_conflict='off', dual_mask_conflict_merge_mode='suppress',
+            dual_mask_conflict_score_mode='magnitude', dual_mask_conflict_exact_topk=True,
+            dual_mask_private_conflict_mode='global', dual_mask_gradient_route='off',
+            p_permission_position='wpre', p_permission_release='off', p_direction_score='off',
+            dual_mask_reg_weight=0, late_weight_average_epochs=0)
+        if any(config.get(key, value) != value for key, value in required.items()):
+            raise ValueError('Protection rules require M step updates without extra permissions or losses')
     if config.get('dual_mask_ncm_conflict_mode', 'direct') not in ('direct', 'scaled'):
         raise ValueError('Unknown dual_mask_ncm_conflict_mode')
     route = config.get('dual_mask_gradient_route', 'off')

@@ -107,7 +107,7 @@ def validate_settings(machine):
         if data.get('analysis') in ('ncm_direct_strengths', 'ncm_overlap_strengths', 'ncm_demand_restore', 'ncm_fixed_protection', 'ncm_protection_sensitivity'):
             fixed_alpha = .5 if data.get('analysis') == 'ncm_fixed_protection' else None
             if data.get('analysis') == 'ncm_protection_sensitivity':
-                fixed_alpha = {'A025': .25, 'A075': .75}[variant]
+                fixed_alpha = {'A0': 0., 'A025': .25, 'A075': .75, 'A1': 1.}[variant]
             required = dict(dual_mask_ncm_direct_strengths=data.get('analysis') != 'ncm_demand_restore',
                 dual_mask_fixed_coverage=.9,
                 dual_mask_fixed_protect_strength=fixed_alpha,
@@ -121,6 +121,22 @@ def validate_settings(machine):
                 required.update(dual_mask_ncm_conflict_mode='scaled', dual_mask_conflict_strength=.5)
             if any(config.get(key) != value for key, value in required.items()):
                 raise ValueError('Direct NCM strengths require fixed M90/rank64 and accuracy controls.')
+        if data.get('analysis') == 'protection_search':
+            from dualmask_config import normalize_dualmask_config
+            normalize_dualmask_config(config)
+            alpha = {'REF': .5, 'A0': 0., 'A010': .1, 'A090': .9, 'A1': 1.}.get(variant, .5)
+            rule = {'ALL': 'ncm_all', 'RISK': 'ncm_risk', 'UP': 'warmup',
+                    'DOWN': 'cooldown', 'E1': 'energy_equal', 'E05': 'energy_half'}.get(variant, 'static')
+            required = dict(dual_mask_fixed_coverage=.9, dual_mask_fixed_protect_strength=alpha,
+                dual_mask_fixed_conflict_strength=None, dual_mask_private_rank=64,
+                dual_mask_reg_weight=0, slora_gamma=.5, plora_gamma=.75,
+                dual_mask_ncm_direct_strengths=True, dual_mask_ncm_conflict_mode='scaled',
+                dual_mask_conflict_strength=.5, dual_mask_conflict_old_overlap_adaptive=True,
+                dual_mask_competence_metric='accuracy', dual_mask_protect_strength_mode='competence',
+                dual_mask_protection_rule=rule, dual_mask_protection_audit=True,
+                dual_mask_update_rule='step', dual_mask_gradient_route='off', seed=[1993])
+            if any(config.get(key) != value for key, value in required.items()):
+                raise ValueError('Protection search requires the predeclared seed1993 M90/rank64 recipes.')
 
 
 def check_resume(directory, machine, revision):
@@ -164,7 +180,9 @@ def check_resume(directory, machine, revision):
 
 def summarize_safely(directory, machine, records):
     try:
-        if spec().get('analysis') == 'prototype_gradient_route':
+        if spec().get('analysis') == 'protection_search':
+            import analyze_protection_search as analyzer
+        elif spec().get('analysis') == 'prototype_gradient_route':
             import analyze_prototype_gradient_route as analyzer
         elif spec().get('analysis') in ('prototype_position', 'ncm_controller_restore', 'ncm_direct_strengths', 'ncm_overlap_strengths', 'ncm_demand_restore', 'ncm_fixed_protection', 'ncm_protection_sensitivity'):
             import analyze_prototype_position as analyzer
@@ -200,6 +218,12 @@ def execute(machine, selected, directory, revision, mode='run', hours=10):
         engine.EXTRA_SOURCE_PATHS.append('scripts/10_10_imgr10_ncm_fixed_protection_3090.sh')
     if spec().get('analysis') == 'ncm_protection_sensitivity':
         engine.EXTRA_SOURCE_PATHS.append('scripts/10_10_imgr10_ncm_protection_sensitivity_3090.sh')
+        if SPEC.name == 'imgr10_ncm_protection_boundary_3090.json':
+            engine.EXTRA_SOURCE_PATHS.append('scripts/10_11_imgr10_ncm_protection_boundary_3090.sh')
+    if spec().get('analysis') == 'protection_search':
+        engine.EXTRA_SOURCE_PATHS += ['scripts/analyze_prototype_position.py',
+            'scripts/analyze_protection_search.py', 'scripts/dualmask_config.py',
+            'scripts/10_11_imgr10_protection_search_3090.sh']
     dry = mode == 'dry-run'
     started = time.monotonic()
     seconds_left = hours * 3600
