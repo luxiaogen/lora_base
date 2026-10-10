@@ -104,8 +104,8 @@ def validate_settings(machine):
                 dual_mask_anchor_reg_task0_only=True)
             if any(config.get(key, 0) != value for key, value in required.items()):
                 raise ValueError('Prototype positions require the fixed M90/rank64 recipe.')
-        if data.get('analysis') in ('ncm_direct_strengths', 'ncm_overlap_strengths'):
-            required = dict(dual_mask_ncm_direct_strengths=True,
+        if data.get('analysis') in ('ncm_direct_strengths', 'ncm_overlap_strengths', 'ncm_demand_restore'):
+            required = dict(dual_mask_ncm_direct_strengths=data.get('analysis') != 'ncm_demand_restore',
                 dual_mask_fixed_coverage=.9, dual_mask_fixed_protect_strength=None,
                 dual_mask_fixed_conflict_strength=None, dual_mask_private_rank=64,
                 dual_mask_competence_adaptive=True, dual_mask_plasticity_adaptive=True,
@@ -113,7 +113,7 @@ def validate_settings(machine):
                 dual_mask_competence_metric='accuracy', dual_mask_protect_strength_mode='competence',
                 dual_mask_reg_weight=0, slora_gamma=.5, plora_gamma=.75,
                 dual_mask_update_rule='step', dual_mask_gradient_route='off')
-            if data.get('analysis') == 'ncm_overlap_strengths':
+            if data.get('analysis') in ('ncm_overlap_strengths', 'ncm_demand_restore'):
                 required.update(dual_mask_ncm_conflict_mode='scaled', dual_mask_conflict_strength=.5)
             if any(config.get(key) != value for key, value in required.items()):
                 raise ValueError('Direct NCM strengths require fixed M90/rank64 and accuracy controls.')
@@ -162,7 +162,7 @@ def summarize_safely(directory, machine, records):
     try:
         if spec().get('analysis') == 'prototype_gradient_route':
             import analyze_prototype_gradient_route as analyzer
-        elif spec().get('analysis') in ('prototype_position', 'ncm_controller_restore', 'ncm_direct_strengths', 'ncm_overlap_strengths'):
+        elif spec().get('analysis') in ('prototype_position', 'ncm_controller_restore', 'ncm_direct_strengths', 'ncm_overlap_strengths', 'ncm_demand_restore'):
             import analyze_prototype_position as analyzer
         else:
             import analyze_tail_update as analyzer
@@ -180,7 +180,7 @@ def execute(machine, selected, directory, revision, mode='run', hours=10):
     if spec().get('analysis') == 'prototype_gradient_route':
         engine.EXTRA_SOURCE_PATHS += ['scripts/analyze_prototype_gradient_route.py',
                                      'scripts/10_09_imgr10_prototype_gradient_route_3090.sh']
-    if spec().get('analysis') in ('prototype_position', 'ncm_controller_restore', 'ncm_direct_strengths', 'ncm_overlap_strengths'):
+    if spec().get('analysis') in ('prototype_position', 'ncm_controller_restore', 'ncm_direct_strengths', 'ncm_overlap_strengths', 'ncm_demand_restore'):
         engine.EXTRA_SOURCE_PATHS += ['scripts/analyze_prototype_position.py', 'scripts/dualmask_config.py',
             'scripts/10_10_imgr10_prototype_position_3090.sh',
             'scripts/10_10_imgr10_prototype_position_5090.sh']
@@ -190,6 +190,8 @@ def execute(machine, selected, directory, revision, mode='run', hours=10):
         engine.EXTRA_SOURCE_PATHS.append('scripts/10_10_imgr10_ncm_direct_strengths_3090.sh')
     if spec().get('analysis') == 'ncm_overlap_strengths':
         engine.EXTRA_SOURCE_PATHS.append('scripts/10_10_imgr10_ncm_overlap_strengths_3090.sh')
+    if spec().get('analysis') == 'ncm_demand_restore':
+        engine.EXTRA_SOURCE_PATHS.append('scripts/10_10_imgr10_ncm_demand_restore_3090.sh')
     dry = mode == 'dry-run'
     started = time.monotonic()
     seconds_left = hours * 3600
