@@ -101,12 +101,15 @@ def summarize_saved(directory):
             rows[name].extend(dict(r, mode=record['mode']) for r in values)
     if snapshots:
         reference = snapshots[0]
+        varied_fields = {'prefix', 'dual_mask_protect_position'}
+        if runner.spec().get('analysis') == 'ncm_protection_sensitivity':
+            varied_fields.add('dual_mask_fixed_protect_strength')
         for snapshot in snapshots[1:]:
             for field in ('code_revision', 'source_sha256', 'software', 'hardware'):
                 if snapshot[field] != reference[field]:
                     issues.append(dict(mode=snapshot['mode'], field=field))
             for key in reference['effective_config'].keys() | snapshot['effective_config'].keys():
-                if key not in ('prefix', 'dual_mask_protect_position') and (
+                if key not in varied_fields and (
                         reference['effective_config'].get(key) != snapshot['effective_config'].get(key)):
                     issues.append(dict(mode=snapshot['mode'], field='config.' + key))
     complete = [r for r in results if r.get('valid_performance')]
@@ -123,6 +126,7 @@ def summarize_saved(directory):
              else ' NCM 保护与原冲突强度实验' if runner.spec().get('analysis') == 'ncm_overlap_strengths'
              else ' NCM 保护D_t恢复对照' if runner.spec().get('analysis') == 'ncm_demand_restore'
              else ' 固定保护强度与NCM冲突对照' if runner.spec().get('analysis') == 'ncm_fixed_protection'
+             else ' 固定保护强度0.25/0.75对照' if runner.spec().get('analysis') == 'ncm_protection_sensitivity'
              else ' 原型保护位置实验')
     lines = ['# ' + machine + title, '',
         '| 组 | 状态 | Average | Last | Old | New | 阶段Old | 阶段New | Forgetting |',
