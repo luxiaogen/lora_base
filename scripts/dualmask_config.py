@@ -6,6 +6,8 @@ import warnings
 def normalize_dualmask_config(config: dict) -> dict:
     """在启动前规范边界选项，不改变合法配方。"""
     config.setdefault('dual_mask_conflict_old_overlap_adaptive', False)
+    if config.get('dual_mask_ncm_conflict_mode', 'direct') not in ('direct', 'scaled'):
+        raise ValueError('Unknown dual_mask_ncm_conflict_mode')
     route = config.get('dual_mask_gradient_route', 'off')
     position = config.get('dual_mask_protect_position', 'wpre')
     prototype_probe = config.get('dual_mask_prototype_position_probe', False)

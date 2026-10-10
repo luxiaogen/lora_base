@@ -1,0 +1,45 @@
+{
+  "analysis": "ncm_overlap_strengths",
+  "seeds": [1993],
+  "common_overrides": {
+    "init_epoch": 20,
+    "epochs": 20,
+    "ca": true,
+    "ca_epochs": 5,
+    "dual_mask_anchor_reg_weight": 2.5,
+    "dual_mask_update_rule": "step",
+    "dual_mask_tail_audit": false,
+    "dual_mask_position_audit": false,
+    "dual_mask_mechanism_audit": false,
+    "dual_mask_gradient_route": "off",
+    "dual_mask_prototype_position_probe": true,
+    "dual_mask_competence_holdout_mod": 5,
+    "save_task_weights": false,
+    "disable_fused_sdpa": true
+  },
+  "compact_overrides": {
+    "dual_mask_fixed_coverage": 0.90,
+    "dual_mask_fixed_protect_strength": null,
+    "dual_mask_fixed_conflict_strength": null,
+    "dual_mask_permission_mode": "asymmetric",
+    "dual_mask_branch_layout": "dual",
+    "dual_mask_conflict_ratio": 0.1,
+    "dual_mask_conflict_score_mode": "magnitude",
+    "dual_mask_conflict_exact_topk": true,
+    "dual_mask_reg_weight": 0
+  },
+  "variants": {
+    "OVERLAP": {
+      "dual_mask_protect_position": "wpre",
+      "dual_mask_ncm_direct_strengths": true,
+      "dual_mask_ncm_conflict_mode": "scaled"
+    }
+  },
+  "3090": {
+    "dataset": "imgr10",
+    "config": "exps/dlora/imgr10.json",
+    "private_rank": 64,
+    "primary": ["OVERLAP"],
+    "extended": []
+  }
+}
