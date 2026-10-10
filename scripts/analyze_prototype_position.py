@@ -122,6 +122,7 @@ def summarize_saved(directory):
              else ' NCM 直接强度实验' if runner.spec().get('analysis') == 'ncm_direct_strengths'
              else ' NCM 保护与原冲突强度实验' if runner.spec().get('analysis') == 'ncm_overlap_strengths'
              else ' NCM 保护D_t恢复对照' if runner.spec().get('analysis') == 'ncm_demand_restore'
+             else ' 固定保护强度与NCM冲突对照' if runner.spec().get('analysis') == 'ncm_fixed_protection'
              else ' 原型保护位置实验')
     lines = ['# ' + machine + title, '',
         '| 组 | 状态 | Average | Last | Old | New | 阶段Old | 阶段New | Forgetting |',
