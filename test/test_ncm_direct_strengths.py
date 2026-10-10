@@ -104,16 +104,15 @@ class NCMDirectStrengthTests(unittest.TestCase):
         module.set_pretrained_old_overlap_risk(.08)
         module.before_task(1)
         module.general_mask.zero_()
-        module.general_mask[0, 0] = 1.
-        module.global_s_conflict_mask = torch.zeros_like(module.general_mask)
-        module.global_s_conflict_mask[0, 0] = 1.
-        module.global_p_conflict_mask = module.global_s_conflict_mask.clone()
-        delta = torch.ones_like(module.qkv.weight, requires_grad=True)
+        module.general_mask[-1, -1] = 1.
+        # 无并列幅度；最大坐标在各 PyTorch 版本都应被精确 Top-K 选中。
+        delta = torch.arange(1, module.qkv.weight.numel() + 1, dtype=torch.float32).reshape_as(
+            module.qkv.weight).requires_grad_()
         shared = module._safe_delta(delta, False)
         private = module._safe_delta(delta, True)
-        self.assertAlmostEqual(shared[0, 0].item(), .28 * .92, places=6)
-        self.assertEqual(private[0, 0].item(), 0.)
-        self.assertEqual(private[1, 0].item(), 1.)
+        self.assertAlmostEqual(shared[-1, -1].item(), delta[-1, -1].item() * .28 * .92, places=5)
+        self.assertEqual(private[-1, -1].item(), 0.)
+        self.assertEqual(private[0, 0].item(), 1.)
         shared.sum().backward()
         self.assertGreater(float(delta.grad.norm()), 0.)
         x = torch.randn(3, 4)
