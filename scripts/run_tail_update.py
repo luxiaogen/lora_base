@@ -149,7 +149,7 @@ def summarize_safely(directory, machine, records):
     try:
         if spec().get('analysis') == 'prototype_gradient_route':
             import analyze_prototype_gradient_route as analyzer
-        elif spec().get('analysis') == 'prototype_position':
+        elif spec().get('analysis') in ('prototype_position', 'ncm_controller_restore'):
             import analyze_prototype_position as analyzer
         else:
             import analyze_tail_update as analyzer
@@ -167,10 +167,12 @@ def execute(machine, selected, directory, revision, mode='run', hours=10):
     if spec().get('analysis') == 'prototype_gradient_route':
         engine.EXTRA_SOURCE_PATHS += ['scripts/analyze_prototype_gradient_route.py',
                                      'scripts/10_09_imgr10_prototype_gradient_route_3090.sh']
-    if spec().get('analysis') == 'prototype_position':
+    if spec().get('analysis') in ('prototype_position', 'ncm_controller_restore'):
         engine.EXTRA_SOURCE_PATHS += ['scripts/analyze_prototype_position.py', 'scripts/dualmask_config.py',
             'scripts/10_10_imgr10_prototype_position_3090.sh',
             'scripts/10_10_imgr10_prototype_position_5090.sh']
+    if spec().get('analysis') == 'ncm_controller_restore':
+        engine.EXTRA_SOURCE_PATHS.append('scripts/10_10_imgr10_ncm_controller_restore_3090.sh')
     dry = mode == 'dry-run'
     started = time.monotonic()
     seconds_left = hours * 3600
