@@ -1,0 +1,48 @@
+{
+  "common_overrides": {
+    "init_epoch": 20, "epochs": 20, "ca": true, "ca_epochs": 5,
+    "dual_mask_anchor_reg_weight": 2.5, "disable_fused_sdpa": true,
+    "save_task_weights": false, "dual_mask_update_rule": "step",
+    "dual_mask_gradient_route": "off", "dual_mask_prototype_position_probe": false,
+    "dual_mask_mechanism_audit": false, "dual_mask_position_audit": true,
+    "dual_mask_budget_audit": true, "dual_mask_protection_audit": true,
+    "dual_mask_protection_rule": "static", "dual_mask_tail_audit": false,
+    "dual_mask_protect_position": "wpre", "late_weight_average_epochs": 0
+  },
+  "compact_overrides": {
+    "dual_mask_fixed_coverage": 0.90, "dual_mask_fixed_protect_strength": 0.5,
+    "dual_mask_fixed_conflict_strength": null, "dual_mask_conflict_strength": 0.5,
+    "dual_mask_ncm_direct_strengths": true, "dual_mask_ncm_conflict_mode": "scaled",
+    "dual_mask_conflict_old_overlap_adaptive": true,
+    "dual_mask_conflict_score_mode": "magnitude", "dual_mask_conflict_exact_topk": true,
+    "dual_mask_conflict_ratio": 0.1, "dual_mask_reg_weight": 0
+  },
+  "3090": {
+    "datasets": [{"name": "imgr10", "config": "exps/dlora/imgr10.json", "rank": 64}],
+    "variants": [
+      {"name": "R0", "recipe": "F", "overrides": {}},
+      {"name": "R1", "recipe": "F", "overrides": {"dual_mask_protection_rule": "energy_equal"}},
+      {"name": "R2", "recipe": "F", "overrides": {"dual_mask_protection_rule": "energy_equal_uniform"}},
+      {"name": "R3", "recipe": "F", "overrides": {"dual_mask_protection_rule": "energy_equal", "dual_mask_position_norm_match": "paired_layer_min"}},
+      {"name": "R4", "recipe": "F", "overrides": {"dual_mask_protection_rule": "energy_equal", "dual_mask_position_norm_match": "paired_layer_min", "dual_mask_protect_position": "permuted"}},
+      {"name": "R5", "recipe": "F", "overrides": {"dual_mask_protection_rule": "energy_half"}},
+      {"name": "R6", "recipe": "F", "overrides": {"dual_mask_protection_rule": "energy_half_uniform"}},
+      {"name": "R7", "recipe": "F", "overrides": {"dual_mask_protection_rule": "energy_half", "dual_mask_position_norm_match": "paired_layer_min"}},
+      {"name": "R8", "recipe": "F", "overrides": {"dual_mask_protection_rule": "energy_half", "dual_mask_position_norm_match": "paired_layer_min", "dual_mask_protect_position": "permuted"}}
+    ]
+  },
+  "5090": {
+    "datasets": [
+      {"name": "imga10", "config": "exps/dlora/imga10.json", "rank": 32},
+      {"name": "cub10", "config": "exps/dlora/cub10.json", "rank": 32}
+    ],
+    "variants": [
+      {"name": "S0", "recipe": "O", "overrides": {"dual_mask_ncm_direct_strengths": false}},
+      {"name": "S1", "recipe": "F", "overrides": {}},
+      {"name": "S2", "recipe": "F", "overrides": {"dual_mask_protection_rule": "energy_equal"}},
+      {"name": "S3", "recipe": "F", "overrides": {"dual_mask_protection_rule": "energy_equal_uniform"}},
+      {"name": "S4", "recipe": "F", "overrides": {"dual_mask_protection_rule": "energy_half"}},
+      {"name": "S5", "recipe": "F", "overrides": {"dual_mask_protection_rule": "energy_half_uniform"}}
+    ]
+  }
+}

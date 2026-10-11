@@ -923,7 +923,8 @@ class Attention_LoRA(nn.Module):
                 protect = _top_ratio_mask(score, protect_ratio)  # mask
             reference_protect = protect
             if (self.args.get("dual_mask_mechanism_audit", False)
-                    or self.args.get("dual_mask_position_norm_match", "off") == "paired_min"
+                    or self.args.get('dual_mask_budget_audit', False)
+                    or self.args.get("dual_mask_position_norm_match", "off") in ('paired_min', 'paired_layer_min')
                     or self.args.get('dual_mask_prototype_position_probe', False)):
                 from utils.protect_position import permute_protect_mask
                 self.core_reference_protect = reference_protect.detach().clone()
@@ -1490,7 +1491,7 @@ class Attention_LoRA(nn.Module):
 
     def _core_policy_active(self):
         return self.cur_task > 0 and (
-            self.args.get('dual_mask_position_norm_match', 'off') in ('paired_min', 'prototype_min')
+            self.args.get('dual_mask_position_norm_match', 'off') in ('paired_min', 'paired_layer_min', 'prototype_min')
             or self.args.get('dual_mask_permission_mode', 'asymmetric') != 'asymmetric'
             or self._core_audit_position is not None or self._prototype_audit_position is not None)
 
@@ -1518,11 +1519,16 @@ class Attention_LoRA(nn.Module):
                 alpha = self._uniform_conflict_strength(delta * base, applied, conflict_strength)
                 return base * (1 - alpha)
             return base * (1 - conflict_strength * applied.to(delta))
-        paired = (self.args.get('dual_mask_position_norm_match', 'off') == 'paired_min'
+        paired = (self.args.get('dual_mask_position_norm_match', 'off') in ('paired_min', 'paired_layer_min')
                   or self._core_audit_position is not None)
         if paired:
             gates = [make_gate(mask) for mask in (self.core_reference_protect, self.core_permuted_protect)]
-            gates, _, _, _ = paired_min_gates(delta, *gates)
+            if (self.args.get('dual_mask_position_norm_match') == 'paired_layer_min'
+                    or self._core_audit_position is not None and self.args.get('dual_mask_budget_audit', False)):
+                from utils.dualmask_core import paired_layer_min_gates
+                gates, _, _, _ = paired_layer_min_gates(delta, *gates)
+            else:
+                gates, _, _, _ = paired_min_gates(delta, *gates)
             position = self._core_audit_position or self.args.get('dual_mask_protect_position', 'wpre')
             gate = gates[0 if position == 'wpre' else 1]
         else:
@@ -1562,9 +1568,13 @@ class Attention_LoRA(nn.Module):
 
         if self._core_policy_active():
             from utils.dualmask_core import permission_gate
-            base = delta * permission_gate(self.general_mask.to(delta),
-                min(max(self.effective_protect_strength, 0.0), 1.0), isolated,
-                self.args.get('dual_mask_permission_mode', 'asymmetric'), self.dual_mask_s_protect_enabled)
+            if not isolated and self.args.get('dual_mask_protection_rule', 'static') != 'static':
+                from utils.protection_strength import protection_update
+                base = protection_update(self, delta, conflict_ratio)['base']
+            else:
+                base = delta * permission_gate(self.general_mask.to(delta),
+                    min(max(self.effective_protect_strength, 0.0), 1.0), isolated,
+                    self.args.get('dual_mask_permission_mode', 'asymmetric'), self.dual_mask_s_protect_enabled)
             applied = (self._core_policy_delta(delta, isolated, conflict_ratio)[2]
                        if compute_conflict else torch.zeros_like(delta))
             return base, applied
@@ -1816,6 +1826,7 @@ class Attention_LoRA(nn.Module):
             conflict_ratio: float,
             conflict_strength: float,
             applied_mask: Optional[torch.Tensor] = None,
+            merge_reference: Optional[torch.Tensor] = None,
     ):
         """Measure the P mask actually used by merge, without changing it."""
         plastic = (1.0 - self.general_mask.to(raw_delta)).bool()
@@ -1864,6 +1875,8 @@ class Attention_LoRA(nn.Module):
         if self.cur_task > 0 and self.args.get('dual_mask_update_rule', 'step') != 'step':
             expected_safe = (self.plora_gamma * self._tail_update_state(raw_delta / self.plora_gamma, True)['safe']
                              if self.plora_gamma else torch.zeros_like(safe_delta))
+        if merge_reference is not None:
+            expected_safe = merge_reference
 
         def ratio(part, whole):
             return float(part / whole) if whole else 0.0
@@ -1900,6 +1913,7 @@ class Attention_LoRA(nn.Module):
             "qkv_plastic_overlap": tuple(qkv_overlap),
             "qkv_removed_ratio": tuple(qkv_removed_ratio),
             "merge_error": float((expected_safe - safe_delta).abs().max().item()),
+            "removed_definition": ('conflict_and_layer_norm' if merge_reference is not None else 'conflict_gate'),
         }
 
     # 合并阶段的诊断与日志函数
@@ -1951,19 +1965,23 @@ class Attention_LoRA(nn.Module):
         if private_item is not None and not self._p_direction_active():
             private_raw = private_item["raw_delta"]
             relative = self.cur_task > 0 and self.dual_mask_conflict_score_mode in ('wpre_relative', 'task_relative')
+            layer_matched = self.args.get('dual_mask_position_norm_match') == 'paired_layer_min'
+            merge_reference = (private_item['gate_multiplier'] * (private_item['gate_value'] * private_item['actual_gate'])
+                               if layer_matched else None)
             applied = self._private_merge_diagnostic(
                 private_raw,
                 private_item["safe_delta"],
                 conflict_ratio,
                 conflict_strength,
-                applied_mask=private_item['actual_mask'] if relative else None,
+                applied_mask=private_item['actual_mask'] if relative or layer_matched else None,
+                merge_reference=merge_reference,
             )
             logging.info(
                 "Task %s layer %s P applied merge diagnostic: "
                 "selected=%s, selected_plastic=%s, selected_active=%s, "
                 "plastic_overlap=%.4f, removed_norm=%.6f, removed_ratio=%.4f, applied_strength=%.4f, "
                 "reference_removed_norm=%s, qkv_selected=%s, qkv_plastic_overlap=%s, "
-                "qkv_removed_ratio=%s, merge_error=%.3e",
+                "qkv_removed_ratio=%s, merge_error=%.3e, removed_definition=%s",
                 int(task),
                 int(self.layer_idx),
                 applied["selected"],
@@ -1978,6 +1996,7 @@ class Attention_LoRA(nn.Module):
                 applied["qkv_plastic_overlap"],
                 applied["qkv_removed_ratio"],
                 applied["merge_error"],
+                applied["removed_definition"],
             )
             plastic_mask = (1.0 - protect_mask).to(device=private_raw.device,dtype=private_raw.dtype,)
             private_score, global_private_mask = self._joint_conflict(
@@ -2189,7 +2208,7 @@ class Attention_LoRA(nn.Module):
 
         def mask_delta(item, conflict_ratio: float, conflict_strength: float):
             relative = t > 0 and self.dual_mask_conflict_score_mode in ('wpre_relative', 'task_relative')
-            unscaled = relative or (t > 0 and self.args.get('dual_mask_update_rule', 'step') != 'step') or self._core_policy_active() or (item['isolated'] and t > 0 and (
+            unscaled = relative or (t > 0 and self.args.get('dual_mask_update_rule', 'step') != 'step') or (t > 0 and not item['isolated'] and self.args.get('dual_mask_protection_rule', 'static').endswith('_uniform')) or self._core_policy_active() or (item['isolated'] and t > 0 and (
                 self.args.get('p_permission_release', 'off') != 'off'
                 or self.args.get('p_permission_position', 'wpre') == 'permuted'))
             value = item['factor_delta'] if unscaled else item['raw_delta']
@@ -2288,7 +2307,7 @@ class Attention_LoRA(nn.Module):
                         "qkv_density": [float(p.float().mean()) for p in applied.chunk(3, dim=0)],
                         "removed_norm": float((base - safe).norm()),
                         "removed_norm_definition": ("post_permission_conflict_and_norm_control"
-                            if t > 0 and (self.args.get('dual_mask_position_norm_match', 'off') in ('paired_min', 'prototype_min')
+                            if t > 0 and (self.args.get('dual_mask_position_norm_match', 'off') in ('paired_min', 'paired_layer_min', 'prototype_min')
                                 or (item['isolated'] and self.p_permission_release_mask is not None
                                     and self.args.get('p_permission_norm_match', True)))
                             else "conflict_only"),

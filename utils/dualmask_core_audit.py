@@ -15,6 +15,7 @@ from torch.utils.data import DataLoader, Subset
 @contextmanager
 def stage_cost(learner, stage):
     enabled = (learner.args.get('dual_mask_mechanism_audit', False)
+               or learner.args.get('dual_mask_budget_audit', False)
                or learner.args.get('dual_mask_prototype_position_probe', False))
     if not enabled:
         yield
@@ -83,7 +84,9 @@ def _logits_stats(logits, labels):
 
 
 def position_diagnostic(learner, dataset, epoch):
-    if learner._cur_task not in (1, 5, 9) or epoch not in (1, 5, 10, 20):
+    budget_audit = learner.args.get('dual_mask_budget_audit', False)
+    if (learner._cur_task not in (1, 5, 9)
+            or epoch not in ((learner.run_epoch,) if budget_audit else (1, 5, 10, 20))):
         return
     network = learner._network.module if isinstance(learner._network, torch.nn.DataParallel) else learner._network
     modules = list(learner._iter_lora_modules())
@@ -120,7 +123,8 @@ def position_diagnostic(learner, dataset, epoch):
                            wpre_margin=row['wpre_margin'] / count,
                            permuted_margin=row['permuted_margin'] / count)
             logging.info('CorePositionDiagnostic %s', json.dumps(dict(task=learner._cur_task,
-                epoch=epoch, partition=name, norm_control='same_state_paired_min',
+                epoch=epoch, partition=name,
+                norm_control='same_state_paired_layer_min' if budget_audit else 'same_state_paired_min',
                 scope='all_seen', source='test_only_fixed_order', **row)))
 
 
@@ -178,6 +182,10 @@ def epoch_updates(learner, epoch):
                     effective_protected_norm=float((gamma * effective * mask).norm()),
                     effective_plastic_norm=float((gamma * effective * (1 - mask)).norm()),
                     pre_conflict_reconstruction_error=float((base - state['base']).abs().max()))))
+            if task > 0 and learner.args.get('dual_mask_budget_audit', False):
+                logging.info('BudgetUpdateAudit %s', json.dumps(dict(task=task, epoch=epoch,
+                    layer=module.layer_idx, branch=branch,
+                    **budget_update_values(module, delta, effective, selected, isolated, gamma))))
             if task > 0 and isolated and learner.args.get('p_permission_release', 'off') != 'off':
                 protect = module._p_protect_mask().to(delta)
                 release = module.p_permission_release_mask
@@ -192,6 +200,43 @@ def epoch_updates(learner, epoch):
                         effective_norm=float(gamma * actual.norm()),
                         protected_effective_norm=float(gamma * (actual * protected).norm()),
                         norm_match=learner.args.get('p_permission_norm_match', True))))
+
+
+@torch.no_grad()
+def budget_update_values(module, delta, effective, selected, isolated, gamma):
+    from utils.protection_strength import protection_update
+    mask = module.general_mask.to(delta)
+    rule = module.args.get('dual_mask_protection_rule', 'static')
+    state = None if isolated else protection_update(module, delta)
+    value = delta * (1 - module._conflict_parameters()[1] * selected.to(delta))
+    reference = value * (1 - mask) if isolated else value * (1 - state['alpha'] * mask)
+    before_match = value * (1 - mask) if isolated else state['safe']
+    rho = 1. if rule.startswith('energy_equal') else .5 if rule.startswith('energy_half') else None
+    inside, outside = (float((gamma * effective * area).norm()) for area in (mask, 1 - mask))
+    values = dict(rule=rule, reference_alpha=None if isolated else float(state['alpha']),
+        uniform_coefficient=(float(state['uniform_coefficient'])
+            if state is not None and state['uniform_coefficient'] is not None else None),
+        region_budget_applies=not isolated and rho is not None and not rule.endswith('_uniform'),
+        rho=rho, budget_triggered=not isolated and rho is not None and float(state['alpha']) > 0,
+        effective_protected_norm=inside, effective_plastic_norm=outside,
+        budget_violation=max(0., inside - rho * outside) if rho is not None and not isolated else None,
+        reference_extra_removed_norm=float((gamma * (value - reference)).norm()),
+        actual_extra_removed_norm=float((gamma * (value - before_match)).norm()),
+        uniform_match_residual=(float(gamma * ((value - before_match).norm()
+            - (value - reference).norm()).abs()) if rule.endswith('_uniform') and not isolated else None),
+        layer_match_removed_norm=float((gamma * (before_match - effective)).norm()),
+        protected_coordinates=int(mask.sum()), full_coordinates=mask.numel())
+    if module.args.get('dual_mask_position_norm_match') == 'paired_layer_min':
+        from utils.dualmask_core import paired_layer_min_gates
+        masks = (module.core_reference_protect, module.core_permuted_protect)
+        gates = [((1 - protect.to(delta)) * (1 - module._conflict_parameters()[1] * selected)
+                  if isolated else protection_update(module, delta, protect=protect)['gate']) for protect in masks]
+        _, norms, target, scales = paired_layer_min_gates(delta, *gates)
+        index = 0 if module.args.get('dual_mask_protect_position', 'wpre') == 'wpre' else 1
+        values.update(pair_reference_norm=float(gamma * norms[0]), pair_permuted_norm=float(gamma * norms[1]),
+                      pair_target_norm=float(gamma * target), pair_scale=float(scales[index]),
+                      pair_matching_residual=float(gamma * (effective.norm() - target).abs()))
+    return values
 
 
 def storage_bytes(learner, stage):

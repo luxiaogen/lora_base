@@ -2,7 +2,8 @@
 import torch
 
 
-RULES = ('static', 'ncm_all', 'ncm_risk', 'warmup', 'cooldown', 'energy_equal', 'energy_half')
+RULES = ('static', 'ncm_all', 'ncm_risk', 'warmup', 'cooldown', 'energy_equal', 'energy_half',
+         'energy_equal_uniform', 'energy_half_uniform')
 
 
 def protection_alpha(module, raw, protect, conflict):
@@ -21,7 +22,7 @@ def protection_alpha(module, raw, protect, conflict):
         value = raw.detach().float() * conflict.float()
         inside = (value * protect.float()).norm()
         outside = (value * (1 - protect.float())).norm()
-        ratio = 1. if rule == 'energy_equal' else .5
+        ratio = 1. if rule in ('energy_equal', 'energy_equal_uniform') else .5
         strength = (1 - ratio * outside / inside.clamp_min(1e-30)).clamp(0, 1)
         # B=0时保留软门和学习梯度；无保护区能量时不额外抑制。
         strength = torch.where(inside > 0, strength, torch.zeros_like(strength))
@@ -39,5 +40,15 @@ def protection_update(module, raw, conflict_ratio=None, conflict_strength=None, 
     conflict = 1 - conflict_strength * selected.to(raw)
     alpha = protection_alpha(module, raw, protect, conflict)
     permission = 1 - alpha * protect if module.dual_mask_s_protect_enabled else torch.ones_like(protect)
+    coefficient = None
+    if module.cur_task > 0 and module.args.get('dual_mask_protection_rule', '').endswith('_uniform'):
+        with torch.no_grad():
+            value = raw.detach().float() * conflict.float()
+            norm = value.norm()
+            removed = (value * (1 - permission.float())).norm()
+            coefficient = removed / norm.clamp_min(1e-30)
+            # 零B沿用参照区域门，保持第一步梯度；非零时仅匹配额外移除范数。
+            permission = torch.where(norm > 0, torch.ones_like(permission) * (1 - coefficient), permission)
     base, gate = raw * permission, permission * conflict
-    return dict(alpha=alpha, base=base, safe=raw * gate, gate=gate, applied=selected)
+    return dict(alpha=alpha, base=base, safe=raw * gate, gate=gate, applied=selected,
+                permission=permission, uniform_coefficient=coefficient)

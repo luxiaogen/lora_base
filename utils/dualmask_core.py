@@ -24,3 +24,14 @@ def paired_min_gates(delta, first, second):
     gates = tuple(gate * scale.repeat_interleave(shape[1]).unsqueeze(1).to(gate)
                   for gate, scale in zip((first, second), scales))
     return gates, norms, target, scales
+
+
+@torch.no_grad()
+def paired_layer_min_gates(delta, first, second):
+    """整层统一缩放，保留保护区与区外的预算比例。"""
+    value = delta.detach().float()
+    norms = torch.stack([(value * gate).norm() for gate in (first, second)])
+    target = norms.min()
+    scales = torch.where(norms > 0, target / norms.clamp_min(1e-30), torch.ones_like(norms))
+    gates = tuple(gate * scale.to(gate) for gate, scale in zip((first, second), scales))
+    return gates, norms, target, scales

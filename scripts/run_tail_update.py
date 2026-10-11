@@ -195,10 +195,11 @@ def summarize_safely(directory, machine, records):
         print('Analysis error saved; scheduled training continues.', flush=True)
 
 
-def execute(machine, selected, directory, revision, mode='run', hours=10):
+def execute(machine, selected, directory, revision, mode='run', hours=10, source_paths=()):
     old = engine.command_for, engine.SPEC, engine.EXTRA_SOURCE_PATHS
     engine.command_for, engine.SPEC = command_for, SPEC
     engine.EXTRA_SOURCE_PATHS = ['scripts/run_tail_update.py', 'scripts/analyze_tail_update.py', 'scripts/run_baseline_suite.py']
+    engine.EXTRA_SOURCE_PATHS += list(source_paths)
     if spec().get('analysis') == 'prototype_gradient_route':
         engine.EXTRA_SOURCE_PATHS += ['scripts/analyze_prototype_gradient_route.py',
                                      'scripts/10_09_imgr10_prototype_gradient_route_3090.sh']

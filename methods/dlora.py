@@ -1299,6 +1299,7 @@ class Learner(BaseLearner):
                 param.requires_grad_(True)  # 将 分类头打开可训
 
         if (self.args.get('dual_mask_mechanism_audit', False)
+                or self.args.get('dual_mask_budget_audit', False)
                 or self.args.get('dual_mask_prototype_position_probe', False)) and self._device.type == 'cuda':
             torch.cuda.reset_peak_memory_stats(self._device)
         with stage_cost(self, 'protection_and_adapter_setup'):
@@ -1706,6 +1707,15 @@ class Learner(BaseLearner):
                 if epoch == 0:
                     storage_bytes(self, 'adapters_allocated')
 
+            if self.args.get('dual_mask_budget_audit', False):
+                from utils.dualmask_core_audit import epoch_updates, position_diagnostic, storage_bytes
+                if epoch + 1 in (1, 5, 10, self.run_epoch):
+                    with stage_cost(self, 'update_telemetry'):
+                        epoch_updates(self, epoch + 1)
+                position_diagnostic(self, test_loader.dataset, epoch + 1)
+                if epoch == 0:
+                    storage_bytes(self, 'adapters_allocated')
+
         self._head_balance_pool = None
         if self._cur_task == 0 and getattr(self, 'task0_validation_loader', None) is not None:
             logging.info('Task0 Holdout loss curve: %s', self._task0_holdout_loss_curve)
@@ -1779,6 +1789,7 @@ class Learner(BaseLearner):
         with stage_cost(self, 'inference'):
             result = super().eval_task()
         if (self.args.get('dual_mask_mechanism_audit', False)
+                or self.args.get('dual_mask_budget_audit', False)
                 or self.args.get('dual_mask_prototype_position_probe', False)):
             from utils.dualmask_core_audit import storage_bytes
             storage_bytes(self, 'post_ca_merged')
