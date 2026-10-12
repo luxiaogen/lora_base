@@ -1621,6 +1621,10 @@ class Learner(BaseLearner):
             self._p_old_gradient_context = None
             self._p_step_context = None
             scheduler.step()
+            if self._cur_task > 0 and (self.args.get('p_fixed_support', 'off') != 'off'
+                    or self.args.get('p_fixed_support_audit', False)):
+                for module in self._iter_lora_modules():
+                    module.update_p_fixed_support(epoch + 1)
             if self._cur_task > 0 and int(self.args.get('p_conflict_freeze_epoch', 0)) > 0:
                 for module in self._iter_lora_modules():
                     module.update_p_conflict_freeze(epoch + 1)
@@ -1694,7 +1698,9 @@ class Learner(BaseLearner):
                 from utils.dualmask_core_audit import epoch_updates, position_diagnostic, storage_bytes
                 with stage_cost(self, 'update_telemetry'):
                     epoch_updates(self, epoch + 1)
-                if self.args.get('p_permission_position', 'wpre') == 'wpre' and self.args.get('p_permission_release', 'off') == 'off':
+                if (not self.args.get('p_fixed_support_audit', False)
+                        and self.args.get('p_permission_position', 'wpre') == 'wpre'
+                        and self.args.get('p_permission_release', 'off') == 'off'):
                     position_diagnostic(self, test_loader.dataset, epoch + 1)
                 if epoch == 0:
                     storage_bytes(self, 'adapters_allocated')

@@ -1,0 +1,26 @@
+{
+  "name": "p_fixed_support", "hours": 10,
+  "base_spec": "budget_verification.json",
+  "common_overrides": {
+    "dual_mask_protection_rule": "static",
+    "dual_mask_task_start_probe": false,
+    "dual_mask_conflict_importance_source": "wpre",
+    "dual_mask_position_norm_match": "off",
+    "dual_mask_position_audit": false,
+    "dual_mask_budget_audit": false,
+    "dual_mask_protection_audit": false,
+    "dual_mask_mechanism_audit": true,
+    "p_fixed_support_warmup_epochs": 2,
+    "p_fixed_support_keep_ratio": 0.5,
+    "p_fixed_support_audit": true
+  },
+  "3090": {
+    "datasets": [{"name": "imgr10", "config": "exps/dlora/imgr10.json", "rank": 64}],
+    "variants": [
+      {"name": "A", "recipe": "F", "overrides": {"p_fixed_support": "off"}},
+      {"name": "B", "recipe": "F", "overrides": {"p_fixed_support": "magnitude"}},
+      {"name": "C", "recipe": "F", "overrides": {"p_fixed_support": "random"}},
+      {"name": "D", "recipe": "F", "overrides": {"p_fixed_support": "uniform_matched"}}
+    ]
+  }
+}

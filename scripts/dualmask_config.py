@@ -6,6 +6,28 @@ import warnings
 def normalize_dualmask_config(config: dict) -> dict:
     """在启动前规范边界选项，不改变合法配方。"""
     config.setdefault('dual_mask_conflict_old_overlap_adaptive', False)
+    support_mode = config.get('p_fixed_support', 'off')
+    if support_mode not in ('off', 'magnitude', 'random', 'uniform_matched'):
+        raise ValueError('Unknown p_fixed_support')
+    if support_mode != 'off' or config.get('p_fixed_support_audit', False):
+        required = dict(use_slora=True, use_plora=True, dual_mask_branch_layout='dual',
+            dual_mask_permission_mode='asymmetric', dual_mask_update_rule='step',
+            dual_mask_protection_rule='static', dual_mask_position_norm_match='off',
+            dual_mask_conflict_merge_mode='suppress', dual_mask_composed_conflict='off',
+            dual_mask_private_conflict_mode='global', dual_mask_conflict_granularity='layer',
+            dual_mask_conflict_score_mode='magnitude', dual_mask_conflict_exact_topk=True,
+            dual_mask_uniform_norm_matched=False, dual_mask_gradient_route='off',
+            dual_mask_task_start_probe=False, dual_mask_prototype_position_probe=False,
+            plora_train_a=False, p_permission_position='wpre', p_permission_release='off',
+            p_direction_score='off', p_hard_zero_mode='off', p_conflict_freeze_epoch=0,
+            p_conflict_strength_warmup=False, sp_staged_s_epochs=0,
+            late_weight_average_epochs=0, dual_mask_reg_weight=0)
+        ratio = config.get('p_fixed_support_keep_ratio', .5)
+        warmup = config.get('p_fixed_support_warmup_epochs', 2)
+        if (any(config.get(k, v) != v for k, v in required.items())
+                or not math.isfinite(ratio) or not 0 < ratio <= 1
+                or not isinstance(warmup, int) or not 0 < warmup < int(config.get('epochs', 20))):
+            raise ValueError('Fixed P support requires the compact step recipe and a valid warmup/keep ratio')
     protection_rule = config.get('dual_mask_protection_rule', 'static')
     if protection_rule != 'static':
         if protection_rule not in ('ncm_all', 'ncm_risk', 'warmup', 'cooldown', 'energy_equal', 'energy_half',

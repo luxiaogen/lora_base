@@ -281,6 +281,7 @@ class Attention_LoRA(nn.Module):
 
         self.register_buffer("frozen_p_conflict_mask", None, persistent=False)
         self.register_buffer("previous_p_conflict_mask", None, persistent=False)
+        self.register_buffer("p_fixed_support_mask", None, persistent=False)
         self.register_buffer("p_hard_zero_random_mask", None, persistent=False)
         self.register_buffer("composed_random_score", None, persistent=False)
         self._composed_forward_gate = None
@@ -721,6 +722,7 @@ class Attention_LoRA(nn.Module):
         self.previous_p_conflict_mask = None
         self.p_hard_zero_random_mask = None
         self.p_conflict_strength_scale = 1.0
+        self.p_fixed_support_mask = None
 
         t = int(task)
         self.cur_task = t
@@ -1178,6 +1180,11 @@ class Attention_LoRA(nn.Module):
         return self._joint_conflict(delta, conflict_ratio=conflict_ratio, valid_mask=valid_mask)
 
     @torch.no_grad()
+    def update_p_fixed_support(self, completed_epochs):
+        from utils.p_fixed_support import update_support
+        update_support(self, completed_epochs)
+
+    @torch.no_grad()
     def update_p_conflict_freeze(self, completed_epochs):
         """Epoch-end capture and read-only telemetry for the layer/global-P experiment."""
         freeze_epoch = int(self.args.get("p_conflict_freeze_epoch", 0))
@@ -1378,6 +1385,12 @@ class Attention_LoRA(nn.Module):
         gate_mode = self._effective_gate_mode()
         if gate_mode == "unmasked":
             return (delta, torch.ones_like(delta), torch.zeros_like(delta)) if return_details else delta
+        if (isolated and self.cur_task > 0 and self.p_fixed_support_mask is not None
+                and self.args.get('p_fixed_support', 'off') != 'off'):
+            from utils.p_fixed_support import support_update
+            state = support_update(delta, 1 - self.general_mask, self.p_fixed_support_mask,
+                                   self.args['p_fixed_support'])
+            return (state['safe'], state['gate'], state['applied']) if return_details else state['safe']
         if self.cur_task > 0 and self.args.get('dual_mask_update_rule', 'step') != 'step':
             state = self._tail_update_state(delta, isolated, conflict_ratio, conflict_strength)
             return (state['safe'], state['gate'], state['applied']) if return_details else state['safe']
@@ -1971,7 +1984,9 @@ class Attention_LoRA(nn.Module):
         conflict_strength = min(max(conflict_strength, 0.0), 1.0)
         # 总分支的冲突门削弱程度  把raw_total = S_raw + P_raw作为整体，估算只施加冲突门后，整体增量范数下降多少
         conflict_gate_suppression = self._conflict_gate_suppression(raw_total,conflict_mask,conflict_strength,)
-        if self._p_direction_active() or self.dual_mask_uniform_norm_matched or not (self.dual_mask_s_conflict_enabled and self.dual_mask_p_conflict_enabled):
+        support_active = (self.cur_task > 0 and self.p_fixed_support_mask is not None
+                          and self.args.get('p_fixed_support', 'off') != 'off')
+        if support_active or self._p_direction_active() or self.dual_mask_uniform_norm_matched or not (self.dual_mask_s_conflict_enabled and self.dual_mask_p_conflict_enabled):
             base_total = torch.stack([
                 self._merge_base_and_conflict(item["raw_delta"], item["isolated"], conflict_ratio)[0]
                 for item in branch_deltas
@@ -1987,15 +2002,23 @@ class Attention_LoRA(nn.Module):
             relative = self.cur_task > 0 and self.dual_mask_conflict_score_mode in ('wpre_relative', 'task_relative')
             layer_matched = self.args.get('dual_mask_position_norm_match') == 'paired_layer_min'
             merge_reference = (private_item['gate_multiplier'] * (private_item['gate_value'] * private_item['actual_gate'])
-                               if layer_matched else None)
+                               if layer_matched or support_active else None)
+            support_strength = conflict_strength
+            if support_active:
+                from utils.p_fixed_support import support_update
+                support_state = support_update(private_item['factor_delta'], 1 - self.general_mask,
+                                               self.p_fixed_support_mask, self.args['p_fixed_support'])
+                support_strength = float(support_state['coefficient']) if self.args['p_fixed_support'] == 'uniform_matched' else 1.0
             applied = self._private_merge_diagnostic(
                 private_raw,
                 private_item["safe_delta"],
                 conflict_ratio,
-                conflict_strength,
-                applied_mask=private_item['actual_mask'] if relative or layer_matched else None,
+                support_strength,
+                applied_mask=private_item['actual_mask'] if relative or layer_matched or support_active else None,
                 merge_reference=merge_reference,
             )
+            if support_active:
+                applied['removed_definition'] = 'fixed_support' if self.args['p_fixed_support'] != 'uniform_matched' else 'uniform_fixed_support_reference'
             logging.info(
                 "Task %s layer %s P applied merge diagnostic: "
                 "selected=%s, selected_plastic=%s, selected_active=%s, "
@@ -2023,6 +2046,8 @@ class Attention_LoRA(nn.Module):
                 private_item['factor_delta'] if relative else private_raw, conflict_ratio=conflict_ratio)
             if self.frozen_p_conflict_mask is not None:
                 global_private_mask = self.frozen_p_conflict_mask.to(private_raw)
+            if support_active:
+                global_private_mask = private_item['actual_mask'].to(private_raw)
             if self.cur_task > 0 and self.args.get("p_hard_zero_mode", "off") != "off":
                 global_private_mask = self._p_hard_zero_mask(private_raw)
             selected_count = global_private_mask.detach().float().sum()
@@ -2060,6 +2085,8 @@ class Attention_LoRA(nn.Module):
                 private_mask_overlap = plastic_mask.float().mean()
                 private_energy_overlap = (private_score * plastic_mask).sum() / private_score.sum().clamp_min(1e-12)
             private_gate_suppression = self._conflict_gate_suppression(private_plastic_delta,actual_private_mask,actual_private_strength,)
+            if support_active:
+                private_gate_suppression = self._delta_stats(private_plastic_delta, private_item['safe_delta'])['suppressed_ratio']
 
         if private_item is not None and self._p_direction_active():
             state = self._p_direction_state
@@ -2232,6 +2259,9 @@ class Attention_LoRA(nn.Module):
                 self.args.get('p_permission_release', 'off') != 'off'
                 or self.args.get('p_permission_position', 'wpre') == 'permuted'))
             value = item['factor_delta'] if unscaled else item['raw_delta']
+            if (item['isolated'] and t > 0 and self.p_fixed_support_mask is not None
+                    and self.args.get('p_fixed_support', 'off') != 'off'):
+                unscaled, value = True, item['factor_delta']
             if self.dual_mask_conflict_merge_mode == 'suppress' or self._core_policy_active():
                 actual, gate, applied = self._safe_delta(value, item['isolated'],
                     conflict_ratio, conflict_strength, return_details=True)
@@ -2244,6 +2274,11 @@ class Attention_LoRA(nn.Module):
             item["safe_delta"] = safe_delta
 
         branch_deltas = []
+        if t > 0 and self.args.get('p_fixed_support_audit', False):
+            from utils.p_fixed_support import audit_update
+            unit = self.P_lora[t]
+            audit_update(self, unit.B_weight.detach() @ unit.A_weight.detach(),
+                         (1 - self.general_mask).bool(), None, event='merge')
         if not self.use_slora and not self.use_plora: # isolated=False：走共享分支的保护路径
             branch_deltas.append(raw_delta("S", self.S_lora[t], 1.0, isolated=False))
         else:
@@ -2401,6 +2436,7 @@ class Attention_LoRA(nn.Module):
         self.previous_p_conflict_mask = None
         self.p_hard_zero_random_mask = None
         self.composed_random_score = None
+        self.p_fixed_support_mask = None
         self._composed_forward_gate = None
         self._p_direction_state = None
         self.p_permission_release_mask = None
