@@ -14,12 +14,17 @@ def normalize_dualmask_config(config: dict) -> dict:
         required = dict(dual_mask_permission_mode='asymmetric', dual_mask_update_rule='step',
             dual_mask_uniform_norm_matched=False,
             dual_mask_composed_conflict='off', dual_mask_conflict_merge_mode='suppress',
-            dual_mask_conflict_score_mode='magnitude', dual_mask_conflict_exact_topk=True,
+            dual_mask_conflict_exact_topk=True,
             dual_mask_private_conflict_mode='global', dual_mask_gradient_route='off',
             p_permission_position='wpre', p_permission_release='off', p_direction_score='off',
             dual_mask_reg_weight=0, late_weight_average_epochs=0)
         norm_mode = config.get('dual_mask_position_norm_match', 'off')
+        score_mode = config.get('dual_mask_conflict_score_mode', 'magnitude')
+        product_allowed = (protection_rule == 'energy_equal' and score_mode == 'conflict'
+                           and config.get('dual_mask_task_start_probe', False)
+                           and norm_mode == 'off')
         if (any(config.get(key, value) != value for key, value in required.items())
+                or score_mode != 'magnitude' and not product_allowed
                 or norm_mode not in ('off', 'paired_layer_min')
                 or norm_mode == 'paired_layer_min' and protection_rule not in ('energy_equal', 'energy_half')):
             raise ValueError('Protection rules require M step updates without extra permissions or losses')
@@ -27,6 +32,16 @@ def normalize_dualmask_config(config: dict) -> dict:
         raise ValueError('Unknown dual_mask_ncm_conflict_mode')
     route = config.get('dual_mask_gradient_route', 'off')
     position = config.get('dual_mask_protect_position', 'wpre')
+    source = config.get('dual_mask_conflict_importance_source', 'wpre')
+    if source not in ('wpre', 'task_start', 'task_start_permuted'):
+        raise ValueError('Unknown conflict importance source')
+    task_start = config.get('dual_mask_task_start_probe', False)
+    if (position in ('task_start_svd', 'task_start_svd_permuted') or source != 'wpre') and not task_start:
+        raise ValueError('Task-start positions and scores require the task-start probe')
+    if task_start and (position not in ('wpre', 'task_start_svd', 'task_start_svd_permuted')
+            or config.get('dual_mask_position_norm_match', 'off') != 'off'
+            or config.get('dual_mask_prototype_position_probe', False)):
+        raise ValueError('Task-start study uses task-fixed positions without training norm control')
     prototype_probe = config.get('dual_mask_prototype_position_probe', False)
     norm_mode = config.get('dual_mask_position_norm_match', 'off')
     if position in ('prototype_high', 'prototype_shuffled', 'prototype_low') or norm_mode == 'prototype_min':

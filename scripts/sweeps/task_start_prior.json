@@ -1,0 +1,27 @@
+{
+  "name": "task_start_prior", "hours": 8,
+  "base_spec": "budget_verification.json",
+  "common_overrides": {
+    "dual_mask_protection_rule": "energy_equal",
+    "dual_mask_task_start_probe": true,
+    "dual_mask_conflict_importance_source": "wpre",
+    "dual_mask_position_norm_match": "off"
+  },
+  "3090": {
+    "datasets": [{"name": "imgr10", "config": "exps/dlora/imgr10.json", "rank": 64}],
+    "variants": [
+      {"name": "R0", "recipe": "F", "overrides": {}},
+      {"name": "R1", "recipe": "F", "overrides": {"dual_mask_protect_position": "task_start_svd"}},
+      {"name": "R2", "recipe": "F", "overrides": {"dual_mask_protect_position": "task_start_svd_permuted"}}
+    ]
+  },
+  "5090": {
+    "datasets": [{"name": "imgr10", "config": "exps/dlora/imgr10.json", "rank": 64}],
+    "variants": [
+      {"name": "S0", "recipe": "F", "overrides": {}},
+      {"name": "S1", "recipe": "F", "overrides": {"dual_mask_conflict_score_mode": "conflict"}},
+      {"name": "S2", "recipe": "F", "overrides": {"dual_mask_conflict_score_mode": "conflict", "dual_mask_conflict_importance_source": "task_start"}},
+      {"name": "S3", "recipe": "F", "overrides": {"dual_mask_conflict_score_mode": "conflict", "dual_mask_conflict_importance_source": "task_start_permuted"}}
+    ]
+  }
+}

@@ -124,6 +124,8 @@ def position_diagnostic(learner, dataset, epoch):
                            permuted_margin=row['permuted_margin'] / count)
             logging.info('CorePositionDiagnostic %s', json.dumps(dict(task=learner._cur_task,
                 epoch=epoch, partition=name,
+                reference_position=modules[0].core_diagnostic_positions[0],
+                permuted_position=modules[0].core_diagnostic_positions[1],
                 norm_control='same_state_paired_layer_min' if budget_audit else 'same_state_paired_min',
                 scope='all_seen', source='test_only_fixed_order', **row)))
 
@@ -186,6 +188,11 @@ def epoch_updates(learner, epoch):
                 logging.info('BudgetUpdateAudit %s', json.dumps(dict(task=task, epoch=epoch,
                     layer=module.layer_idx, branch=branch,
                     **budget_update_values(module, delta, effective, selected, isolated, gamma))))
+            if task > 0 and learner.args.get('dual_mask_task_start_probe', False):
+                from utils.task_start_prior import conflict_overlap
+                logging.info('TaskStartConflictAudit %s', json.dumps(dict(task=task, epoch=epoch,
+                    layer=module.layer_idx, branch=branch,
+                    **conflict_overlap(module, delta, selected))))
             if task > 0 and isolated and learner.args.get('p_permission_release', 'off') != 'off':
                 protect = module._p_protect_mask().to(delta)
                 release = module.p_permission_release_mask

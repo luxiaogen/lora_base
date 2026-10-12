@@ -130,12 +130,12 @@ def summarize_safely(directory, machine, records):
         print('Analysis error saved; planned training continues.', flush=True)
 
 
-def execute(machine, selected, directory, revision, mode='run', hours=10):
+def execute(machine, selected, directory, revision, mode='run', hours=10, source_paths=()):
     previous = tail.SPEC, tail.command_for, tail.settings_for, tail.summarize_safely
     tail.SPEC, tail.command_for, tail.settings_for, tail.summarize_safely = SPEC, command_for, settings_for, summarize_safely
     try:
         return tail.execute(machine, selected, directory, revision, mode, hours,
-            source_paths=('scripts/run_budget_verification.py', 'scripts/analyze_budget_verification.py'))
+            source_paths=('scripts/run_budget_verification.py', 'scripts/analyze_budget_verification.py') + source_paths)
     finally:
         tail.SPEC, tail.command_for, tail.settings_for, tail.summarize_safely = previous
 
@@ -146,7 +146,7 @@ def main():
     parser.add_argument('--mode', choices=('run', 'smoke', 'dry-run'), default='run')
     parser.add_argument('--modes', nargs='+')
     parser.add_argument('--resume', type=Path)
-    parser.add_argument('--hours', type=float, default=10)
+    parser.add_argument('--hours', type=float, default=spec().get('hours', 10))
     args = parser.parse_args()
     selected = args.modes or modes(args.machine)
     if (not math.isfinite(args.hours) or args.hours <= 0 or len(selected) != len(set(selected))
@@ -154,7 +154,7 @@ def main():
         parser.error('Use positive hours and unique predeclared modes')
     validate_settings(args.machine)
     revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
-    directory = args.resume or ROOT / ('logs/shell_logs/budget_verification_' + args.machine) / datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+    directory = args.resume or ROOT / ('logs/shell_logs/' + spec().get('name', 'budget_verification') + '_' + args.machine) / datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')
     if args.mode != 'dry-run':
         if args.resume:
             check_resume(directory, args.machine, revision, selected)

@@ -296,6 +296,11 @@ class Attention_LoRA(nn.Module):
         self.register_buffer("prototype_position_masks", None, persistent=False)
         self.register_buffer("core_reference_protect", None, persistent=False)
         self.register_buffer("core_permuted_protect", None, persistent=False)
+        self.register_buffer("task_start_importance", None, persistent=False)
+        self.register_buffer("task_start_permuted_importance", None, persistent=False)
+        self.register_buffer("task_start_protect", None, persistent=False)
+        self.task_start_score_task = None
+        self.core_diagnostic_positions = ('wpre', 'permuted')
         self.register_buffer("p_permission_protect", None, persistent=False)
         self.register_buffer("p_permission_release_mask", None, persistent=False)
         self._p_release_disabled = False
@@ -937,6 +942,15 @@ class Attention_LoRA(nn.Module):
             elif self.cur_task > 0 and position == "wpre_magnitude":
                 from utils.protect_position import magnitude_protect_mask
                 protect = magnitude_protect_mask(self.pretrained_weight, reference_protect)
+            if self.cur_task > 0 and self.args.get('dual_mask_task_start_probe', False):
+                from utils.task_start_prior import install_task_start_prior
+                # 先保留 W_pre 分数，再计算独立的任务起点评分及只读对照。
+                self.w0_importance.copy_(score.to(self.w0_importance))
+                install_task_start_prior(self, reference_protect)
+                if position == 'task_start_svd':
+                    protect = self.task_start_protect
+                elif position == 'task_start_svd_permuted':
+                    protect = self.core_permuted_protect
             if self.args.get("dual_mask_position_audit", False):
                 union = (protect.bool() | reference_protect.bool()).sum().clamp_min(1)
                 logging.info("ProtectionPositionMask %s", json.dumps({
@@ -1012,6 +1026,12 @@ class Attention_LoRA(nn.Module):
             ratio = self.dual_mask_conflict_ratio if conflict_ratio is None else conflict_ratio
             return ba_importance, _exact_top_ratio_mask(ba_importance, ratio, valid_mask)
         w0_importance = self.w0_importance.to(device=delta.device, dtype=delta.dtype)
+        if self.cur_task > 0:
+            source = self.args.get('dual_mask_conflict_importance_source', 'wpre')
+            if source == 'task_start':
+                w0_importance = self.task_start_importance.to(delta)
+            elif source == 'task_start_permuted':
+                w0_importance = self.task_start_permuted_importance.to(delta)
 
         # 如果 W0 在这个位置很重要，并且 LoRA 也想大幅修改这个位置，那么这个位置就是高冲突位置
         # 联合分数只在 W_pre 重要且当前 BA 改动大的位置取高值。

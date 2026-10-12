@@ -130,7 +130,7 @@ def summarize_saved(directory):
         draw(directory, results, rows)
 
 
-def draw(directory, results, rows):
+def draw(directory, results, rows, diagnostic_label='Wpre minus permuted margin'):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
@@ -182,7 +182,7 @@ def draw(directory, results, rows):
                 current = [r for r in values if r['partition'] == partition]
                 ax.plot([r['task'] for r in current], [r['wpre_margin'] - r['permuted_margin'] for r in current],
                         '.-', label=row['mode'])
-                ax.set(xlabel='Task', ylabel='Wpre minus permuted margin', title=partition)
+                ax.set(xlabel='Task', ylabel=diagnostic_label, title=partition)
                 ax.axhline(0, color='gray', linewidth=.5)
         axes[0].legend(fontsize=6)
         fig.savefig(directory / (dataset + '_position_diagnostics.pdf'))
