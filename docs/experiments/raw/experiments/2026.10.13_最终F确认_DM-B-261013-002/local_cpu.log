@@ -1,0 +1,366 @@
+/opt/homebrew/lib/python3.14/site-packages/timm/models/helpers.py:7: FutureWarning: Importing from timm.models.helpers is deprecated, please import via timm.models
+  warnings.warn(f"Importing from {__name__} is deprecated, please import via timm.models", FutureWarning)
+/opt/homebrew/lib/python3.14/site-packages/timm/models/layers/__init__.py:49: FutureWarning: Importing from timm.models.layers is deprecated, please import via timm.layers
+  warnings.warn(f"Importing from {__name__} is deprecated, please import via timm.layers", FutureWarning)
+/opt/homebrew/lib/python3.14/site-packages/timm/models/registry.py:4: FutureWarning: Importing from timm.models.registry is deprecated, please import via timm.models
+  warnings.warn(f"Importing from {__name__} is deprecated, please import via timm.models", FutureWarning)
+/Users/luxiaogen/Desktop/paper/code/baseline/LoDA_ICML2026/models/vit.py:640: UserWarning: Overwriting vit_tiny_patch16_224 in registry with models.vit.vit_tiny_patch16_224. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  @register_model
+/Users/luxiaogen/Desktop/paper/code/baseline/LoDA_ICML2026/models/vit.py:649: UserWarning: Overwriting vit_tiny_patch16_384 in registry with models.vit.vit_tiny_patch16_384. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  @register_model
+/Users/luxiaogen/Desktop/paper/code/baseline/LoDA_ICML2026/models/vit.py:658: UserWarning: Overwriting vit_small_patch32_224 in registry with models.vit.vit_small_patch32_224. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  @register_model
+/Users/luxiaogen/Desktop/paper/code/baseline/LoDA_ICML2026/models/vit.py:667: UserWarning: Overwriting vit_small_patch32_384 in registry with models.vit.vit_small_patch32_384. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  @register_model
+/Users/luxiaogen/Desktop/paper/code/baseline/LoDA_ICML2026/models/vit.py:676: UserWarning: Overwriting vit_small_patch16_224 in registry with models.vit.vit_small_patch16_224. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  @register_model
+/Users/luxiaogen/Desktop/paper/code/baseline/LoDA_ICML2026/models/vit.py:686: UserWarning: Overwriting vit_small_patch16_384 in registry with models.vit.vit_small_patch16_384. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  @register_model
+/Users/luxiaogen/Desktop/paper/code/baseline/LoDA_ICML2026/models/vit.py:696: UserWarning: Overwriting vit_base_patch32_224 in registry with models.vit.vit_base_patch32_224. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  @register_model
+/Users/luxiaogen/Desktop/paper/code/baseline/LoDA_ICML2026/models/vit.py:716: UserWarning: Overwriting vit_base_patch32_384 in registry with models.vit.vit_base_patch32_384. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  @register_model
+/Users/luxiaogen/Desktop/paper/code/baseline/LoDA_ICML2026/models/vit.py:726: UserWarning: Overwriting vit_base_patch16_224 in registry with models.vit.vit_base_patch16_224. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  @register_model
+/Users/luxiaogen/Desktop/paper/code/baseline/LoDA_ICML2026/models/vit.py:736: UserWarning: Overwriting vit_base_patch16_384 in registry with models.vit.vit_base_patch16_384. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  @register_model
+/Users/luxiaogen/Desktop/paper/code/baseline/LoDA_ICML2026/models/vit.py:746: UserWarning: Overwriting vit_base_patch8_224 in registry with models.vit.vit_base_patch8_224. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  @register_model
+/Users/luxiaogen/Desktop/paper/code/baseline/LoDA_ICML2026/models/vit.py:756: UserWarning: Overwriting vit_large_patch32_224 in registry with models.vit.vit_large_patch32_224. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  @register_model
+/Users/luxiaogen/Desktop/paper/code/baseline/LoDA_ICML2026/models/vit.py:765: UserWarning: Overwriting vit_large_patch32_384 in registry with models.vit.vit_large_patch32_384. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  @register_model
+/Users/luxiaogen/Desktop/paper/code/baseline/LoDA_ICML2026/models/vit.py:775: UserWarning: Overwriting vit_large_patch16_224 in registry with models.vit.vit_large_patch16_224. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  @register_model
+/Users/luxiaogen/Desktop/paper/code/baseline/LoDA_ICML2026/models/vit.py:785: UserWarning: Overwriting vit_large_patch16_384 in registry with models.vit.vit_large_patch16_384. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  @register_model
+/Users/luxiaogen/Desktop/paper/code/baseline/LoDA_ICML2026/models/vit.py:795: UserWarning: Overwriting vit_large_patch14_224 in registry with models.vit.vit_large_patch14_224. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  @register_model
+/Users/luxiaogen/Desktop/paper/code/baseline/LoDA_ICML2026/models/vit.py:804: UserWarning: Overwriting vit_huge_patch14_224 in registry with models.vit.vit_huge_patch14_224. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  @register_model
+/Users/luxiaogen/Desktop/paper/code/baseline/LoDA_ICML2026/models/vit.py:813: UserWarning: Overwriting vit_giant_patch14_224 in registry with models.vit.vit_giant_patch14_224. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  @register_model
+/Users/luxiaogen/Desktop/paper/code/baseline/LoDA_ICML2026/models/vit.py:822: UserWarning: Overwriting vit_gigantic_patch14_224 in registry with models.vit.vit_gigantic_patch14_224. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  @register_model
+/Users/luxiaogen/Desktop/paper/code/baseline/LoDA_ICML2026/models/vit.py:831: UserWarning: Overwriting vit_tiny_patch16_224_in21k in registry with models.vit.vit_tiny_patch16_224_in21k. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  @register_model
+/Users/luxiaogen/Desktop/paper/code/baseline/LoDA_ICML2026/models/vit.py:842: UserWarning: Overwriting vit_small_patch32_224_in21k in registry with models.vit.vit_small_patch32_224_in21k. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  @register_model
+/Users/luxiaogen/Desktop/paper/code/baseline/LoDA_ICML2026/models/vit.py:853: UserWarning: Overwriting vit_small_patch16_224_in21k in registry with models.vit.vit_small_patch16_224_in21k. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  @register_model
+/Users/luxiaogen/Desktop/paper/code/baseline/LoDA_ICML2026/models/vit.py:864: UserWarning: Overwriting vit_base_patch32_224_in21k in registry with models.vit.vit_base_patch32_224_in21k. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  @register_model
+/Users/luxiaogen/Desktop/paper/code/baseline/LoDA_ICML2026/models/vit.py:876: UserWarning: Overwriting vit_base_patch16_224_in21k in registry with models.vit.vit_base_patch16_224_in21k. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  @register_model
+/Users/luxiaogen/Desktop/paper/code/baseline/LoDA_ICML2026/models/vit.py:888: UserWarning: Overwriting vit_base_patch8_224_in21k in registry with models.vit.vit_base_patch8_224_in21k. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  @register_model
+/Users/luxiaogen/Desktop/paper/code/baseline/LoDA_ICML2026/models/vit.py:900: UserWarning: Overwriting vit_large_patch32_224_in21k in registry with models.vit.vit_large_patch32_224_in21k. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  @register_model
+/Users/luxiaogen/Desktop/paper/code/baseline/LoDA_ICML2026/models/vit.py:912: UserWarning: Overwriting vit_large_patch16_224_in21k in registry with models.vit.vit_large_patch16_224_in21k. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  @register_model
+/Users/luxiaogen/Desktop/paper/code/baseline/LoDA_ICML2026/models/vit.py:924: UserWarning: Overwriting vit_huge_patch14_224_in21k in registry with models.vit.vit_huge_patch14_224_in21k. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  @register_model
+/Users/luxiaogen/Desktop/paper/code/baseline/LoDA_ICML2026/models/vit.py:936: UserWarning: Overwriting vit_base_patch16_224_sam in registry with models.vit.vit_base_patch16_224_sam. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  @register_model
+/Users/luxiaogen/Desktop/paper/code/baseline/LoDA_ICML2026/models/vit.py:946: UserWarning: Overwriting vit_base_patch32_224_sam in registry with models.vit.vit_base_patch32_224_sam. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  @register_model
+/Users/luxiaogen/Desktop/paper/code/baseline/LoDA_ICML2026/models/vit.py:956: UserWarning: Overwriting vit_small_patch16_224_dino in registry with models.vit.vit_small_patch16_224_dino. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  @register_model
+/Users/luxiaogen/Desktop/paper/code/baseline/LoDA_ICML2026/models/vit.py:965: UserWarning: Overwriting vit_small_patch8_224_dino in registry with models.vit.vit_small_patch8_224_dino. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  @register_model
+/Users/luxiaogen/Desktop/paper/code/baseline/LoDA_ICML2026/models/vit.py:974: UserWarning: Overwriting vit_base_patch16_224_dino in registry with models.vit.vit_base_patch16_224_dino. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  @register_model
+/Users/luxiaogen/Desktop/paper/code/baseline/LoDA_ICML2026/models/vit.py:983: UserWarning: Overwriting vit_base_patch8_224_dino in registry with models.vit.vit_base_patch8_224_dino. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  @register_model
+/Users/luxiaogen/Desktop/paper/code/baseline/LoDA_ICML2026/models/vit.py:992: UserWarning: Overwriting vit_base_patch16_224_miil_in21k in registry with models.vit.vit_base_patch16_224_miil_in21k. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  @register_model
+/Users/luxiaogen/Desktop/paper/code/baseline/LoDA_ICML2026/models/vit.py:1002: UserWarning: Overwriting vit_base_patch16_224_miil in registry with models.vit.vit_base_patch16_224_miil. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  @register_model
+/Users/luxiaogen/Desktop/paper/code/baseline/LoDA_ICML2026/models/vit.py:1012: UserWarning: Overwriting vit_small_patch16_36x1_224 in registry with models.vit.vit_small_patch16_36x1_224. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  @register_model
+/Users/luxiaogen/Desktop/paper/code/baseline/LoDA_ICML2026/models/vit.py:1023: UserWarning: Overwriting vit_small_patch16_18x2_224 in registry with models.vit.vit_small_patch16_18x2_224. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  @register_model
+/Users/luxiaogen/Desktop/paper/code/baseline/LoDA_ICML2026/models/vit.py:1035: UserWarning: Overwriting vit_base_patch16_18x2_224 in registry with models.vit.vit_base_patch16_18x2_224. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  @register_model
+/Users/luxiaogen/.matplotlib is not a writable directory
+Matplotlib created a temporary cache directory at /var/folders/bx/4b_0grz911d58vf23w86klyw0000gn/T/matplotlib-0ucp5_o1 because there was an issue with the default path ({configdir}); it is highly recommended to set the MPLCONFIGDIR environment variable to a writable directory, in particular to speed up the import of Matplotlib and to better support multiprocessing.
+Matplotlib is building the font cache; this may take a moment.
+Code revision: revision 
+Queue PID: 92651 
+Outputs: /var/folders/bx/4b_0grz911d58vf23w86klyw0000gn/T/tmpxgu4mcq6/absent
+Fixed new-run order: ['C10', 'C00'] ; T10 seed1993 anchor2.5 CA5; no checkpoints.
+Code revision: rev 
+Queue PID: 92651 
+Outputs: /var/folders/bx/4b_0grz911d58vf23w86klyw0000gn/T/tmpur8i9v1g
+Fixed new-run order: ['C10'] ; T10 seed1993 anchor2.5 CA5; no checkpoints.
+Measured results: [{"mode": "net", "status": "completed", "minutes": 80.0, "tasks_reported": 10, "Average": 87.214, "Last": 82.6, "Old": 82.1, "New": 87.1, "Forgetting": 5.1, "density": 0.15, "removed_ratio": 0.4, "net_to_gross_norm": 0.8, "independent_amplified_coordinates": 12.0, "independent_reversed_coordinates": 3.0, "shared_amplified_coordinates": 0.0, "shared_reversed_coordinates": 0.0, "max_branch_sum_error": 1e-08}]
+ExpertLegalTask {"task": 0, "source": "test_report_only", "policy": "base", "group": "total", "n": 12, "base_accuracy": 33.33333333333333, "accuracy": 33.33333333333333, "oracle_accuracy": 66.66666666666666, "rescued": 0, "harmed": 0, "switched": 0, "neutral": 0, "net_gain_pp": 0.0}
+ExpertLegalTask {"task": 0, "source": "test_report_only", "policy": "base", "group": "old", "n": 0, "base_accuracy": null, "accuracy": null, "oracle_accuracy": null, "rescued": 0, "harmed": 0, "switched": 0, "neutral": 0, "net_gain_pp": null}
+ExpertLegalTask {"task": 0, "source": "test_report_only", "policy": "base", "group": "new", "n": 12, "base_accuracy": 33.33333333333333, "accuracy": 33.33333333333333, "oracle_accuracy": 66.66666666666666, "rescued": 0, "harmed": 0, "switched": 0, "neutral": 0, "net_gain_pp": 0.0}
+ExpertLegalTask {"task": 0, "source": "test_report_only", "policy": "train_selected", "group": "total", "n": 12, "base_accuracy": 33.33333333333333, "accuracy": 33.33333333333333, "oracle_accuracy": 66.66666666666666, "rescued": 0, "harmed": 0, "switched": 0, "neutral": 0, "net_gain_pp": 0.0}
+ExpertLegalTask {"task": 0, "source": "test_report_only", "policy": "train_selected", "group": "old", "n": 0, "base_accuracy": null, "accuracy": null, "oracle_accuracy": null, "rescued": 0, "harmed": 0, "switched": 0, "neutral": 0, "net_gain_pp": null}
+ExpertLegalTask {"task": 0, "source": "test_report_only", "policy": "train_selected", "group": "new", "n": 12, "base_accuracy": 33.33333333333333, "accuracy": 33.33333333333333, "oracle_accuracy": 66.66666666666666, "rescued": 0, "harmed": 0, "switched": 0, "neutral": 0, "net_gain_pp": 0.0}
+ExpertLegalTask {"task": 1, "source": "test_report_only", "policy": "base", "group": "total", "n": 12, "base_accuracy": 33.33333333333333, "accuracy": 33.33333333333333, "oracle_accuracy": 66.66666666666666, "rescued": 0, "harmed": 0, "switched": 0, "neutral": 0, "net_gain_pp": 0.0}
+ExpertLegalTask {"task": 1, "source": "test_report_only", "policy": "base", "group": "old", "n": 0, "base_accuracy": null, "accuracy": null, "oracle_accuracy": null, "rescued": 0, "harmed": 0, "switched": 0, "neutral": 0, "net_gain_pp": null}
+ExpertLegalTask {"task": 1, "source": "test_report_only", "policy": "base", "group": "new", "n": 12, "base_accuracy": 33.33333333333333, "accuracy": 33.33333333333333, "oracle_accuracy": 66.66666666666666, "rescued": 0, "harmed": 0, "switched": 0, "neutral": 0, "net_gain_pp": 0.0}
+ExpertLegalTask {"task": 1, "source": "test_report_only", "policy": "train_selected", "group": "total", "n": 12, "base_accuracy": 33.33333333333333, "accuracy": 33.33333333333333, "oracle_accuracy": 66.66666666666666, "rescued": 0, "harmed": 0, "switched": 0, "neutral": 0, "net_gain_pp": 0.0}
+ExpertLegalTask {"task": 1, "source": "test_report_only", "policy": "train_selected", "group": "old", "n": 0, "base_accuracy": null, "accuracy": null, "oracle_accuracy": null, "rescued": 0, "harmed": 0, "switched": 0, "neutral": 0, "net_gain_pp": null}
+ExpertLegalTask {"task": 1, "source": "test_report_only", "policy": "train_selected", "group": "new", "n": 12, "base_accuracy": 33.33333333333333, "accuracy": 33.33333333333333, "oracle_accuracy": 66.66666666666666, "rescued": 0, "harmed": 0, "switched": 0, "neutral": 0, "net_gain_pp": 0.0}
+ExpertLegal {"policy": "proposal_advantage_fixed_0", "tasks": 2, "average": 33.33333333333333, "average_gain_pp": 0.0, "last": 33.33333333333333, "last_gain_pp": 0.0, "old": null, "new": 33.33333333333333, "last_rescued": 4, "last_harmed": 4}
+ExpertLegal {"policy": "proposal_advantage_fixed_0.02", "tasks": 2, "average": 33.33333333333333, "average_gain_pp": 0.0, "last": 33.33333333333333, "last_gain_pp": 0.0, "old": null, "new": 33.33333333333333, "last_rescued": 4, "last_harmed": 4}
+ExpertLegal {"policy": "proposal_advantage_fixed_0.05", "tasks": 2, "average": 33.33333333333333, "average_gain_pp": 0.0, "last": 33.33333333333333, "last_gain_pp": 0.0, "old": null, "new": 33.33333333333333, "last_rescued": 4, "last_harmed": 4}
+ExpertLegal {"policy": "proposal_advantage_fixed_0.1", "tasks": 2, "average": 33.33333333333333, "average_gain_pp": 0.0, "last": 33.33333333333333, "last_gain_pp": 0.0, "old": null, "new": 33.33333333333333, "last_rescued": 4, "last_harmed": 4}
+ExpertLegal {"policy": "proposal_advantage_tail_0.9", "tasks": 2, "average": 33.33333333333333, "average_gain_pp": 0.0, "last": 33.33333333333333, "last_gain_pp": 0.0, "old": null, "new": 33.33333333333333, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "proposal_advantage_tail_0.95", "tasks": 2, "average": 33.33333333333333, "average_gain_pp": 0.0, "last": 33.33333333333333, "last_gain_pp": 0.0, "old": null, "new": 33.33333333333333, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "proposal_advantage_tail_0.98", "tasks": 2, "average": 33.33333333333333, "average_gain_pp": 0.0, "last": 33.33333333333333, "last_gain_pp": 0.0, "old": null, "new": 33.33333333333333, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "proposal_advantage_tail_0.99", "tasks": 2, "average": 33.33333333333333, "average_gain_pp": 0.0, "last": 33.33333333333333, "last_gain_pp": 0.0, "old": null, "new": 33.33333333333333, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "margin_advantage_fixed_0", "tasks": 2, "average": 33.33333333333333, "average_gain_pp": 0.0, "last": 33.33333333333333, "last_gain_pp": 0.0, "old": null, "new": 33.33333333333333, "last_rescued": 4, "last_harmed": 4}
+ExpertLegal {"policy": "margin_advantage_fixed_0.02", "tasks": 2, "average": 33.33333333333333, "average_gain_pp": 0.0, "last": 33.33333333333333, "last_gain_pp": 0.0, "old": null, "new": 33.33333333333333, "last_rescued": 4, "last_harmed": 4}
+ExpertLegal {"policy": "margin_advantage_fixed_0.05", "tasks": 2, "average": 33.33333333333333, "average_gain_pp": 0.0, "last": 33.33333333333333, "last_gain_pp": 0.0, "old": null, "new": 33.33333333333333, "last_rescued": 4, "last_harmed": 4}
+ExpertLegal {"policy": "margin_advantage_fixed_0.1", "tasks": 2, "average": 49.99999999999999, "average_gain_pp": 16.666666666666668, "last": 66.66666666666666, "last_gain_pp": 33.333333333333336, "old": null, "new": 66.66666666666666, "last_rescued": 4, "last_harmed": 0}
+ExpertLegal {"policy": "margin_advantage_tail_0.9", "tasks": 2, "average": 33.33333333333333, "average_gain_pp": 0.0, "last": 33.33333333333333, "last_gain_pp": 0.0, "old": null, "new": 33.33333333333333, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "margin_advantage_tail_0.95", "tasks": 2, "average": 33.33333333333333, "average_gain_pp": 0.0, "last": 33.33333333333333, "last_gain_pp": 0.0, "old": null, "new": 33.33333333333333, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "margin_advantage_tail_0.98", "tasks": 2, "average": 33.33333333333333, "average_gain_pp": 0.0, "last": 33.33333333333333, "last_gain_pp": 0.0, "old": null, "new": 33.33333333333333, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "margin_advantage_tail_0.99", "tasks": 2, "average": 33.33333333333333, "average_gain_pp": 0.0, "last": 33.33333333333333, "last_gain_pp": 0.0, "old": null, "new": 33.33333333333333, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "joint_proposal_0_gap_0.02", "tasks": 2, "average": 33.33333333333333, "average_gain_pp": 0.0, "last": 33.33333333333333, "last_gain_pp": 0.0, "old": null, "new": 33.33333333333333, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "joint_proposal_0_gap_0.05", "tasks": 2, "average": 33.33333333333333, "average_gain_pp": 0.0, "last": 33.33333333333333, "last_gain_pp": 0.0, "old": null, "new": 33.33333333333333, "last_rescued": 4, "last_harmed": 4}
+ExpertLegal {"policy": "joint_proposal_0.02_gap_0.02", "tasks": 2, "average": 33.33333333333333, "average_gain_pp": 0.0, "last": 33.33333333333333, "last_gain_pp": 0.0, "old": null, "new": 33.33333333333333, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "joint_proposal_0.02_gap_0.05", "tasks": 2, "average": 33.33333333333333, "average_gain_pp": 0.0, "last": 33.33333333333333, "last_gain_pp": 0.0, "old": null, "new": 33.33333333333333, "last_rescued": 4, "last_harmed": 4}
+ExpertLegal {"policy": "proposal_advantage_utility_cost1", "tasks": 2, "average": 49.99999999999999, "average_gain_pp": 16.666666666666668, "last": 66.66666666666666, "last_gain_pp": 33.333333333333336, "old": null, "new": 66.66666666666666, "last_rescued": 4, "last_harmed": 0}
+ExpertLegal {"policy": "proposal_advantage_utility_cost3", "tasks": 2, "average": 49.99999999999999, "average_gain_pp": 16.666666666666668, "last": 66.66666666666666, "last_gain_pp": 33.333333333333336, "old": null, "new": 66.66666666666666, "last_rescued": 4, "last_harmed": 0}
+ExpertLegal {"policy": "proposal_advantage_utility_cost10", "tasks": 2, "average": 49.99999999999999, "average_gain_pp": 16.666666666666668, "last": 66.66666666666666, "last_gain_pp": 33.333333333333336, "old": null, "new": 66.66666666666666, "last_rescued": 4, "last_harmed": 0}
+ExpertLegal {"policy": "margin_advantage_utility_cost1", "tasks": 2, "average": 49.99999999999999, "average_gain_pp": 16.666666666666668, "last": 66.66666666666666, "last_gain_pp": 33.333333333333336, "old": null, "new": 66.66666666666666, "last_rescued": 4, "last_harmed": 0}
+ExpertLegal {"policy": "margin_advantage_utility_cost3", "tasks": 2, "average": 49.99999999999999, "average_gain_pp": 16.666666666666668, "last": 66.66666666666666, "last_gain_pp": 33.333333333333336, "old": null, "new": 66.66666666666666, "last_rescued": 4, "last_harmed": 0}
+ExpertLegal {"policy": "margin_advantage_utility_cost10", "tasks": 2, "average": 49.99999999999999, "average_gain_pp": 16.666666666666668, "last": 66.66666666666666, "last_gain_pp": 33.333333333333336, "old": null, "new": 66.66666666666666, "last_rescued": 4, "last_harmed": 0}
+ExpertLegal {"policy": "base_uncertainty_utility_cost1", "tasks": 2, "average": 49.99999999999999, "average_gain_pp": 16.666666666666668, "last": 66.66666666666666, "last_gain_pp": 33.333333333333336, "old": null, "new": 66.66666666666666, "last_rescued": 4, "last_harmed": 0}
+ExpertLegal {"policy": "base_uncertainty_utility_cost3", "tasks": 2, "average": 49.99999999999999, "average_gain_pp": 16.666666666666668, "last": 66.66666666666666, "last_gain_pp": 33.333333333333336, "old": null, "new": 66.66666666666666, "last_rescued": 4, "last_harmed": 0}
+ExpertLegal {"policy": "base_uncertainty_utility_cost10", "tasks": 2, "average": 49.99999999999999, "average_gain_pp": 16.666666666666668, "last": 66.66666666666666, "last_gain_pp": 33.333333333333336, "old": null, "new": 66.66666666666666, "last_rescued": 4, "last_harmed": 0}
+ExpertLegal {"policy": "ridge_core_cost1", "tasks": 2, "average": 49.99999999999999, "average_gain_pp": 16.666666666666668, "last": 66.66666666666666, "last_gain_pp": 33.333333333333336, "old": null, "new": 66.66666666666666, "last_rescued": 4, "last_harmed": 0}
+ExpertLegal {"policy": "ridge_core_cost3", "tasks": 2, "average": 49.99999999999999, "average_gain_pp": 16.666666666666668, "last": 66.66666666666666, "last_gain_pp": 33.333333333333336, "old": null, "new": 66.66666666666666, "last_rescued": 4, "last_harmed": 0}
+ExpertLegal {"policy": "ridge_core_cost10", "tasks": 2, "average": 49.99999999999999, "average_gain_pp": 16.666666666666668, "last": 66.66666666666666, "last_gain_pp": 33.333333333333336, "old": null, "new": 66.66666666666666, "last_rescued": 4, "last_harmed": 0}
+ExpertLegal {"policy": "base", "tasks": 2, "average": 33.33333333333333, "average_gain_pp": 0.0, "last": 33.33333333333333, "last_gain_pp": 0.0, "old": null, "new": 33.33333333333333, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "train_selected", "tasks": 2, "average": 33.33333333333333, "average_gain_pp": 0.0, "last": 33.33333333333333, "last_gain_pp": 0.0, "old": null, "new": 33.33333333333333, "last_rescued": 0, "last_harmed": 0}
+All predeclared rules (not a test-selected winner): /var/folders/bx/4b_0grz911d58vf23w86klyw0000gn/T/tmp46icu7k1/evaluation/summary.csv
+ExpertLegalTask {"task": 0, "source": "test_report_only", "policy": "base", "group": "total", "n": 12, "base_accuracy": 33.33333333333333, "accuracy": 33.33333333333333, "oracle_accuracy": 66.66666666666666, "rescued": 0, "harmed": 0, "switched": 0, "neutral": 0, "net_gain_pp": 0.0}
+ExpertLegalTask {"task": 0, "source": "test_report_only", "policy": "base", "group": "old", "n": 0, "base_accuracy": null, "accuracy": null, "oracle_accuracy": null, "rescued": 0, "harmed": 0, "switched": 0, "neutral": 0, "net_gain_pp": null}
+ExpertLegalTask {"task": 0, "source": "test_report_only", "policy": "base", "group": "new", "n": 12, "base_accuracy": 33.33333333333333, "accuracy": 33.33333333333333, "oracle_accuracy": 66.66666666666666, "rescued": 0, "harmed": 0, "switched": 0, "neutral": 0, "net_gain_pp": 0.0}
+ExpertLegalTask {"task": 0, "source": "test_report_only", "policy": "train_selected", "group": "total", "n": 12, "base_accuracy": 33.33333333333333, "accuracy": 33.33333333333333, "oracle_accuracy": 66.66666666666666, "rescued": 0, "harmed": 0, "switched": 0, "neutral": 0, "net_gain_pp": 0.0}
+ExpertLegalTask {"task": 0, "source": "test_report_only", "policy": "train_selected", "group": "old", "n": 0, "base_accuracy": null, "accuracy": null, "oracle_accuracy": null, "rescued": 0, "harmed": 0, "switched": 0, "neutral": 0, "net_gain_pp": null}
+ExpertLegalTask {"task": 0, "source": "test_report_only", "policy": "train_selected", "group": "new", "n": 12, "base_accuracy": 33.33333333333333, "accuracy": 33.33333333333333, "oracle_accuracy": 66.66666666666666, "rescued": 0, "harmed": 0, "switched": 0, "neutral": 0, "net_gain_pp": 0.0}
+ExpertLegalTask {"task": 0, "source": "test_report_only", "policy": "base", "group": "total", "n": 12, "base_accuracy": 33.33333333333333, "accuracy": 33.33333333333333, "oracle_accuracy": 66.66666666666666, "rescued": 0, "harmed": 0, "switched": 0, "neutral": 0, "net_gain_pp": 0.0}
+ExpertLegalTask {"task": 0, "source": "test_report_only", "policy": "base", "group": "old", "n": 0, "base_accuracy": null, "accuracy": null, "oracle_accuracy": null, "rescued": 0, "harmed": 0, "switched": 0, "neutral": 0, "net_gain_pp": null}
+ExpertLegalTask {"task": 0, "source": "test_report_only", "policy": "base", "group": "new", "n": 12, "base_accuracy": 33.33333333333333, "accuracy": 33.33333333333333, "oracle_accuracy": 66.66666666666666, "rescued": 0, "harmed": 0, "switched": 0, "neutral": 0, "net_gain_pp": 0.0}
+ExpertLegalTask {"task": 0, "source": "test_report_only", "policy": "train_selected", "group": "total", "n": 12, "base_accuracy": 33.33333333333333, "accuracy": 33.33333333333333, "oracle_accuracy": 66.66666666666666, "rescued": 0, "harmed": 0, "switched": 0, "neutral": 0, "net_gain_pp": 0.0}
+ExpertLegalTask {"task": 0, "source": "test_report_only", "policy": "train_selected", "group": "old", "n": 0, "base_accuracy": null, "accuracy": null, "oracle_accuracy": null, "rescued": 0, "harmed": 0, "switched": 0, "neutral": 0, "net_gain_pp": null}
+ExpertLegalTask {"task": 0, "source": "test_report_only", "policy": "train_selected", "group": "new", "n": 12, "base_accuracy": 33.33333333333333, "accuracy": 33.33333333333333, "oracle_accuracy": 66.66666666666666, "rescued": 0, "harmed": 0, "switched": 0, "neutral": 0, "net_gain_pp": 0.0}
+ExpertLegalTask {"task": 1, "source": "test_report_only", "policy": "base", "group": "total", "n": 12, "base_accuracy": 33.33333333333333, "accuracy": 33.33333333333333, "oracle_accuracy": 66.66666666666666, "rescued": 0, "harmed": 0, "switched": 0, "neutral": 0, "net_gain_pp": 0.0}
+ExpertLegalTask {"task": 1, "source": "test_report_only", "policy": "base", "group": "old", "n": 0, "base_accuracy": null, "accuracy": null, "oracle_accuracy": null, "rescued": 0, "harmed": 0, "switched": 0, "neutral": 0, "net_gain_pp": null}
+ExpertLegalTask {"task": 1, "source": "test_report_only", "policy": "base", "group": "new", "n": 12, "base_accuracy": 33.33333333333333, "accuracy": 33.33333333333333, "oracle_accuracy": 66.66666666666666, "rescued": 0, "harmed": 0, "switched": 0, "neutral": 0, "net_gain_pp": 0.0}
+ExpertLegalTask {"task": 1, "source": "test_report_only", "policy": "train_selected", "group": "total", "n": 12, "base_accuracy": 33.33333333333333, "accuracy": 33.33333333333333, "oracle_accuracy": 66.66666666666666, "rescued": 0, "harmed": 0, "switched": 0, "neutral": 0, "net_gain_pp": 0.0}
+ExpertLegalTask {"task": 1, "source": "test_report_only", "policy": "train_selected", "group": "old", "n": 0, "base_accuracy": null, "accuracy": null, "oracle_accuracy": null, "rescued": 0, "harmed": 0, "switched": 0, "neutral": 0, "net_gain_pp": null}
+ExpertLegalTask {"task": 1, "source": "test_report_only", "policy": "train_selected", "group": "new", "n": 12, "base_accuracy": 33.33333333333333, "accuracy": 33.33333333333333, "oracle_accuracy": 66.66666666666666, "rescued": 0, "harmed": 0, "switched": 0, "neutral": 0, "net_gain_pp": 0.0}
+ExpertLegal {"policy": "proposal_advantage_fixed_0", "tasks": 2, "average": 33.33333333333333, "average_gain_pp": 0.0, "last": 33.33333333333333, "last_gain_pp": 0.0, "old": null, "new": 33.33333333333333, "last_rescued": 4, "last_harmed": 4}
+ExpertLegal {"policy": "proposal_advantage_fixed_0.02", "tasks": 2, "average": 33.33333333333333, "average_gain_pp": 0.0, "last": 33.33333333333333, "last_gain_pp": 0.0, "old": null, "new": 33.33333333333333, "last_rescued": 4, "last_harmed": 4}
+ExpertLegal {"policy": "proposal_advantage_fixed_0.05", "tasks": 2, "average": 33.33333333333333, "average_gain_pp": 0.0, "last": 33.33333333333333, "last_gain_pp": 0.0, "old": null, "new": 33.33333333333333, "last_rescued": 4, "last_harmed": 4}
+ExpertLegal {"policy": "proposal_advantage_fixed_0.1", "tasks": 2, "average": 33.33333333333333, "average_gain_pp": 0.0, "last": 33.33333333333333, "last_gain_pp": 0.0, "old": null, "new": 33.33333333333333, "last_rescued": 4, "last_harmed": 4}
+ExpertLegal {"policy": "proposal_advantage_tail_0.9", "tasks": 2, "average": 33.33333333333333, "average_gain_pp": 0.0, "last": 33.33333333333333, "last_gain_pp": 0.0, "old": null, "new": 33.33333333333333, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "proposal_advantage_tail_0.95", "tasks": 2, "average": 33.33333333333333, "average_gain_pp": 0.0, "last": 33.33333333333333, "last_gain_pp": 0.0, "old": null, "new": 33.33333333333333, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "proposal_advantage_tail_0.98", "tasks": 2, "average": 33.33333333333333, "average_gain_pp": 0.0, "last": 33.33333333333333, "last_gain_pp": 0.0, "old": null, "new": 33.33333333333333, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "proposal_advantage_tail_0.99", "tasks": 2, "average": 33.33333333333333, "average_gain_pp": 0.0, "last": 33.33333333333333, "last_gain_pp": 0.0, "old": null, "new": 33.33333333333333, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "margin_advantage_fixed_0", "tasks": 2, "average": 33.33333333333333, "average_gain_pp": 0.0, "last": 33.33333333333333, "last_gain_pp": 0.0, "old": null, "new": 33.33333333333333, "last_rescued": 4, "last_harmed": 4}
+ExpertLegal {"policy": "margin_advantage_fixed_0.02", "tasks": 2, "average": 33.33333333333333, "average_gain_pp": 0.0, "last": 33.33333333333333, "last_gain_pp": 0.0, "old": null, "new": 33.33333333333333, "last_rescued": 4, "last_harmed": 4}
+ExpertLegal {"policy": "margin_advantage_fixed_0.05", "tasks": 2, "average": 33.33333333333333, "average_gain_pp": 0.0, "last": 33.33333333333333, "last_gain_pp": 0.0, "old": null, "new": 33.33333333333333, "last_rescued": 4, "last_harmed": 4}
+ExpertLegal {"policy": "margin_advantage_fixed_0.1", "tasks": 2, "average": 49.99999999999999, "average_gain_pp": 16.666666666666668, "last": 66.66666666666666, "last_gain_pp": 33.333333333333336, "old": null, "new": 66.66666666666666, "last_rescued": 4, "last_harmed": 0}
+ExpertLegal {"policy": "margin_advantage_tail_0.9", "tasks": 2, "average": 33.33333333333333, "average_gain_pp": 0.0, "last": 33.33333333333333, "last_gain_pp": 0.0, "old": null, "new": 33.33333333333333, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "margin_advantage_tail_0.95", "tasks": 2, "average": 33.33333333333333, "average_gain_pp": 0.0, "last": 33.33333333333333, "last_gain_pp": 0.0, "old": null, "new": 33.33333333333333, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "margin_advantage_tail_0.98", "tasks": 2, "average": 33.33333333333333, "average_gain_pp": 0.0, "last": 33.33333333333333, "last_gain_pp": 0.0, "old": null, "new": 33.33333333333333, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "margin_advantage_tail_0.99", "tasks": 2, "average": 33.33333333333333, "average_gain_pp": 0.0, "last": 33.33333333333333, "last_gain_pp": 0.0, "old": null, "new": 33.33333333333333, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "joint_proposal_0_gap_0.02", "tasks": 2, "average": 33.33333333333333, "average_gain_pp": 0.0, "last": 33.33333333333333, "last_gain_pp": 0.0, "old": null, "new": 33.33333333333333, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "joint_proposal_0_gap_0.05", "tasks": 2, "average": 33.33333333333333, "average_gain_pp": 0.0, "last": 33.33333333333333, "last_gain_pp": 0.0, "old": null, "new": 33.33333333333333, "last_rescued": 4, "last_harmed": 4}
+ExpertLegal {"policy": "joint_proposal_0.02_gap_0.02", "tasks": 2, "average": 33.33333333333333, "average_gain_pp": 0.0, "last": 33.33333333333333, "last_gain_pp": 0.0, "old": null, "new": 33.33333333333333, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "joint_proposal_0.02_gap_0.05", "tasks": 2, "average": 33.33333333333333, "average_gain_pp": 0.0, "last": 33.33333333333333, "last_gain_pp": 0.0, "old": null, "new": 33.33333333333333, "last_rescued": 4, "last_harmed": 4}
+ExpertLegal {"policy": "proposal_advantage_utility_cost1", "tasks": 2, "average": 49.99999999999999, "average_gain_pp": 16.666666666666668, "last": 66.66666666666666, "last_gain_pp": 33.333333333333336, "old": null, "new": 66.66666666666666, "last_rescued": 4, "last_harmed": 0}
+ExpertLegal {"policy": "proposal_advantage_utility_cost3", "tasks": 2, "average": 49.99999999999999, "average_gain_pp": 16.666666666666668, "last": 66.66666666666666, "last_gain_pp": 33.333333333333336, "old": null, "new": 66.66666666666666, "last_rescued": 4, "last_harmed": 0}
+ExpertLegal {"policy": "proposal_advantage_utility_cost10", "tasks": 2, "average": 49.99999999999999, "average_gain_pp": 16.666666666666668, "last": 66.66666666666666, "last_gain_pp": 33.333333333333336, "old": null, "new": 66.66666666666666, "last_rescued": 4, "last_harmed": 0}
+ExpertLegal {"policy": "margin_advantage_utility_cost1", "tasks": 2, "average": 49.99999999999999, "average_gain_pp": 16.666666666666668, "last": 66.66666666666666, "last_gain_pp": 33.333333333333336, "old": null, "new": 66.66666666666666, "last_rescued": 4, "last_harmed": 0}
+ExpertLegal {"policy": "margin_advantage_utility_cost3", "tasks": 2, "average": 49.99999999999999, "average_gain_pp": 16.666666666666668, "last": 66.66666666666666, "last_gain_pp": 33.333333333333336, "old": null, "new": 66.66666666666666, "last_rescued": 4, "last_harmed": 0}
+ExpertLegal {"policy": "margin_advantage_utility_cost10", "tasks": 2, "average": 49.99999999999999, "average_gain_pp": 16.666666666666668, "last": 66.66666666666666, "last_gain_pp": 33.333333333333336, "old": null, "new": 66.66666666666666, "last_rescued": 4, "last_harmed": 0}
+ExpertLegal {"policy": "base_uncertainty_utility_cost1", "tasks": 2, "average": 49.99999999999999, "average_gain_pp": 16.666666666666668, "last": 66.66666666666666, "last_gain_pp": 33.333333333333336, "old": null, "new": 66.66666666666666, "last_rescued": 4, "last_harmed": 0}
+ExpertLegal {"policy": "base_uncertainty_utility_cost3", "tasks": 2, "average": 49.99999999999999, "average_gain_pp": 16.666666666666668, "last": 66.66666666666666, "last_gain_pp": 33.333333333333336, "old": null, "new": 66.66666666666666, "last_rescued": 4, "last_harmed": 0}
+ExpertLegal {"policy": "base_uncertainty_utility_cost10", "tasks": 2, "average": 49.99999999999999, "average_gain_pp": 16.666666666666668, "last": 66.66666666666666, "last_gain_pp": 33.333333333333336, "old": null, "new": 66.66666666666666, "last_rescued": 4, "last_harmed": 0}
+ExpertLegal {"policy": "ridge_core_cost1", "tasks": 2, "average": 49.99999999999999, "average_gain_pp": 16.666666666666668, "last": 66.66666666666666, "last_gain_pp": 33.333333333333336, "old": null, "new": 66.66666666666666, "last_rescued": 4, "last_harmed": 0}
+ExpertLegal {"policy": "ridge_core_cost3", "tasks": 2, "average": 49.99999999999999, "average_gain_pp": 16.666666666666668, "last": 66.66666666666666, "last_gain_pp": 33.333333333333336, "old": null, "new": 66.66666666666666, "last_rescued": 4, "last_harmed": 0}
+ExpertLegal {"policy": "ridge_core_cost10", "tasks": 2, "average": 49.99999999999999, "average_gain_pp": 16.666666666666668, "last": 66.66666666666666, "last_gain_pp": 33.333333333333336, "old": null, "new": 66.66666666666666, "last_rescued": 4, "last_harmed": 0}
+ExpertLegal {"policy": "base", "tasks": 2, "average": 33.33333333333333, "average_gain_pp": 0.0, "last": 33.33333333333333, "last_gain_pp": 0.0, "old": null, "new": 33.33333333333333, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "train_selected", "tasks": 2, "average": 33.33333333333333, "average_gain_pp": 0.0, "last": 33.33333333333333, "last_gain_pp": 0.0, "old": null, "new": 33.33333333333333, "last_rescued": 0, "last_harmed": 0}
+All predeclared rules (not a test-selected winner): /var/folders/bx/4b_0grz911d58vf23w86klyw0000gn/T/tmp87czxfje/before/summary.csv
+ExpertLegalTask {"task": 0, "source": "test_report_only", "policy": "base", "group": "total", "n": 12, "base_accuracy": 0.0, "accuracy": 0.0, "oracle_accuracy": 0.0, "rescued": 0, "harmed": 0, "switched": 0, "neutral": 0, "net_gain_pp": 0.0}
+ExpertLegalTask {"task": 0, "source": "test_report_only", "policy": "base", "group": "old", "n": 0, "base_accuracy": null, "accuracy": null, "oracle_accuracy": null, "rescued": 0, "harmed": 0, "switched": 0, "neutral": 0, "net_gain_pp": null}
+ExpertLegalTask {"task": 0, "source": "test_report_only", "policy": "base", "group": "new", "n": 12, "base_accuracy": 0.0, "accuracy": 0.0, "oracle_accuracy": 0.0, "rescued": 0, "harmed": 0, "switched": 0, "neutral": 0, "net_gain_pp": 0.0}
+ExpertLegalTask {"task": 0, "source": "test_report_only", "policy": "train_selected", "group": "total", "n": 12, "base_accuracy": 0.0, "accuracy": 0.0, "oracle_accuracy": 0.0, "rescued": 0, "harmed": 0, "switched": 0, "neutral": 0, "net_gain_pp": 0.0}
+ExpertLegalTask {"task": 0, "source": "test_report_only", "policy": "train_selected", "group": "old", "n": 0, "base_accuracy": null, "accuracy": null, "oracle_accuracy": null, "rescued": 0, "harmed": 0, "switched": 0, "neutral": 0, "net_gain_pp": null}
+ExpertLegalTask {"task": 0, "source": "test_report_only", "policy": "train_selected", "group": "new", "n": 12, "base_accuracy": 0.0, "accuracy": 0.0, "oracle_accuracy": 0.0, "rescued": 0, "harmed": 0, "switched": 0, "neutral": 0, "net_gain_pp": 0.0}
+ExpertLegalTask {"task": 1, "source": "test_report_only", "policy": "base", "group": "total", "n": 12, "base_accuracy": 0.0, "accuracy": 0.0, "oracle_accuracy": 0.0, "rescued": 0, "harmed": 0, "switched": 0, "neutral": 0, "net_gain_pp": 0.0}
+ExpertLegalTask {"task": 1, "source": "test_report_only", "policy": "base", "group": "old", "n": 0, "base_accuracy": null, "accuracy": null, "oracle_accuracy": null, "rescued": 0, "harmed": 0, "switched": 0, "neutral": 0, "net_gain_pp": null}
+ExpertLegalTask {"task": 1, "source": "test_report_only", "policy": "base", "group": "new", "n": 12, "base_accuracy": 0.0, "accuracy": 0.0, "oracle_accuracy": 0.0, "rescued": 0, "harmed": 0, "switched": 0, "neutral": 0, "net_gain_pp": 0.0}
+ExpertLegalTask {"task": 1, "source": "test_report_only", "policy": "train_selected", "group": "total", "n": 12, "base_accuracy": 0.0, "accuracy": 0.0, "oracle_accuracy": 0.0, "rescued": 0, "harmed": 0, "switched": 0, "neutral": 0, "net_gain_pp": 0.0}
+ExpertLegalTask {"task": 1, "source": "test_report_only", "policy": "train_selected", "group": "old", "n": 0, "base_accuracy": null, "accuracy": null, "oracle_accuracy": null, "rescued": 0, "harmed": 0, "switched": 0, "neutral": 0, "net_gain_pp": null}
+ExpertLegalTask {"task": 1, "source": "test_report_only", "policy": "train_selected", "group": "new", "n": 12, "base_accuracy": 0.0, "accuracy": 0.0, "oracle_accuracy": 0.0, "rescued": 0, "harmed": 0, "switched": 0, "neutral": 0, "net_gain_pp": 0.0}
+ExpertLegal {"policy": "proposal_advantage_fixed_0", "tasks": 2, "average": 0.0, "average_gain_pp": 0.0, "last": 0.0, "last_gain_pp": 0.0, "old": null, "new": 0.0, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "proposal_advantage_fixed_0.02", "tasks": 2, "average": 0.0, "average_gain_pp": 0.0, "last": 0.0, "last_gain_pp": 0.0, "old": null, "new": 0.0, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "proposal_advantage_fixed_0.05", "tasks": 2, "average": 0.0, "average_gain_pp": 0.0, "last": 0.0, "last_gain_pp": 0.0, "old": null, "new": 0.0, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "proposal_advantage_fixed_0.1", "tasks": 2, "average": 0.0, "average_gain_pp": 0.0, "last": 0.0, "last_gain_pp": 0.0, "old": null, "new": 0.0, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "proposal_advantage_tail_0.9", "tasks": 2, "average": 0.0, "average_gain_pp": 0.0, "last": 0.0, "last_gain_pp": 0.0, "old": null, "new": 0.0, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "proposal_advantage_tail_0.95", "tasks": 2, "average": 0.0, "average_gain_pp": 0.0, "last": 0.0, "last_gain_pp": 0.0, "old": null, "new": 0.0, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "proposal_advantage_tail_0.98", "tasks": 2, "average": 0.0, "average_gain_pp": 0.0, "last": 0.0, "last_gain_pp": 0.0, "old": null, "new": 0.0, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "proposal_advantage_tail_0.99", "tasks": 2, "average": 0.0, "average_gain_pp": 0.0, "last": 0.0, "last_gain_pp": 0.0, "old": null, "new": 0.0, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "margin_advantage_fixed_0", "tasks": 2, "average": 0.0, "average_gain_pp": 0.0, "last": 0.0, "last_gain_pp": 0.0, "old": null, "new": 0.0, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "margin_advantage_fixed_0.02", "tasks": 2, "average": 0.0, "average_gain_pp": 0.0, "last": 0.0, "last_gain_pp": 0.0, "old": null, "new": 0.0, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "margin_advantage_fixed_0.05", "tasks": 2, "average": 0.0, "average_gain_pp": 0.0, "last": 0.0, "last_gain_pp": 0.0, "old": null, "new": 0.0, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "margin_advantage_fixed_0.1", "tasks": 2, "average": 0.0, "average_gain_pp": 0.0, "last": 0.0, "last_gain_pp": 0.0, "old": null, "new": 0.0, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "margin_advantage_tail_0.9", "tasks": 2, "average": 0.0, "average_gain_pp": 0.0, "last": 0.0, "last_gain_pp": 0.0, "old": null, "new": 0.0, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "margin_advantage_tail_0.95", "tasks": 2, "average": 0.0, "average_gain_pp": 0.0, "last": 0.0, "last_gain_pp": 0.0, "old": null, "new": 0.0, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "margin_advantage_tail_0.98", "tasks": 2, "average": 0.0, "average_gain_pp": 0.0, "last": 0.0, "last_gain_pp": 0.0, "old": null, "new": 0.0, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "margin_advantage_tail_0.99", "tasks": 2, "average": 0.0, "average_gain_pp": 0.0, "last": 0.0, "last_gain_pp": 0.0, "old": null, "new": 0.0, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "joint_proposal_0_gap_0.02", "tasks": 2, "average": 0.0, "average_gain_pp": 0.0, "last": 0.0, "last_gain_pp": 0.0, "old": null, "new": 0.0, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "joint_proposal_0_gap_0.05", "tasks": 2, "average": 0.0, "average_gain_pp": 0.0, "last": 0.0, "last_gain_pp": 0.0, "old": null, "new": 0.0, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "joint_proposal_0.02_gap_0.02", "tasks": 2, "average": 0.0, "average_gain_pp": 0.0, "last": 0.0, "last_gain_pp": 0.0, "old": null, "new": 0.0, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "joint_proposal_0.02_gap_0.05", "tasks": 2, "average": 0.0, "average_gain_pp": 0.0, "last": 0.0, "last_gain_pp": 0.0, "old": null, "new": 0.0, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "proposal_advantage_utility_cost1", "tasks": 2, "average": 0.0, "average_gain_pp": 0.0, "last": 0.0, "last_gain_pp": 0.0, "old": null, "new": 0.0, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "proposal_advantage_utility_cost3", "tasks": 2, "average": 0.0, "average_gain_pp": 0.0, "last": 0.0, "last_gain_pp": 0.0, "old": null, "new": 0.0, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "proposal_advantage_utility_cost10", "tasks": 2, "average": 0.0, "average_gain_pp": 0.0, "last": 0.0, "last_gain_pp": 0.0, "old": null, "new": 0.0, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "margin_advantage_utility_cost1", "tasks": 2, "average": 0.0, "average_gain_pp": 0.0, "last": 0.0, "last_gain_pp": 0.0, "old": null, "new": 0.0, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "margin_advantage_utility_cost3", "tasks": 2, "average": 0.0, "average_gain_pp": 0.0, "last": 0.0, "last_gain_pp": 0.0, "old": null, "new": 0.0, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "margin_advantage_utility_cost10", "tasks": 2, "average": 0.0, "average_gain_pp": 0.0, "last": 0.0, "last_gain_pp": 0.0, "old": null, "new": 0.0, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "base_uncertainty_utility_cost1", "tasks": 2, "average": 0.0, "average_gain_pp": 0.0, "last": 0.0, "last_gain_pp": 0.0, "old": null, "new": 0.0, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "base_uncertainty_utility_cost3", "tasks": 2, "average": 0.0, "average_gain_pp": 0.0, "last": 0.0, "last_gain_pp": 0.0, "old": null, "new": 0.0, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "base_uncertainty_utility_cost10", "tasks": 2, "average": 0.0, "average_gain_pp": 0.0, "last": 0.0, "last_gain_pp": 0.0, "old": null, "new": 0.0, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "ridge_core_cost1", "tasks": 2, "average": 0.0, "average_gain_pp": 0.0, "last": 0.0, "last_gain_pp": 0.0, "old": null, "new": 0.0, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "ridge_core_cost3", "tasks": 2, "average": 0.0, "average_gain_pp": 0.0, "last": 0.0, "last_gain_pp": 0.0, "old": null, "new": 0.0, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "ridge_core_cost10", "tasks": 2, "average": 0.0, "average_gain_pp": 0.0, "last": 0.0, "last_gain_pp": 0.0, "old": null, "new": 0.0, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "base", "tasks": 2, "average": 0.0, "average_gain_pp": 0.0, "last": 0.0, "last_gain_pp": 0.0, "old": null, "new": 0.0, "last_rescued": 0, "last_harmed": 0}
+ExpertLegal {"policy": "train_selected", "tasks": 2, "average": 0.0, "average_gain_pp": 0.0, "last": 0.0, "last_gain_pp": 0.0, "old": null, "new": 0.0, "last_rescued": 0, "last_harmed": 0}
+All predeclared rules (not a test-selected winner): /var/folders/bx/4b_0grz911d58vf23w86klyw0000gn/T/tmp87czxfje/after/summary.csv
+test: batch 1/3
+test: batch 3/3
+/opt/homebrew/lib/python3.14/site-packages/joblib/externals/loky/backend/context.py:131: UserWarning: Could not find the number of physical cores for the following reason:
+invalid literal for int() with base 10: ''
+Returning the number of logical cores instead. You can silence this warning by setting LOKY_MAX_CPU_COUNT to the number of cores you want to use.
+  warnings.warn(
+  File "/opt/homebrew/lib/python3.14/site-packages/joblib/externals/loky/backend/context.py", line 249, in _count_physical_cores
+    cpu_count_physical = _count_physical_cores_darwin()
+  File "/opt/homebrew/lib/python3.14/site-packages/joblib/externals/loky/backend/context.py", line 318, in _count_physical_cores_darwin
+    return int(cpu_info)
+{
+  "accuracy": 1.25,
+  "checkpoint_last_accuracy": 0.0,
+  "accuracy_difference_pp": 1.25,
+  "train_samples": 80,
+  "test_samples": 80,
+  "new_to_old": 0,
+  "old_to_new": 1,
+  "nearest_train_center_accuracy": 97.5,
+  "mean_margin": -0.38048250028590686,
+  "tsne_seed": 1993,
+  "plotting_versions": {
+    "numpy": "2.4.6",
+    "sklearn": "1.9.0",
+    "matplotlib": "3.11.0"
+  },
+  "checkpoint": "SYNTHETIC_TEST_ONLY",
+  "checkpoint_sha256": "fixture",
+  "note": "Final post-CA checkpoint only. Old train images used offline for diagnosis; not a replay method. Test-selected pairs are descriptive, not validation."
+}
+Figures and tables: /var/folders/bx/4b_0grz911d58vf23w86klyw0000gn/T/tmplqejlnwz/figures
+Measured results: [{"mode": "signed", "status": "completed", "exit_code": 0, "minutes": 70, "tasks_reported": 10, "Average": 87.214, "Last": 82.6, "Old": 82.1, "New": 87.1, "Forgetting": null, "max_relative_norm_error": 0.0}]
+Measured results: [{"mode": "coordinate", "status": "completed", "exit_code": 0, "minutes": 75, "tasks_reported": 0, "Average": null, "Last": null, "Old": null, "New": null, "Forgetting": null, "max_relative_norm_error": 0}]
+Measured Task0-2 results (not full T10): [{"mode": "gradient", "status": "completed", "exit_code": 0, "minutes": 20, "tasks_reported": 3, "Average": 92.7, "Last": 89.3, "Old": 90.1, "New": 87.7, "Forgetting": null, "expected_tasks": 3, "full_t10_completed": false, "max_a_gram_relative_error": 1e-06, "mean_gradient_energy_fraction": 0.8, "mean_wpre_energy_fraction": 0.2, "mean_history_energy_fraction": 0.1, "mean_probe_accuracy": null, "mean_probe_loss": null, "mean_raw_space_escape": 1e-07, "mean_effective_space_escape": 0.3, "mean_effective_norm": 1.2, "mean_wpre_overlap_effective": 0.02, "mean_history_overlap_effective": 0.01}]
+Code revision: test_revision 
+Outputs: /var/folders/bx/4b_0grz911d58vf23w86klyw0000gn/T/tmpn7swhafj/logs/shell_logs/imgr10_plora_weight_basis_t10_3090/20261013_005358_649467
+3090; ImageNet-R seed1993; official test Task0-9; full training data; anchor2.5; 20 epochs; CA5; math SDPA. Only Task1+ P-A directions change; A frozen, B starts at zero. S/gates/CA/inference unchanged. No replay, saved features or checkpoints.
+Queue finished: /var/folders/bx/4b_0grz911d58vf23w86klyw0000gn/T/tmpn7swhafj/logs/shell_logs/imgr10_plora_weight_basis_t10_3090/20261013_005358_649467
+Analysis error saved separately.
+Analysis error saved; scheduled training continues.
+Completed groups reused: [] ; pending order: ['wpre_relative', 'task_relative']
+ETA for remaining planned groups (min): 1.0 ; active T10 may finish beyond deadline.
+Analysis error saved; training queue continues: Traceback (most recent call last):
+  File "/Users/luxiaogen/Desktop/paper/code/baseline/LoDA_ICML2026/scripts/run_compact_structure_night.py", line 50, in summarize_safely
+    analysis.summarize(directory, machine, records)
+    ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.2/Frameworks/Python.framework/Versions/3.14/lib/python3.14/unittest/mock.py", line 1175, in __call__
+    return self._mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.2/Frameworks/Python.framework/Versions/3.14/lib/python3.14/unittest/mock.py", line 1179, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.2/Frameworks/Python.framework/Versions/3.14/lib/python3.14/unittest/mock.py", line 1234, in _execute_mock_call
+    raise effect
+RuntimeError: plot failed
+
+ETA for remaining planned groups (min): 0.0 ; active T10 may finish beyond deadline.
+Analysis error saved; training queue continues: Traceback (most recent call last):
+  File "/Users/luxiaogen/Desktop/paper/code/baseline/LoDA_ICML2026/scripts/run_compact_structure_night.py", line 50, in summarize_safely
+    analysis.summarize(directory, machine, records)
+    ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.2/Frameworks/Python.framework/Versions/3.14/lib/python3.14/unittest/mock.py", line 1175, in __call__
+    return self._mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.2/Frameworks/Python.framework/Versions/3.14/lib/python3.14/unittest/mock.py", line 1179, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.2/Frameworks/Python.framework/Versions/3.14/lib/python3.14/unittest/mock.py", line 1234, in _execute_mock_call
+    raise effect
+  File "/Users/luxiaogen/Desktop/paper/code/baseline/LoDA_ICML2026/scripts/run_compact_structure_night.py", line 50, in summarize_safely
+    analysis.summarize(directory, machine, records)
+    ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.2/Frameworks/Python.framework/Versions/3.14/lib/python3.14/unittest/mock.py", line 1175, in __call__
+    return self._mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.2/Frameworks/Python.framework/Versions/3.14/lib/python3.14/unittest/mock.py", line 1179, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.2/Frameworks/Python.framework/Versions/3.14/lib/python3.14/unittest/mock.py", line 1234, in _execute_mock_call
+    raise effect
+RuntimeError: plot failed
+
+Queue finished: /var/folders/bx/4b_0grz911d58vf23w86klyw0000gn/T/tmpgj0f3kua
+Completed groups reused: [] ; pending order: ['wpre_relative', 'task_relative']
+Smoke failed; no formal training starts.
+Completed groups reused: ['wpre_relative'] ; pending order: []
+Queue finished: /var/folders/bx/4b_0grz911d58vf23w86klyw0000gn/T/tmp40g0avw9
+/Users/luxiaogen/Desktop/paper/code/baseline/LoDA_ICML2026/test/test_task0_margin_screen.py:79: UserWarning: Converting a tensor with requires_grad=True to a scalar may lead to unexpected behavior.
+Consider using tensor.detach() first. (Triggered internally at /Users/runner/work/pytorch/pytorch/torch/csrc/autograd/generated/python_variable_methods.cpp:839.)
+  self.assertAlmostEqual(float(raw_loss), 0.9, places=6)
+logs/fake/2_tasks/ca/paired_/1993_slora:True_plora:True_rank:2_lora_fake_sgd-0.02
+Analysis error saved; planned training continues.
+Analysis error saved; planned training continues.
+----------------------------------------------------------------------
+Ran 935 tests in 30.213s
+
+OK (skipped=15)
+{
+  "completed_tasks": [
+    0
+  ],
+  "full_t10_completed": false,
+  "test_used_for_threshold_fitting": false,
+  "average": {
+    "base_accuracy": 50.0,
+    "anchor_accuracy": 50.0,
+    "oracle_accuracy": 75.0,
+    "task_id_ceiling_accuracy": 50.0,
+    "margin_advantage_fixed_rule_accuracy": 25.0,
+    "proposal_advantage_fixed_rule_accuracy": 25.0
+  },
+  "last": {
+    "base_accuracy": 50.0,
+    "anchor_accuracy": 50.0,
+    "oracle_accuracy": 75.0,
+    "task_id_ceiling_accuracy": 50.0,
+    "margin_advantage_fixed_rule_accuracy": 25.0,
+    "proposal_advantage_fixed_rule_accuracy": 25.0
+  },
+  "current_train_probe_tasks": [],
+  "expected_reports_complete": null
+}
+Per-task Old/New, rescued/harmed counts, and AUC: /var/folders/bx/4b_0grz911d58vf23w86klyw0000gn/T/tmp3e2r0oe2/task_metrics.csv
