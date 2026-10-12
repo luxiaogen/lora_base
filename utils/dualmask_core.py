@@ -35,3 +35,15 @@ def paired_layer_min_gates(delta, first, second):
     scales = torch.where(norms > 0, target / norms.clamp_min(1e-30), torch.ones_like(norms))
     gates = tuple(gate * scale.to(gate) for gate, scale in zip((first, second), scales))
     return gates, norms, target, scales
+
+
+@torch.no_grad()
+def prior_layer_min_gates(delta, spectrum, magnitude, permuted):
+    """谱、权重幅度、置换三位置使用同一整层目标，只缩小更新。"""
+    value = delta.detach().float()
+    originals = (spectrum, magnitude, permuted)
+    norms = torch.stack([(value * gate).norm() for gate in originals])
+    target = norms.min()
+    scales = torch.where(norms > 0, target / norms.clamp_min(1e-30), torch.ones_like(norms))
+    gates = tuple(gate * scale.to(gate) for gate, scale in zip(originals, scales))
+    return gates, norms, target, scales

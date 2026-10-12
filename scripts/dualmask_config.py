@@ -81,6 +81,16 @@ def normalize_dualmask_config(config: dict) -> dict:
         raise ValueError('Task-start study uses task-fixed positions without training norm control')
     prototype_probe = config.get('dual_mask_prototype_position_probe', False)
     norm_mode = config.get('dual_mask_position_norm_match', 'off')
+    if norm_mode == 'prior_layer_min':
+        required = dict(dual_mask_protection_rule='static', dual_mask_update_rule='step',
+            dual_mask_permission_mode='asymmetric', dual_mask_conflict_score_mode='magnitude',
+            dual_mask_conflict_exact_topk=True, dual_mask_uniform_norm_matched=False,
+            dual_mask_gradient_route='off', dual_mask_task_start_probe=False,
+            dual_mask_prototype_position_probe=False, p_fixed_support='off',
+            p_permission_position='wpre', p_permission_release='off', p_direction_score='off')
+        if (position not in ('wpre', 'wpre_magnitude', 'permuted')
+                or any(config.get(k, v) != v for k, v in required.items())):
+            raise ValueError('Three-prior norm control requires static asymmetric magnitude step updates')
     if position in ('prototype_high', 'prototype_shuffled', 'prototype_low') or norm_mode == 'prototype_min':
         if not prototype_probe:
             raise ValueError('Prototype positions require the task-start prototype probe')

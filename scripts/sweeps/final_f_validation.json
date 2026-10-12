@@ -1,0 +1,46 @@
+{
+  "name": "final_f_validation",
+  "base_spec": "budget_verification.json",
+  "hours": 10,
+  "common_overrides": {
+    "rank": 64,
+    "slora_gamma": 0.5,
+    "plora_gamma": 0.75,
+    "dual_mask_mechanism_audit": true,
+    "dual_mask_budget_audit": false,
+    "dual_mask_protection_audit": true,
+    "dual_mask_position_audit": true,
+    "dual_mask_task_start_probe": false,
+    "dual_mask_position_signal_audit": false,
+    "dual_mask_prototype_position_probe": false,
+    "dual_mask_position_norm_match": "off",
+    "dual_mask_permission_mode": "asymmetric",
+    "dual_mask_s_conflict_enabled": true,
+    "dual_mask_p_conflict_enabled": true,
+    "dual_mask_depth_coverage": "off",
+    "dual_mask_depth_strength": "off",
+    "dual_mask_depth_audit": false,
+    "dual_mask_layerwise_ratio_mode": "none",
+    "p_fixed_support": "off",
+    "p_fixed_support_audit": false
+  },
+  "3090": {
+    "datasets": [{"name": "imgr10", "config": "exps/dlora/imgr10.json", "rank": 64}],
+    "variants": [
+      {"name": "C11", "overrides": {}},
+      {"name": "C01", "overrides": {"dual_mask_permission_mode": "symmetric_soft", "dual_mask_fixed_protect_strength": 0}},
+      {"name": "C10", "overrides": {"dual_mask_s_conflict_enabled": false, "dual_mask_p_conflict_enabled": false}},
+      {"name": "C00", "overrides": {"dual_mask_permission_mode": "symmetric_soft", "dual_mask_fixed_protect_strength": 0, "dual_mask_s_conflict_enabled": false, "dual_mask_p_conflict_enabled": false}},
+      {"name": "Soft", "overrides": {"dual_mask_permission_mode": "symmetric_soft"}},
+      {"name": "Bfixed", "overrides": {"dual_mask_fixed_conflict_strength": 0.5}}
+    ]
+  },
+  "5090": {
+    "datasets": [{"name": "imgr10", "config": "exps/dlora/imgr10.json", "rank": 64}],
+    "variants": [
+      {"name": "Lspectrum", "overrides": {"dual_mask_position_norm_match": "prior_layer_min"}},
+      {"name": "Labs", "overrides": {"dual_mask_position_norm_match": "prior_layer_min", "dual_mask_protect_position": "wpre_magnitude"}},
+      {"name": "Lperm", "overrides": {"dual_mask_position_norm_match": "prior_layer_min", "dual_mask_protect_position": "permuted"}}
+    ]
+  }
+}

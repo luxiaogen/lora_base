@@ -126,7 +126,9 @@ def position_diagnostic(learner, dataset, epoch):
                 epoch=epoch, partition=name,
                 reference_position=modules[0].core_diagnostic_positions[0],
                 permuted_position=modules[0].core_diagnostic_positions[1],
-                norm_control='same_state_paired_layer_min' if budget_audit else 'same_state_paired_min',
+                norm_control=('same_state_prior_layer_min'
+                    if learner.args.get('dual_mask_position_norm_match') == 'prior_layer_min'
+                    else 'same_state_paired_layer_min' if budget_audit else 'same_state_paired_min'),
                 scope='all_seen', source='test_only_fixed_order', **row)))
 
 
@@ -144,6 +146,21 @@ def epoch_updates(learner, epoch):
                 continue
             delta = unit.B_weight @ unit.A_weight
             effective, _, selected = module._safe_delta(delta, isolated, return_details=True)
+            if task > 0 and module.args.get('dual_mask_position_norm_match') == 'prior_layer_min':
+                from utils.dualmask_core import permission_gate, prior_layer_min_gates
+                masks = (module.core_reference_protect, module.core_magnitude_protect,
+                         module.core_permuted_protect)
+                gates = [permission_gate(mask.to(delta), module.effective_protect_strength,
+                         isolated, mode, module.dual_mask_s_protect_enabled)
+                         * (1 - module._conflict_parameters()[1] * selected) for mask in masks]
+                _, norms, target, scales = prior_layer_min_gates(delta, *gates)
+                index = ('wpre', 'wpre_magnitude', 'permuted').index(module.args['dual_mask_protect_position'])
+                logging.info('PriorLayerNormMatch %s', json.dumps(dict(task=task, epoch=epoch,
+                    layer=module.layer_idx, branch=branch,
+                    candidate_norms=[float(gamma * v) for v in norms],
+                    target_norm=float(gamma * target), actual_scale=float(scales[index]),
+                    actual_norm=float(gamma * effective.norm()),
+                    matching_residual=float(gamma * (effective.norm() - target).abs()))))
             if task == 0:
                 base = delta
             else:
@@ -264,7 +281,7 @@ def storage_bytes(learner, stage):
             group = 'temporary_adapters'
         elif 'classifier_pool' in name:
             group = 'classifier'
-        elif any(key in name for key in ('importance', 'mask', 'core_reference', 'core_permuted', 'p_permission_protect')):
+        elif any(key in name for key in ('importance', 'mask', 'core_reference', 'core_permuted', 'core_magnitude', 'p_permission_protect')):
             group = 'importance_and_masks'
         else:
             group = 'encoder_and_other_buffers'
