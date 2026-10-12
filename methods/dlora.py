@@ -995,6 +995,12 @@ class Learner(BaseLearner):
     def incremental_train(self, data_manager):
 
         self._cur_task += 1
+        self._position_signal_context = None
+        self._position_signal_dataset = None
+        if (self.args.get('dual_mask_position_signal_audit', False)
+                and self._cur_task in self.args.get('position_signal_tasks', (1, 5, 9))):
+            total = self._known_classes + data_manager.get_task_size(self._cur_task)
+            self._position_signal_dataset = data_manager.get_dataset(np.arange(total), source='train', mode='test')
         self._ridge_fusion_ready = False
         self._old_teacher = None
         if self._cur_task > 0 and float(self.args.get('old_model_distill_weight', 0.0)) > 0:
@@ -1117,6 +1123,8 @@ class Learner(BaseLearner):
                 np.arange(self._known_classes, self._total_classes), source='train', mode='test')
         self._prepare_incremental_head(data_manager, 'pre')
         self._train(self.train_loader, self.test_loader)
+        self._position_signal_context = None
+        self._position_signal_dataset = None
         self._p_release_dataset = None
         self._branch_choice = None
         self._p_old_gradient_oracle = None
@@ -1317,6 +1325,11 @@ class Learner(BaseLearner):
             kk += 1
 
         self._initialize_plora_a()
+
+        if getattr(self, '_position_signal_dataset', None) is not None:
+            from utils.protection_position_diagnostic import prepare_positions
+            with stage_cost(self, 'mechanism_diagnostic'):
+                prepare_positions(self, self._position_signal_dataset)
 
         if self._cur_task > 0 and self.args.get('dual_mask_prototype_position_probe', False):
             from utils.prototype_protection import prepare_positions
@@ -1699,11 +1712,18 @@ class Learner(BaseLearner):
                 with stage_cost(self, 'update_telemetry'):
                     epoch_updates(self, epoch + 1)
                 if (not self.args.get('p_fixed_support_audit', False)
+                        and not self.args.get('dual_mask_position_signal_audit', False)
                         and self.args.get('p_permission_position', 'wpre') == 'wpre'
                         and self.args.get('p_permission_release', 'off') == 'off'):
                     position_diagnostic(self, test_loader.dataset, epoch + 1)
                 if epoch == 0:
                     storage_bytes(self, 'adapters_allocated')
+
+            if (getattr(self, '_position_signal_context', None) is not None
+                    and epoch + 1 in self.args.get('position_signal_epochs', (2, 20))):
+                from utils.protection_position_diagnostic import report_positions
+                with stage_cost(self, 'mechanism_diagnostic'):
+                    report_positions(self, epoch + 1)
 
             if self.args.get('dual_mask_prototype_position_probe', False):
                 from utils.dualmask_core_audit import epoch_updates, storage_bytes

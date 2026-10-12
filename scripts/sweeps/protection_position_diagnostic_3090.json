@@ -1,0 +1,12 @@
+{
+  "name": "protection_position_diagnostic", "hours": 10,
+  "common_overrides": {
+    "dual_mask_position_signal_audit": true,
+    "position_signal_tasks": [1, 5, 9], "position_signal_epochs": [2, 20],
+    "p_fixed_support": "off", "p_fixed_support_audit": false
+  },
+  "3090": {
+    "datasets": [{"name": "imgr10", "config": "exps/dlora/imgr10.json", "rank": 64}],
+    "variants": [{"name": "F", "recipe": "F", "overrides": {}}]
+  }
+}

@@ -1673,6 +1673,10 @@ class Attention_LoRA(nn.Module):
             residual_scale: float = 1.0,
     ) -> torch.Tensor:
         raw_delta = unit.B_weight @ unit.A_weight
+        # 只读诊断临时覆盖 S；不改变正式掩码、P路径或合并。
+        diagnostic_s = getattr(self, '_position_signal_s_override', None)
+        if not isolated and self.cur_task > 0 and diagnostic_s is not None:
+            return F.linear(x, diagnostic_s)
         ## isolated=True: safe_delta_p = BA_p * plastic_mask * conflict_gate
         ## isolated=False: safe_delta_s = BA_s * protect_gate * conflict_gate
         if isolated and self.training and self.p_conflict_strength_scale != 1.0:
