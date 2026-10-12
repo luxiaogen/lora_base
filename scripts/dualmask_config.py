@@ -6,6 +6,21 @@ import warnings
 def normalize_dualmask_config(config: dict) -> dict:
     """在启动前规范边界选项，不改变合法配方。"""
     config.setdefault('dual_mask_conflict_old_overlap_adaptive', False)
+    depth = [config.get(key, 'off') for key in ('dual_mask_depth_coverage', 'dual_mask_depth_strength')]
+    if any(mode not in ('off', 'shallow_high') for mode in depth):
+        raise ValueError('Unknown depth permission mode')
+    if any(mode != 'off' for mode in depth) or config.get('dual_mask_depth_audit', False):
+        required = dict(dual_mask_fixed_coverage=.90, dual_mask_fixed_protect_strength=.50,
+            dual_mask_coverage_mode='energy', dual_mask_importance='svd',
+            dual_mask_protect_position='wpre', dual_mask_permission_mode='asymmetric',
+            dual_mask_protection_rule='static', dual_mask_update_rule='step',
+            dual_mask_branch_layout='dual', dual_mask_position_norm_match='off',
+            dual_mask_task_start_probe=False, dual_mask_prototype_position_probe=False,
+            dual_mask_gradient_route='off', p_fixed_support='off', p_fixed_support_audit=False,
+            dual_mask_position_signal_audit=False, dual_mask_layerwise_ratio_mode='none',
+            p_permission_position='wpre', p_permission_release='off')
+        if any(config.get(k, v) != v for k, v in required.items()):
+            raise ValueError('Depth permissions require the fixed M90 static W_pre recipe')
     support_mode = config.get('p_fixed_support', 'off')
     if support_mode not in ('off', 'magnitude', 'random', 'uniform_matched'):
         raise ValueError('Unknown p_fixed_support')

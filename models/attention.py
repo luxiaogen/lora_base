@@ -888,7 +888,7 @@ class Attention_LoRA(nn.Module):
             svd_score = self._svd_importance(weight) # 硬截断rank=32  覆盖率大概54%
         return svd_score
 
-    def rebuild_dual_masks(self):
+    def rebuild_dual_masks(self, coverage_override=None):
         with torch.no_grad():
             # SVD-only 的 W_pre 分数跨任务不变，可以复用；但每个任务仍按
             # 当前 competence 重新阈值化，使 adaptive coverage 真正生效
@@ -912,6 +912,8 @@ class Attention_LoRA(nn.Module):
                 # 使用能量覆盖，而不是固定 top ratio
                 ## M_g = general_mask = Task 0 时 W_pre 的重要保护区
                 mask_coverage = self.effective_energy_coverage if fixed_coverage is None else fixed_coverage
+                if coverage_override is not None:
+                    mask_coverage = coverage_override
                 self.effective_energy_coverage = mask_coverage
                 protect = _energy_coverage_mask(score, mask_coverage)
             else:

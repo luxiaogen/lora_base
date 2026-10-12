@@ -1313,6 +1313,13 @@ class Learner(BaseLearner):
         with stage_cost(self, 'protection_and_adapter_setup'):
             for module in self._iter_lora_modules():
                 module.before_task(task=self._cur_task)
+            if (self.args.get('dual_mask_depth_coverage', 'off') != 'off'
+                    or self.args.get('dual_mask_depth_strength', 'off') != 'off'
+                    or self.args.get('dual_mask_depth_audit', False)):
+                from utils.depth_permissions import install_depth_permissions
+                self._depth_coverage_center = install_depth_permissions(
+                    self._iter_lora_modules(), self._cur_task, self.args,
+                    center=getattr(self, '_depth_coverage_center', None))
 
         if len(self._multiple_gpus) > 1:
             self._network = torch.nn.DataParallel(self._network, self._multiple_gpus)

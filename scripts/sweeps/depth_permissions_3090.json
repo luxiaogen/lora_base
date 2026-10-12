@@ -1,0 +1,22 @@
+{
+  "name": "depth_permissions", "hours": 10,
+  "base_spec": "budget_verification.json",
+  "common_overrides": {
+    "dual_mask_protection_rule": "static", "dual_mask_task_start_probe": false,
+    "dual_mask_position_norm_match": "off", "dual_mask_position_audit": false,
+    "dual_mask_budget_audit": false, "dual_mask_protection_audit": false,
+    "dual_mask_mechanism_audit": true, "dual_mask_position_signal_audit": false,
+    "p_fixed_support": "off", "p_fixed_support_audit": false,
+    "dual_mask_depth_coverage": "off", "dual_mask_depth_strength": "off",
+    "dual_mask_depth_audit": true
+  },
+  "3090": {
+    "datasets": [{"name": "imgr10", "config": "exps/dlora/imgr10.json", "rank": 64}],
+    "variants": [
+      {"name": "A", "recipe": "F", "overrides": {}},
+      {"name": "B", "recipe": "F", "overrides": {"dual_mask_depth_coverage": "shallow_high"}},
+      {"name": "C", "recipe": "F", "overrides": {"dual_mask_depth_strength": "shallow_high"}},
+      {"name": "D", "recipe": "F", "overrides": {"dual_mask_depth_coverage": "shallow_high", "dual_mask_depth_strength": "shallow_high"}}
+    ]
+  }
+}
