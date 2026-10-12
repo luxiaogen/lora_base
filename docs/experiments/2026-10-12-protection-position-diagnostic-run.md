@@ -28,3 +28,9 @@
 目前没有正式完整成绩，不启动残差三组、Fisher训练、5090或多seed。普通F历史约65分钟，额外求导和诊断成本以实际日志计，不提前保证结束时刻。启动核验已归档CPU回归、已完成短测原始日志、manifest/active/queue及正式启动run.json；这不是T10完成归档。
 
 [预注册计划](../plans/2026-10-12-protection-position-diagnostic.md)；[入口说明](../../scripts/README_protection_position_diagnostic.md)；[实验卡](实验日志/DualMask/保护位置诊断/DM-B-261012-003.md)。后续运行身份以服务器manifest、active.json、queue.json及ps为准，不能复用此处历史PID。
+
+## 完整结束
+
+21:53正式一组T10成功结束，退出码0，耗时65.8649分钟；十阶段、200个epoch及六状态诊断全部完整。随后核验外层、队列和训练PID均已退出。上述启动时“目前没有正式完整成绩”等是历史快照，不是当前状态。
+
+Average 87.273、Last 82.55、Old 82.11、New 86.70、StageOld 86.497、StageNew 86.494、Forgetting 5.6644。真实残差有旧类margin线索，但新类margin下降、旧类准确率未提高，不采用为有效新组件，不自动追加残差训练。正式日志下载SHA与服务器一致，完整数据、图及快照已归档，见[完成报告](2026-10-12-protection-position-diagnostic-results.md)。

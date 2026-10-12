@@ -12,7 +12,7 @@
 
 ## 状态与授权边界
 
-- 日期：2026-10-12，状态：formal-running；默认关闭的钩子和独立入口已实现并推送。17项专项测试、本地905项轻量测试（15跳过）、服务器896项及GPU短测通过，独立审查与启动门禁复核通过。20:49核验唯一正式F已启动，完整T10尚未结束；提交、PID、日志和启动证据见[运行记录](../experiments/2026-10-12-protection-position-diagnostic-run.md)。
+- 日期：2026-10-12，状态：completed-results-archived；默认关闭的钩子和独立入口已实现并推送。17项专项测试、本地905项轻量测试（15跳过）、服务器896项及GPU短测通过。21:53唯一正式F完整T10成功，六状态诊断完整。Average/Last为87.273/82.55；真实残差暂未显示净优势，不自动追加训练。见[完成报告](../experiments/2026-10-12-protection-position-diagnostic-results.md)与[运行记录](../experiments/2026-10-12-protection-position-diagnostic-run.md)。
 - 先等待固定 P 支持 A/B/C/D 四组完整结束；不根据中间成绩取消组别，不改运行中的服务器代码。
 - 本阶段仅规划 3090 一组正式 F，以及一组 GPU 短测。5090、完整残差消融、特权 Fisher 训练及多 seed 均不自动启动。
 - 不新建服务器 worktree、不覆盖本机数据 JSON、不保存 checkpoint 或逐任务 QKV/分类头快照。
