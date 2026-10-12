@@ -42,7 +42,7 @@ assert not apps, 'GPU is still occupied; continuation paused: ' + apps
 PY
 test "$(git rev-parse HEAD)" = fa53a839d4a8df7edd28afdf230b577b548179b6
 git diff --quiet -- models methods utils scripts main.py trainer.py test
-git fetch origin codex/mask-budget-comparison-20260924
+git fetch /tmp/dualmask-final-f.AFS4bT/final_f.bundle HEAD
 git merge --ff-only "$REVISION"
 test "$(git rev-parse HEAD)" = "$REVISION"
 export PATH=/home/shengqin/anaconda3/envs/ICML2026_LoDA/bin:/usr/local/bin:/usr/bin:/bin

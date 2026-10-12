@@ -33,6 +33,8 @@ F为ImageNet-R T10，W_pre谱重要性质量覆盖0.90、rank64/64、γ0.5/0.75�
 - 执行的等待：`lwait 1903745 "bash /tmp/dualmask-final-f.AFS4bT/after_queue_3090.sh"`。
 - 旧整队退出后，先核对四组完整T10、200epochs、有限指标、源码指纹和GPU空闲，再精确快进到训练提交、运行服务器CPU回归，最后启动本轮六组。任一步失败停止，不自动重试。
 
+远端Git只读预检发现3090公钥认证不可用。未更改凭据，改为上传已推送提交的Git bundle至`/tmp/dualmask-final-f.AFS4bT/final_f.bundle`；bundle前置提交为当前fa53a83，包含d9cb728。回调在旧队列成功结束后才fetch本地bundle并精确merge到d9cb728，不把bundle中附带的文档提交当作训练版本。
+
 5090原项目`/mnt/disk1/lys/CIL/code/baseline/lora_base`，SSH 5090d，RTX5090D，Python3.10.20/torch2.7.1+cu128/timm0.6.12。当前项目没有训练进程，已精确快进到上述训练提交；五份本机数据JSON的SHA256前后逐项一致。GPU上另一个独立项目进程PID3634279仍在运行，没有停止或修改该项目。
 
 - 本轮Fish lwait PID：3655882；不是新训练队列PID。
