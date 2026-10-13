@@ -46,7 +46,7 @@ def read_run(directory, record):
     expected_epochs = {(task, epoch, layer, branch, projection)
         for task in range(10) for epoch in range(1, 21) for layer in range(12)
         for branch in (('S',) if task == 0 else
-            ('Single',) if snapshot['effective_config'].get('dual_mask_branch_layout') == 'single' else ('S', 'P'))
+            ('Single',) if snapshot['effective_config'].get('dual_mask_branch_layout') in ('single', 'plain_lora') else ('S', 'P'))
         for projection in ('Q', 'K', 'V')}
     expected_diagnostics = {(task, epoch, partition) for task in (1, 5, 9)
         for epoch in (1, 5, 10, 20) for partition in ('old', 'new')}

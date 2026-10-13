@@ -131,7 +131,14 @@ def normalize_dualmask_config(config: dict) -> dict:
                 strength, bounded), RuntimeWarning, stacklevel=2)
             config['dual_mask_fixed_protect_strength'] = bounded
     task_count = config.get('max_tasks', config.get('total_sessions', 2))
-    if (int(task_count) > 1 and config.get('dual_mask_branch_layout', 'dual') == 'single'
+    if config.get('dual_mask_branch_layout') == 'plain_lora':
+        required = dict(use_slora=True, use_plora=True, dual_mask_permission_mode='symmetric_soft',
+                        dual_mask_fixed_protect_strength=0, dual_mask_s_conflict_enabled=False,
+                        dual_mask_p_conflict_enabled=False, dual_mask_reg_weight=0,
+                        dual_mask_position_norm_match='off')
+        if any(config.get(key) != value for key, value in required.items()):
+            raise ValueError('plain_lora requires unmasked updates without mask regularization')
+    if (int(task_count) > 1 and config.get('dual_mask_branch_layout', 'dual') in ('single', 'plain_lora')
             and int(config.get('sp_staged_s_epochs', 0)) > 0):
         raise ValueError('single branch layout does not support S/P staged training')
     return config

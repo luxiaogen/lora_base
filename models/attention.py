@@ -711,10 +711,11 @@ class Attention_LoRA(nn.Module):
 
     def _single_branch_active(self, task=None):
         task = self.cur_task if task is None else int(task)
-        return task > 0 and self.args.get('dual_mask_branch_layout', 'dual') == 'single'
+        return task > 0 and self.args.get('dual_mask_branch_layout', 'dual') in ('single', 'plain_lora')
 
     def _shared_gamma(self, task=None):
-        return 1.0 if self._single_branch_active(task) else float(self.slora_gamma)
+        folded = self._single_branch_active(task) and self.args.get('dual_mask_branch_layout') == 'single'
+        return 1.0 if folded else float(self.slora_gamma)
 
     def before_task(self, task: int):
 
@@ -768,12 +769,20 @@ class Attention_LoRA(nn.Module):
         if self._single_branch_active(t):
             # Reuse the original draws and modules; replacing parameters draws no RNG.
             shared, private = self.S_lora[t], self.P_lora[t]
-            shared.A.weight = nn.Parameter(torch.cat((
-                self.slora_gamma * shared.A_weight.detach(),
-                self.plora_gamma * private.A_weight.detach())), requires_grad=False)
-            shared.B.weight = nn.Parameter(torch.cat((shared.B_weight.detach(),
-                                                      private.B_weight.detach()), dim=1))
-            shared.r = rs + p_rank
+            if self.args.get('dual_mask_branch_layout') == 'plain_lora':
+                # packed QKV: AB均训练时取3/4总rank，与原双支只训练B的参数量匹配。
+                shared.r = 3 * (rs + p_rank) // 4
+                shared.A.weight = nn.Parameter(torch.cat((shared.A_weight.detach(),
+                    private.A_weight.detach()))[:shared.r].clone(), requires_grad=False)
+                shared.B.weight = nn.Parameter(torch.cat((shared.B_weight.detach(),
+                    private.B_weight.detach()), dim=1)[:, :shared.r].contiguous())
+            else:
+                shared.A.weight = nn.Parameter(torch.cat((
+                    self.slora_gamma * shared.A_weight.detach(),
+                    self.plora_gamma * private.A_weight.detach())), requires_grad=False)
+                shared.B.weight = nn.Parameter(torch.cat((shared.B_weight.detach(),
+                                                          private.B_weight.detach()), dim=1))
+                shared.r = rs + p_rank
             shared.A.out_features = shared.r
             shared.B.in_features = shared.r
             self.P_lora[t] = None
@@ -782,6 +791,11 @@ class Attention_LoRA(nn.Module):
                 source_gammas=[self.slora_gamma, self.plora_gamma],
                 factor_parameters=sum(p.numel() for p in shared.parameters()),
                 trainable_B_parameters=shared.B_weight.numel())))
+            if self.args.get('dual_mask_branch_layout') == 'plain_lora':
+                logging.info('PlainLoRAAllocation %s', json.dumps(dict(task=t,
+                    layer=self.layer_idx, rank=shared.r, gamma=self._shared_gamma(t),
+                    trainable_AB_parameters=sum(p.numel() for p in shared.parameters()),
+                    reference_trainable_B_parameters=self.dim * 3 * (rs + p_rank))))
 
         self.rebuild_dual_masks()  # Dual masks rebuilt: W0 protect density 0.5000, plastic density 0.5000
         if t > 0 and any(self.args.get(key) is not None for key in
@@ -827,7 +841,7 @@ class Attention_LoRA(nn.Module):
             self.S_lora[task].B.weight.requires_grad_(True)
             return
 
-        if task == 0:
+        if task == 0 or self.args.get('dual_mask_branch_layout') == 'plain_lora':
             self.S_lora[task].A.weight.requires_grad_(True)
             self.S_lora[task].B.weight.requires_grad_(True)
             return

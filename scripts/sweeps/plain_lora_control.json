@@ -1,0 +1,11 @@
+{
+  "name": "plain_lora_control",
+  "hours": 2,
+  "overrides": {
+    "dual_mask_branch_layout": "plain_lora",
+    "dual_mask_permission_mode": "symmetric_soft",
+    "dual_mask_fixed_protect_strength": 0,
+    "dual_mask_s_conflict_enabled": false,
+    "dual_mask_p_conflict_enabled": false
+  }
+}
