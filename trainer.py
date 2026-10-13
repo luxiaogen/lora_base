@@ -1,369 +1,226 @@
-import os
-import os.path
-import sys
-import logging
-import copy
+"""固定 B 的任务调度、简洁日志和可核对的运行记录。"""
+from datetime import datetime, timezone
+from importlib import metadata
+import hashlib
 import json
-import time
-import torch
-import numpy as np
-from utils import factory
-from utils.data_manager import DataManager
-from utils.toolkit import count_parameters
+import logging
+import os
+from pathlib import Path
+import platform
 import random
+import subprocess
+import sys
+import time
 
-def _init_experiment_tracker(args):
-    backend = str(args.get('experiment_tracker', 'none')).strip().lower()
-    if backend not in ('none', 'tensorboard', 'wandb'):
-        raise ValueError('experiment_tracker must be one of: none, tensorboard, wandb')
-    if backend == 'none':
-        return None
-    # 实验名称
-    experiment_name = str(args.get('prefix') or args['model_name'])
-    if backend == 'tensorboard':
-        try:
-            from torch.utils.tensorboard import SummaryWriter
-        except ImportError as exc:
-            raise RuntimeError(
-                'experiment_tracker=tensorboard requires tensorboard. '
-                'Run: pip install tensorboard'
-            ) from exc
+import numpy as np
+import torch
 
-        log_dir = os.path.join(
-            str(args.get('tensorboard_logdir', 'logs/tensorboard')),
-            str(args['dataset']),
-            '{}_tasks'.format(args['total_sessions']),
-            experiment_name,
-            'seed_{}'.format(args['seed']),
-        )
-        writer = SummaryWriter(log_dir=log_dir)
-        writer.add_text(
-            'config',
-            '```json\n{}\n```'.format(
-                json.dumps(args, default=str, indent=2, sort_keys=True)
-            ),
-            global_step=0,
-        )
-        return backend, writer
-
-    try:
-        import wandb
-    except ImportError as exc:
-        raise RuntimeError('experiment_tracker=wandb requires wandb. Run: pip install wandb') from exc
-
-    group = args.get('wandb_group') or '{}_{}tasks_{}'.format(args['dataset'], args['total_sessions'], experiment_name)
-    tags = args.get('wandb_tags', [args['dataset'], args['model_name']])
-    if isinstance(tags, str):
-        tags = [item.strip() for item in tags.split(',') if item.strip()]
-    run = wandb.init(
-        project=str(args.get('wandb_project', 'LoDA_ICML2026')),
-        entity=args.get('wandb_entity') or None,
-        name='{}_{}_seed{}'.format(args['dataset'], experiment_name, args['seed']),
-        group=str(group),
-        tags=list(tags),
-        config=copy.deepcopy(args),
-        mode=str(args.get('wandb_mode', 'online')),
-    )
-    return backend, run
+from methods.dlora import Learner
+from utils.data_manager import DataManager
 
 
-def _write_experiment_metrics(tracker, metrics, step):
-    backend, handle = tracker
-    if backend == 'wandb':
-        handle.log(metrics, step=int(step))
-        return
-
-    for name, value in metrics.items():
-        handle.add_scalar(name, value, global_step=int(step))
-    handle.flush()
+ROOT = Path(__file__).resolve().parent
+LOG_FORMAT = '%(asctime)s [%(filename)s] => %(message)s'
+REFERENCE_REVISION = 'fa53a839d4a8df7edd28afdf230b577b548179b6'
 
 
-def _close_experiment_tracker(tracker):
-    if tracker is None:
-        return
-    backend, handle = tracker
-    if backend == 'wandb':
-        handle.finish()
-    else:
-        handle.close()
-
-
-def _last_metric(model, attribute):
-    values = getattr(model, attribute, None)
-    if values is None or len(values) == 0:
-        return None
-    return float(values[-1])
-
-
-def _log_experiment_task(
-    tracker,
-    model,
-    task_id,
-    cnn_accy,
-    cnn_accy_with_task,
-    task_prediction_accuracy,
-    w0_accuracy,
-    train_seconds,
-    eval_seconds,
-    forgetting=None,
-    backward=None,
-):
-    if tracker is None:
-        return
-
-    grouped = cnn_accy.get('grouped', {})
-    metrics = {
-        'task/index': int(task_id),
-        'accuracy/top1': float(cnn_accy['top1']),
-        'accuracy/with_task_top1': float(cnn_accy_with_task['top1']),
-        'task_prediction/accuracy': float(task_prediction_accuracy) * 100.0,
-        'time/train_seconds': float(train_seconds),
-        'time/eval_seconds': float(eval_seconds),
-    }
-    for name in ('old', 'new'):
-        if name in grouped:
-            metrics['accuracy/{}'.format(name)] = float(grouped[name])
-    if w0_accuracy is not None:
-        metrics['w0/ncm_top1'] = float(w0_accuracy)
-    if forgetting is not None:
-        metrics['continual/forgetting'] = float(forgetting)
-        metrics['continual/backward'] = float(backward)
-
-    competence = getattr(model, '_w0_competence', None)
-    if competence is not None:
-        metrics['w0/competence'] = float(competence) * 100.0
-
-
-    for attribute, name in (
-        ('_w0_competence_new', 'w0/competence_new'),
-        ('_w0_competence_all_seen', 'w0/competence_all_seen'),
-        ('_w0_old_overlap_risk', 'w0/old_overlap_risk'),
-        ('_w0_control_competence', 'w0/control_competence'),
-    ):
-        value = getattr(model, attribute, None)
-        if value is not None:
-            metrics[name] = float(value) * 100.0
-    for attribute, name in (('_w0_ncm_loss_new', 'w0/ncm_loss_new'),('_w0_plasticity_demand', 'w0/plasticity_demand'),):
-        value = getattr(model, attribute, None)
-        if value is not None:
-            metrics[name] = float(value)
-
-    functional_merge = getattr(model, '_functional_merge_calibration', None)
-    if functional_merge is not None:
-        for name, value in functional_merge.items():
-            metrics['dual_mask/functional_merge/{}'.format(name)] = float(value)
-
-    for attribute, name in (('_feature_drift_curve', 'w0/feature_drift'),('_weight_drift_curve', 'w0/weight_drift_mean'),):
-        value = _last_metric(model, attribute)
-        if value is not None:
-            metrics[name] = value
-
-    for name, value in getattr(model,'_last_epoch_training_loss_metrics',{},).items():
-        metrics['train/{}'.format(name)] = float(value)
-
-    iter_modules = getattr(model, '_iter_lora_modules', None)
-    if callable(iter_modules):
-        modules = list(iter_modules())
-        if modules:
-            first_module = modules[0]
-            metrics['dual_mask/coverage'] = float(first_module.effective_energy_coverage)
-            metrics['dual_mask/protect_strength'] = float(first_module.effective_protect_strength)
-            metrics['dual_mask/private_rank'] = int(first_module.current_private_rank)
-            for layer_idx, module in enumerate(modules):
-                metrics['dual_mask/layer_{}/protect_density'.format(layer_idx)] = float(module.general_mask.detach().float().mean().item())
-                metrics['dual_mask/layer_{}/protected_importance_mean'.format(layer_idx)] = float((module.general_mask.detach().float() * module.w0_importance.detach().float()).mean().item())
-
-                for attribute, name in (
-                    ('last_conflict_entropy', 'conflict_entropy'),
-                    ('last_conflict_top10_energy', 'conflict_top10_energy'),
-                    ('last_conflict_energy50_ratio', 'conflict_energy50_ratio'),
-                    ('last_conflict_gate_suppression', 'conflict_gate_suppression'),
-                    ('last_safe_suppression', 'safe_suppression'),
-                    ('last_effective_conflict_ratio', 'effective_conflict_ratio'),
-                    ('last_effective_conflict_strength', 'effective_conflict_strength'),
-                    ('last_private_conflict_mask_overlap', 'private_conflict_mask_overlap'),
-                    ('last_private_conflict_energy_overlap', 'private_conflict_energy_overlap'),
-                    ('last_private_conflict_gate_suppression', 'private_conflict_gate_suppression'),
-                ):
-                    value = getattr(module, attribute, None)
-                    if value is not None:
-                        metrics['dual_mask/layer_{}/{}'.format(layer_idx, name)] = (float(value.detach().item()))
-
-    _write_experiment_metrics(tracker, metrics, task_id)
-
-
-def _log_experiment_summary(tracker,cnn_curve,w0_curve,task_prediction_curve,elapsed_seconds,):
-    if tracker is None:
-        return
-
-    metrics = {
-        'summary/average_accuracy': float(np.mean(cnn_curve)),
-        'summary/last_accuracy': float(cnn_curve[-1]),
-        'summary/task_prediction_average': float(np.mean(task_prediction_curve)) * 100.0,
-        'summary/task_prediction_last': float(task_prediction_curve[-1]) * 100.0,
-        'time/run_seconds': float(elapsed_seconds),
-    }
-    if w0_curve:
-        metrics['summary/w0_ncm_average'] = float(np.mean(w0_curve))
-        metrics['summary/w0_ncm_last'] = float(w0_curve[-1])
-    _write_experiment_metrics(tracker, metrics, len(cnn_curve))
-
-
-def train(args):
-    start_time = time.time()
-    seed_list = copy.deepcopy(args['seed'])
-    device = copy.deepcopy(args['device'])
-    device = device.split(',')
-
-    for seed in seed_list:
-        args['seed'] = seed
-        args['device'] = device
-        experiment_tracker = _init_experiment_tracker(args)
-        try:
-            _train(args, experiment_tracker=experiment_tracker)
-        finally:
-            _close_experiment_tracker(experiment_tracker)
-
-    total_time = time.time() - start_time
-    logging.info('Total experiment time: {:.2f}s ({:.2f}min, {:.2f}h)'.format(total_time, total_time / 60, total_time / 3600))
-
-def _train(args, experiment_tracker=None):
-    run_start_time = time.time()
-
-    if args["ca"]:
-        prefix_head = "ca"
-    else:
-        prefix_head = "standard_head"
-
-    prefix_lora = args["prefix"] # rank=64
-    if prefix_lora != "":
-        prefix_lora += "_"
-
-    if not args["use_slora"] and not args["use_plora"]:
-        prefix_lora += 'seq_lora'
-    else:
-        pass
-
-    # rank=64_seq_lora
-    logdir = 'logs/{}/{}_tasks/{}/{}'.format(args['dataset'], args['total_sessions'], prefix_head, prefix_lora)
-    args['logdir'] = logdir # logs/ImageNet_R/20_tasks/standard_head/rank=64_seq_lora
-    # print(logdir)
-    if not os.path.exists(logdir):
-        os.makedirs(logdir)
-    logfilename = os.path.join(logdir, '{}_slora:{}_plora:{}_rank:{}_{}_{}_{}-{}'.format(args['seed'], args["use_slora"], args["use_plora"], args['rank'], args.get("lora_type", "lora"), args['model_name'], args['optim'], args['lrate']))
-    #logfilename = os.path.join(logdir, '{}_slora:{}_plora:{}_rank:{}_{}_{}_{}-{}'.format(args['seed'], args["use_slora"], args["use_plora"], args['rank'], args["lora_type"], args['model_name'], args['optim'], args['lrate']))
-    logging.basicConfig(
-        level=logging.INFO,format='%(asctime)s [%(filename)s] => %(message)s',force=True,
-        handlers=[ # （双路输出处理器,把日志同时分发给两个目标
-            logging.FileHandler(filename=logfilename + '.log'),
-            logging.StreamHandler(sys.stdout)
-        ]) # logs/CUB/10_tasks/ca/idea3_wpre_adaptive_/1993_slora:True_plora:True_rank:32_lora_dual_mask_branch_sgd-0.005
-    print(logfilename)
-    _set_random(args)
-    _set_device(args)
-    print_args(args)
-    data_manager = DataManager(args['dataset'],args['shuffle'],args['seed'],args['init_cls'],args['increment'],args)
-    model = factory.get_model(args['model_name'], args)
-
-
-    cnn_curve, cnn_curve_with_task, nme_curve, cnn_curve_task = {'top1': []}, {'top1': []}, {'top1': []}, {'top1': []}
-    w0_curve = []
-    for task_id in range(data_manager.nb_tasks):
-        logging.info('All params: {}'.format(count_parameters(model._network)))
-        time_start = time.time()
-        model.incremental_train(data_manager)
-        time_end = time.time()
-        train_seconds = time_end - time_start
-        logging.info('Time:{}'.format(train_seconds))
-        time_start = time.time()
-        cnn_accy, cnn_accy_with_task, nme_accy, cnn_accy_task = model.eval_task()
-
-        w0_accuracy = None
-        if bool(args.get('dual_mask_track_w0_metrics', False)):
-            w0_accuracy = model.eval_w0_task()
-            if w0_accuracy is not None:
-                w0_curve.append(round(w0_accuracy, 2))
-                logging.info('W_pre-only NCM top1 curve: {}'.format(w0_curve))
-
-        time_end = time.time()
-        eval_seconds = time_end - time_start
-        logging.info('Time:{}'.format(eval_seconds))
-        model.after_task()
-
-        logging.info('CNN: {}'.format(cnn_accy['grouped']))
-        cnn_curve['top1'].append(cnn_accy['top1'])
-        cnn_curve_with_task['top1'].append(cnn_accy_with_task['top1'])
-        cnn_curve_task['top1'].append(cnn_accy_task)
-        # 不知道 task id，在所有已见类里选
-        logging.info('CNN top1 curve: {}'.format(cnn_curve['top1']))
-        # 知道真实 task id，只在该 task 的类里选
-        logging.info('CNN top1 with task curve: {}'.format(cnn_curve_with_task['top1'])) # 已知 Task-ID 时的局部准确率
-        # logging.info('CNN top1 task curve: {}'.format(cnn_curve_task['top1']))
-        task_pred_curve = [round(acc * 100, 2) for acc in cnn_curve_task['top1']]
-        task_pred_avg = round(float(np.mean(cnn_curve_task['top1']) * 100.0), 2)
-        logging.info('Task Prediction Accuracy curve (%): {}'.format(task_pred_curve))
-
-        """
-            Forgetting 0.0235 →平均而言，历史旧 Task 的准确率相比各自的历史最高点只下降了 2.35%（抗遗忘性能优秀）
-            Backward -0.0210 → 平均而言，当前旧 Task 的准确率比刚学完时低了 2.10%。
-        """
-        forgetting = None
-        backward = None
-        if task_id > 0:
-            diagonal = np.diag(model.acc_matrix)
-            # Forgetting: 历史旧 Task 的历史最高准确率 - 当前测试准确率 的平均值
-            forgetting = np.mean((np.max(model.acc_matrix, axis=1) - model.acc_matrix[:, task_id])[:task_id])
-            # BWT / 后向知识迁移: 当前测试准确率 - 刚学完该 Task 时的对角线准确率的平均值
-            backward = np.mean((model.acc_matrix[:, task_id] - diagonal)[:task_id])
-
-            result_str = "Forgetting: {:.4f}\tBackward: {:.4f}".format(forgetting, backward)
-            logging.info(result_str)
-
-        _log_experiment_task(experiment_tracker,model,task_id,cnn_accy,cnn_accy_with_task,cnn_accy_task,
-                             w0_accuracy,train_seconds,eval_seconds,forgetting,backward,)
-
-    logging.info('Accuracy Matrix: \n {}'.format(model.acc_matrix.T.round(2)))
-    logging.info('Average Accuracy: {}'.format(np.mean(cnn_curve['top1'])))
-    logging.info('Last Accuracy: {}'.format(cnn_curve['top1'][-1]))
-
-    if w0_curve:
-        logging.info('W_pre-only NCM Average Accuracy: {}'.format(np.mean(w0_curve)))
-        logging.info('W_pre-only NCM Last Accuracy: {}'.format(w0_curve[-1]))
-
-    logging.info('Task Prediction Accuracy average (%): {:.2f}'.format(task_pred_avg))
-    logging.info('Final Task Prediction Accuracy (%): {:.2f}'.format(cnn_curve_task['top1'][-1] * 100.0))
-    _log_experiment_summary(experiment_tracker,cnn_curve['top1'],w0_curve,cnn_curve_task['top1'],time.time() - run_start_time,)
-
-def _set_device(args):
-    device_type = args['device']
-    gpus = []
-
-    for device in device_type:
-        if str(device) == '-1':
-            device = torch.device('cpu')
-        else:
-            device = torch.device('cuda:{}'.format(device))
-
-        gpus.append(device)
-
-    args['device'] = gpus
+def _write_json(path, payload):
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str) + '\n',
+                    encoding='utf-8')
 
 
 def _set_random(args):
-    random.seed(args["seed"])
-    np.random.seed(args["seed"])
+    # 与参考 _train 保持相同的调用位置及随机初始化顺序。
+    random.seed(args['seed'])
+    np.random.seed(args['seed'])
     torch.manual_seed(args['seed'])
     if torch.cuda.is_available():
         torch.cuda.manual_seed(args['seed'])
         torch.cuda.manual_seed_all(args['seed'])
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-    if args.get('disable_fused_sdpa', False):
-        torch.backends.cuda.enable_flash_sdp(False)
-        torch.backends.cuda.enable_mem_efficient_sdp(False)
-        torch.backends.cuda.enable_math_sdp(True)
+    torch.backends.cuda.enable_flash_sdp(False)
+    torch.backends.cuda.enable_mem_efficient_sdp(False)
+    torch.backends.cuda.enable_math_sdp(True)
 
 
-def print_args(args):
-    for key, value in args.items():
-        logging.info('{}: {}'.format(key, value))
+def _set_device(args):
+    device = str(args['device'])
+    args['device'] = [torch.device('cpu' if device in ('cpu', '-1')
+                                 else device if device.startswith('cuda:')
+                                 else 'cuda:{}'.format(device))]
+
+
+def _metadata(args):
+    revision, dirty = None, None
+    git_root = subprocess.run(['git', 'rev-parse', '--show-toplevel'], cwd=ROOT,
+                              capture_output=True, text=True)
+    if git_root.returncode == 0 and Path(git_root.stdout.strip()).resolve() == ROOT:
+        revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
+        dirty = bool(subprocess.check_output(['git', 'status', '--porcelain'], cwd=ROOT, text=True).strip())
+    source_hashes = {
+        str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(ROOT.rglob('*'))
+        if path.is_file() and path.suffix in ('.py', '.json', '.sh')
+        and not {'runs', 'logs', '.git'} & set(path.relative_to(ROOT).parts)
+        and '__pycache__' not in path.parts
+    }
+    packages = {}
+    for name in ('torch', 'torchvision', 'timm', 'numpy', 'scipy', 'Pillow'):
+        try:
+            packages[name] = metadata.version(name)
+        except metadata.PackageNotFoundError:
+            packages[name] = None
+    return {
+        'started_at_utc': datetime.now(timezone.utc).isoformat(),
+        'pid': os.getpid(), 'reference_revision': REFERENCE_REVISION,
+        'source_revision': revision, 'source_dirty': dirty,
+        'python': platform.python_version(), 'packages': packages,
+        'cuda': torch.version.cuda, 'devices': [str(d) for d in args['device']],
+        'gpu_names': [torch.cuda.get_device_name(d) for d in args['device'] if d.type == 'cuda'],
+        'argv': sys.argv, 'working_directory': str(Path.cwd()),
+        'bundle_directory': str(ROOT), 'source_sha256': source_hashes,
+        'effective_config': args,
+        'recipe': {
+            'name': 'old-calibrated-depth-B', 'S_rank': args['rank'], 'P_rank': args['rank'],
+            'task0_P_init_rank': args['task0_p_init_rank'], 'task0_P_active': False,
+            'svd_energy_coverage': args['svd_energy_coverage'],
+            'protect_alpha': args['protect_strength'],
+            'uniform_reference_coverage': args['protect_mass_coverage'],
+            'depth_coverage_span': args['depth_coverage_span'],
+            'depth_center': 'calibrate once at Task1 to match uniform reference protected count',
+            'conflict_score': 'magnitude', 'conflict_scope': 'each branch full QKV',
+            'conflict_exact_top_fraction': args['conflict_top_fraction'],
+            'conflict_base_strength': args['conflict_base_strength'],
+            'beta': 'min(conflict_base_strength * (1 + R_old), 1)',
+            'mask_regularization': 0, 'task0_anchor': args['task0_anchor_weight'], 'sdpa': 'math',
+        },
+    }
+
+
+def _result(tasks, planned_tasks, elapsed_seconds, status, acc_matrix=None):
+    curve = [row['top1'] for row in tasks]
+    last = tasks[-1] if tasks else {}
+    incremental = tasks[1:]
+    summary = {
+        'Average': float(np.mean(curve)) if curve else None,
+        'Last': last.get('top1'), 'Old': last.get('old'), 'New': last.get('new'),
+        'StageOld': float(np.mean([row['old'] for row in incremental])) if incremental else None,
+        'StageNew': float(np.mean([row['new'] for row in incremental])) if incremental else None,
+        'Forgetting': last.get('forgetting'),
+    }
+    return {
+        'status': status, 'updated_at_utc': datetime.now(timezone.utc).isoformat(),
+        'tasks_completed': len(tasks), 'planned_tasks': planned_tasks,
+        'elapsed_seconds': elapsed_seconds, 'tasks': tasks, 'summary': summary,
+        'accuracy_matrix': acc_matrix.tolist() if acc_matrix is not None else None,
+        'average_accuracy': summary['Average'], 'last_accuracy': summary['Last'],
+        'final_old': summary['Old'], 'final_new': summary['New'],
+        'stage_mean_old': summary['StageOld'], 'stage_mean_new': summary['StageNew'],
+        'forgetting': summary['Forgetting'],
+    }
+
+
+def train(args):
+    return _train(dict(args))
+
+
+def _train(args):
+    run_start_time = time.time()
+    output = Path(args['output'])
+    output.mkdir(parents=True, exist_ok=False)
+    args['logdir'] = str(output)
+    logging.basicConfig(level=logging.INFO, format=LOG_FORMAT, force=True,
+                        handlers=[logging.FileHandler(output / 'train.log', encoding='utf-8'),
+                                  logging.StreamHandler(sys.stdout)])
+    _set_random(args)
+    _set_device(args)
+    # metadata读取GPU属性会初始化CUDA；之后才能重置显存统计。
+    run_info = _metadata(args)
+    if args['device'][0].type == 'cuda':
+        torch.cuda.reset_peak_memory_stats(args['device'][0])
+    _write_json(output / 'run_info.json', run_info)
+    _write_json(output / 'effective_config.json', args)
+    tasks = []
+    max_tasks = args['max_tasks']
+    _write_json(output / 'result.json', _result(tasks, max_tasks, 0., 'running'))
+    logging.info('Start DualMask B | seed=%s device=%s tasks=%s/10 epochs=%s CA=%s '
+                 '| calibrated depth coverage alpha=%s S/P=%s/%s | Task0 P_init=%s inactive '
+                 'anchor=%s SVD_energy=%s | output=%s',
+                 args['seed'], args['device'][0], max_tasks, args['epochs'], args['ca_epochs'],
+                 args['protect_strength'], args['rank'], args['rank'], args['task0_p_init_rank'],
+                 args['task0_anchor_weight'], args['svd_energy_coverage'], output)
+    model = None
+    try:
+        data_manager = DataManager(args['dataset'], args['shuffle'], args['seed'],
+                                   args['init_cls'], args['increment'], args)
+        run_info['class_order'] = data_manager._class_order
+        _write_json(output / 'run_info.json', run_info)
+        model = Learner(args)
+        for task_id in range(max_tasks):
+            started = time.time()
+            model.incremental_train(data_manager)
+            train_seconds = time.time() - started
+            started = time.time()
+            cnn, with_task, nme, task_prediction = model.eval_task()
+            # 此测试集遍历会推进 DataLoader 随机状态，不能只保留记录而删掉调用。
+            w0_accuracy = model.eval_w0_task()
+            eval_seconds = time.time() - started
+            model.after_task()
+            forgetting = backward = None
+            if task_id > 0:
+                diagonal = np.diag(model.acc_matrix)
+                forgetting = float(np.mean((np.max(model.acc_matrix, axis=1)
+                                            - model.acc_matrix[:, task_id])[:task_id]))
+                backward = float(np.mean((model.acc_matrix[:, task_id] - diagonal)[:task_id]))
+            row = {
+                'task': task_id, 'top1': float(cnn['top1']),
+                'old': float(cnn['grouped']['old']), 'new': float(cnn['grouped']['new']),
+                'grouped': {key: float(value) for key, value in cnn['grouped'].items()},
+                'with_task_top1': float(with_task['top1']),
+                'nme_top1': float(nme['top1']) if nme is not None else None,
+                'task_prediction_accuracy': float(task_prediction),
+                'w0_top1': float(w0_accuracy) if w0_accuracy is not None else None,
+                'forgetting': forgetting, 'backward': backward,
+                'train_seconds': train_seconds, 'eval_seconds': eval_seconds,
+                'controls': {
+                    'coverage_center': model._depth_coverage_center,
+                    'layer_coverage': [m.effective_energy_coverage for m in model._iter_lora_modules()],
+                    'layer_protected_counts': [int(m.general_mask.sum()) for m in model._iter_lora_modules()],
+                    'alpha': [m.effective_protect_strength for m in model._iter_lora_modules()],
+                    'beta': [float(m._conflict_parameters()[1]) for m in model._iter_lora_modules()],
+                    'C_new': model._w0_competence_new, 'C_all': model._w0_competence_all_seen,
+                    'R_old': model._w0_old_overlap_risk,
+                    'S_rank': [m.rank for m in model._iter_lora_modules()],
+                    'P_init_rank': [m.task0_p_init_rank if task_id == 0 else m.rank
+                                    for m in model._iter_lora_modules()],
+                    'P_active': task_id > 0, 'protection_active': task_id > 0,
+                    'svd_retained_rank': [m.last_svd_rank for m in model._iter_lora_modules()],
+                    'qkv_protected_counts': [[int(block.sum()) for block in m.general_mask.chunk(3)]
+                                             for m in model._iter_lora_modules()],
+                },
+            }
+            tasks.append(row)
+            _write_json(output / 'result.json', _result(
+                tasks, max_tasks, time.time() - run_start_time, 'running', model.acc_matrix))
+            logging.info('CNN: %s', cnn['grouped'])
+            logging.info('CNN top1 curve: %s', [task['top1'] for task in tasks])
+            if forgetting is not None:
+                logging.info('Forgetting: %.4f\tBackward: %.4f', forgetting, backward)
+    except BaseException:
+        _write_json(output / 'result.json', _result(
+            tasks, max_tasks, time.time() - run_start_time, 'failed',
+            model.acc_matrix if model is not None else None))
+        raise
+    result = _result(tasks, max_tasks, time.time() - run_start_time, 'completed', model.acc_matrix)
+    result['gpu_peak_allocated_bytes'] = (torch.cuda.max_memory_allocated(args['device'][0])
+                                          if args['device'][0].type == 'cuda' else None)
+    _write_json(output / 'result.json', result)
+    summary = result['summary']
+    logging.info('Accuracy Matrix: \n %s', model.acc_matrix.T.round(2))
+    logging.info('Average Accuracy: %s', summary['Average'])
+    logging.info('Last Accuracy: %s', summary['Last'])
+    logging.info('Old/New: %.2f/%.2f | StageOld/StageNew: %s/%s | Forgetting: %s',
+                 summary['Old'], summary['New'], summary['StageOld'], summary['StageNew'], summary['Forgetting'])
+    logging.info('Total experiment time: %.2fs (%.2fmin)', result['elapsed_seconds'], result['elapsed_seconds'] / 60.)
+    return result
