@@ -1,0 +1,22 @@
+{
+  "source": "/home/shengqin/lys/baseline/LoDA_main_debug_1013",
+  "local_readonly_archive": "/private/tmp/loda-main-debug-explain.mxNvSa",
+  "recipe": "Frozen debug B: full spectrum, Task0 P init64, calibrated depth coverage, alpha0.5, S/P64/64",
+  "note": "Archived before this task. This task never connects to 3090. Historical scores are not reused as matched controls.",
+  "source_sha256": {
+    "exps/dlora/imgr10.json": "c0346ed364c54c044d951b2af2632e3b0b0d0ccec4d92105578c39d8d403e668",
+    "main.py": "addd79f8ad38b2198c590e5fdde3e32d4f55d1a6a1842e04503689da05b41254",
+    "methods/base.py": "5976bdd31fe6a7f9e30d6d70e82c5e76df00f7145faff6912ef9e724f7b3ebc4",
+    "methods/dlora.py": "ff45419550dbefba10da752f1835bd145bf43655a25f59a49138ea1e44f96bb0",
+    "models/attention.py": "5d7d3167e8f93dea27697824d9024428e26558e2332e37afa22a92da3d75436f",
+    "models/losses.py": "43ddc4f71cc09187d682165d64101ac8c3fc1e61e1ac69840a3a2caab6a74437",
+    "models/network.py": "8ff4cca89fa298c3c9b070be9712730317cdc63e5b0556693e9c3c5b6736a430",
+    "models/vit.py": "c67e9d1099b56711f899253717d207f2f31208678afe25bf181d3725c0ae99d3",
+    "trainer.py": "2cc72d43fa51af1e2fd4525e4030615b10799c5c552348b761662400e9a026fc",
+    "utils/data.py": "7af935a549b61b6f8edddae26ae1c57f9d91e03acdd7bf6165022380bb54e8b0",
+    "utils/data_manager.py": "f6396f046f3774955ff7050e83347d5cc9e3edb22f4e9d81e3b94d0ed1233c99",
+    "utils/depth_permissions.py": "7e4f7c7240e83960ea8df68af700e051e667b74b2749b528e31aed1873df6898",
+    "utils/dual_mask_metrics.py": "bdde25f4696dbc5b0897a4687779698ffc0c7d762bcda6b3d7deda8a1afe81ee",
+    "utils/toolkit.py": "929c76a2fa2e8c427c2e861f306de6aae829527011d3e4ba27fa3fd627f157cb"
+  }
+}
